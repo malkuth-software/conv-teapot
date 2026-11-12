@@ -1697,8 +1697,8 @@ shader run over them is one step of 1/240\,s: gravity, the grab's soft
 pin (the same implicit impulse as on the CPU), contact with the floor,
 friction, rolling resistance and damping, with the CPU engine's
 parameters. The floor is a plane and the collision shape is convex
-hulls, so the contacts are the hull points that reach the floor, and the
-shader goes over all 1280 of them. Each point that approaches the floor
+hulls, so the contacts are the hull's corners that reach the floor, and
+the shader goes over all the candidate points. Each point that approaches the floor
 answers from the velocity the pass began with, by the impulse that stops
 it and the friction that impulse allows, and the body takes the mean of
 the answers, ten times. Taking the answers one after another depended on
@@ -1706,17 +1706,18 @@ the order of the points and sent a teapot dropped in its plane of
 symmetry out of that plane; the mean does not. A body in the floor is
 lifted out by position, not by a velocity it would keep. This is not the
 CPU's solver, which solves a frame's contacts together, and the two are
-not expected to agree step for step. The standard drop comes to rest
-upright in both, at the same height, 0.16 units apart and turned
-$4.7^\circ$ about the vertical. The points that meet the floor
-need not be the hulls' either. In a second mode every grid point is drawn, each step, into a picture of $64\times64$ texels by
-its direction from the centre of mass, with its height as depth, so that
-each texel keeps the lowest point of the surface in its direction, and
-the contact pass goes over those. No hull is used, and the teapot rests
-with its surface on the floor, where the hulls leave it 0.007 in. The
-standard drop is sensitive to which points make contact: in this mode
-it has ended upright with one grid and resting on its lid with another.
-It costs about 15\,ms a frame against 4 to 7. For one body the GPU is the slower
+not expected to agree step for step. The points that can meet the floor
+are found on the GPU as well. A plane touches a body only at corners of
+its convex hull, and a corner of the hull is the farthest point of the
+surface from the centre of mass in its own direction. So every grid
+point is drawn once into a picture of $36\times36$ texels by its
+direction from the centre of mass, with its distance as depth, farthest
+in front, and the 1296 points that remain take the place of the
+engine's hulls. Each is used with its mirror image in the teapot's plane
+of symmetry, so that a teapot dropped in that plane has nothing to turn
+it out of it. With these points the standard drop comes to rest upright
+and unturned, 0.16 units from where the CPU's does, with its surface on
+the floor, where the hulls leave it 0.007 in. For one body the GPU is the slower
 place: a frame's steps with the read-back of the state take 6\,ms,
 against 0.13\,ms on the CPU, most of it waiting for the frame being
 drawn to finish.

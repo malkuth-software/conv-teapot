@@ -113,7 +113,7 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
       <fieldset>
         <legend>Simulation</legend>
         <label class="row">Physics
-          <select id="physics"><option value="hull" selected>on the GPU: hull points meet the floor</option><option value="gpu">on the GPU: the surface itself meets the floor</option><option value="cpu">in the engine (CPU)</option></select></label>
+          <select id="physics"><option value="gpu" selected>on the GPU: contact points found on the GPU</option><option value="hull">on the GPU: the engine's hull points</option><option value="cpu">in the engine (CPU)</option></select></label>
         <button class="primary" id="drop">Drop</button><button id="pause">Run</button><button id="reset">Reset</button>
         <p class="hint">Drag the teapot: it is held at the point you picked. Drag the background, or hold <kbd>Shift</kbd>, to orbit. Scroll to zoom. Double-click to poke. Arrow keys fly the camera, <kbd>Page Up</kbd> and <kbd>Page Down</kbd> raise and lower it, <kbd>Shift</kbd> slows it, <kbd>Home</kbd> returns it.</p>
       </fieldset>
@@ -2531,9 +2531,14 @@ void main() {
   for (int pass = 0; pass < 10; ++pass) {
     vec3 dv = vec3(0.0), dw = vec3(0.0);
     float count = 0.0, pass_push = 0.0;
-    for (int i = 0; i < uCount; ++i) {
-      vec4 point = texelFetch(uPoints, ivec2(i % uWide, i / uWide), 0);
+    // The teapot is the same on both sides of the plane z = 0 at rest, and its
+    // contact points are taken so too: each point and its mirror image. A
+    // teapot dropped in that plane then has nothing to turn it out of it.
+    for (int i = 0; i < 2 * uCount; ++i) {
+      int j = i < uCount ? i : i - uCount;
+      vec4 point = texelFetch(uPoints, ivec2(j % uWide, j / uWide), 0);
       if (point.a < 0.5) { continue; }
+      if (i >= uCount) { point.z = -point.z; }
       vec3 r = R * (point.xyz - uCom);
       float height = x.y + r.y - uGround;
       if (height > 0.05) { continue; }
@@ -2587,31 +2592,31 @@ void main() {
 }
 `;
 
-// Which points of the surface may meet the floor this step. Every vertex the
-// GPU has evaluated is drawn as a point into a small picture, placed by its
-// direction from the centre of mass (an octahedral map) with its height
-// above the floor as depth: what remains in each texel is the lowest point
-// of the surface in that direction. The contact pass goes over those.
+// The points of the surface that can meet a floor, found on the GPU once per
+// teapot. A plane touches a body only at corners of its convex hull, and a
+// corner of the hull is the farthest point of the surface from the centre
+// of mass in its own direction. So every grid point is drawn into a small
+// picture, placed by its direction from the centre of mass (an octahedral
+// map) with its distance as depth, farthest in front: what remains in each
+// texel is the farthest point of the surface in that direction, and the
+// hull's corners are among those. This takes the place of the engine's
+// convex hulls.
 const CANDIDATE_VERTEX_GLSL = `#version 300 es
 precision highp float;
 precision highp sampler2D;
-uniform sampler2D uState, uGridPoints, uGridNormals;
+uniform sampler2D uGridPoints, uGridNormals;
 uniform vec4 uRect;
 uniform vec3 uCom;
-uniform float uGround;
+uniform float uReach;
 out vec3 vRest;
-vec3 turnBy(vec4 q, vec3 v) { return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v); }
 void main() {
-  vec3 x = texelFetch(uState, ivec2(0, 0), 0).xyz;
-  vec4 q = texelFetch(uState, ivec2(1, 0), 0);
   ivec2 texel = ivec2(int(uRect.x) + gl_VertexID % int(uRect.z), int(uRect.y) + gl_VertexID / int(uRect.z));
-  vec3 aPoint = texelFetch(uGridPoints, texel, 0).xyz;
-  vec3 arm = aPoint - uCom;
-  float height = x.y + turnBy(q, arm).y - uGround;
+  vec3 point = texelFetch(uGridPoints, texel, 0).xyz;
+  vec3 arm = point - uCom;
   vec3 d = arm / max(1e-9, abs(arm.x) + abs(arm.y) + abs(arm.z));
   vec2 at = d.y >= 0.0 ? d.xz : (1.0 - abs(d.zx)) * vec2(d.x >= 0.0 ? 1.0 : -1.0, d.z >= 0.0 ? 1.0 : -1.0);
-  vRest = aPoint;
-  gl_Position = vec4(at * (63.0 / 64.0), clamp(height / 20.0, -0.99, 0.99), 1.0);
+  vRest = point;
+  gl_Position = vec4(at * (35.0 / 36.0), clamp(1.0 - 2.0 * length(arm) / uReach, -0.99, 0.99), 1.0);
   if (texelFetch(uGridNormals, texel, 0).a < 0.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); }   // under a join: not part of the surface
   gl_PointSize = 1.0;
 }
@@ -2648,7 +2653,7 @@ class TeapotPhysics {
     this.still = 0;
     this.running = false;
     this.stepMs = 0;
-    this.onSurface = false;
+    this.onSurface = true;
   }
 
   // The body from the engine: mass, centre of mass, inverse inertia, poke radius, hull points.
@@ -2665,12 +2670,34 @@ class TeapotPhysics {
     for (let k = 0; k < this.count; ++k) { texels.set([points[k * 3], points[k * 3 + 1], points[k * 3 + 2], 1], k * 4); }
     this.gpu.floatTexture('hullPoints', texels, 4);
     this.hullCount = this.count;
+    // The surface's own contact points: the farthest grid point in each direction from the centre of mass.
+    const gl = this.gpu.gl, c = this.candidates.uniforms;
+    const farthest = this.gpu.target('farthestPoints', 36, 36, gl.RGBA32F);   // 1296 directions, about as many points as the engine's hulls have
+    gl.useProgram(this.candidates.program);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, farthest.framebuffer);
+    gl.viewport(0, 0, 36, 36);
+    gl.clearBufferfv(gl.COLOR, 0, [0, 0, 0, 0]);
+    gl.clear(gl.DEPTH_BUFFER_BIT);
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LESS);
+    gl.disable(gl.BLEND);
+    gl.activeTexture(gl.TEXTURE12); gl.bindTexture(gl.TEXTURE_2D, this.gpu.targets.mapSurface.first); gl.uniform1i(c.uGridPoints, 12);
+    gl.activeTexture(gl.TEXTURE13); gl.bindTexture(gl.TEXTURE_2D, this.gpu.targets.mapSurface.second); gl.uniform1i(c.uGridNormals, 13);
+    gl.uniform3fv(c.uCom, this.com);
+    gl.uniform1f(c.uReach, 12.0);
+    gl.bindVertexArray(this.gpu.emptyVao);
+    for (const part of this.gpu.parts) {
+      gl.uniform4fv(c.uRect, part.rect);
+      gl.drawArrays(gl.POINTS, 0, part.rect[2] * part.rect[3]);
+    }
+    gl.depthFunc(gl.LEQUAL);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this.useSurface(this.onSurface);
   }
   // Which points meet the floor: the surface's own, evaluated on the GPU, or the CPU's hull points.
   useSurface(on) {
     this.onSurface = on;
-    this.count = on ? 4096 : this.hullCount;
+    this.count = on ? 1296 : this.hullCount;
   }
 
   // Take the state from a pose (rotation by rows a, translation b), at rest.
@@ -2751,9 +2778,9 @@ class TeapotPhysics {
     gl.disable(gl.DEPTH_TEST);
     gl.disable(gl.BLEND);
     gl.viewport(0, 0, 4, 1);
-    const lowest = this.onSurface ? this.gpu.target('lowestPoints', 64, 64, gl.RGBA32F) : null;
+    const lowest = this.onSurface ? this.gpu.targets.farthestPoints : null;
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, lowest ? lowest.texture : this.gpu.textures.hullPoints); gl.uniform1i(u.uPoints, 1);
-    gl.uniform1i(u.uWide, lowest ? 64 : 2048);
+    gl.uniform1i(u.uWide, lowest ? 36 : 2048);
     gl.uniform1i(u.uCount, this.count);
     gl.uniform3fv(u.uCom, this.com);
     gl.uniform1f(u.uMass, this.mass);
@@ -2776,32 +2803,6 @@ class TeapotPhysics {
     }
     gl.bindVertexArray(this.gpu.emptyVao);
     while (this.accumulator >= h && steps < 16) {
-      if (lowest) {
-        // The lowest point of the surface in every direction, for the pose as it is.
-        const c = this.candidates.uniforms;
-        gl.useProgram(this.candidates.program);
-        gl.bindFramebuffer(gl.FRAMEBUFFER, lowest.framebuffer);
-        gl.viewport(0, 0, 64, 64);
-        gl.clearBufferfv(gl.COLOR, 0, [0, 0, 0, 0]);
-        gl.clear(gl.DEPTH_BUFFER_BIT);
-        gl.enable(gl.DEPTH_TEST);
-        gl.depthFunc(gl.LESS);
-        gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.states[0].texture); gl.uniform1i(c.uState, 0);
-        gl.uniform3fv(c.uCom, this.com);
-        gl.uniform1f(c.uGround, ground);
-        gl.activeTexture(gl.TEXTURE12); gl.bindTexture(gl.TEXTURE_2D, this.gpu.targets.mapSurface.first); gl.uniform1i(c.uGridPoints, 12);
-        gl.activeTexture(gl.TEXTURE13); gl.bindTexture(gl.TEXTURE_2D, this.gpu.targets.mapSurface.second); gl.uniform1i(c.uGridNormals, 13);
-        gl.bindVertexArray(this.gpu.emptyVao);
-        for (const part of this.gpu.parts) {
-          gl.uniform4fv(c.uRect, part.rect);
-          gl.drawArrays(gl.POINTS, 0, part.rect[2] * part.rect[3]);
-        }
-        gl.disable(gl.DEPTH_TEST);
-        gl.depthFunc(gl.LEQUAL);
-        gl.useProgram(this.step.program);
-        gl.viewport(0, 0, 4, 1);
-        gl.bindVertexArray(this.gpu.emptyVao);
-      }
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.states[1].framebuffer);
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.states[0].texture); gl.uniform1i(u.uState, 0);
       gl.drawArrays(gl.TRIANGLES, 0, 3);

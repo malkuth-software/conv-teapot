@@ -17,9 +17,9 @@ The same teapot as the CPU version, drawn and simulated by WebGL 2.
 | Cutaway | GPU | Crossings of the kept half are counted in the stencil buffer; an odd count shows the cut face. |
 | Room light | GPU | The body is drawn from 256 directions; every texel of a map over the parts looks itself up in each picture: open fraction and mean open direction. |
 | Light the body throws on itself | GPU | For each direction the body is peeled into depth layers, each carrying its light; every texel takes the layer it faces. Repeated five times. |
-| Rigid body | GPU | `physics.js`: one fragment shader run over four texels is one step: gravity, the grab's soft pin, contact with the floor, friction, rolling resistance. The state is read back each frame (13 numbers). What meets the floor is either the engine's hull points (the default, 1280 of them) or the surface itself: each step the GPU draws every grid point into a 64 x 64 picture by its direction from the centre of mass, keeping the lowest, and the contact pass goes over those. With the surface the teapot rests exactly on the floor (the hulls leave it 0.007 in); a frame's steps then take about 15 ms against 4 ms. |
+| Rigid body | GPU | `physics.js`: one fragment shader run over four texels is one step: gravity, the grab's soft pin, contact with the floor, friction, rolling resistance. The state is read back each frame (13 numbers). The points that can meet the floor are found on the GPU once per teapot: a plane touches a body only at corners of its convex hull, and those are the farthest points of the surface from the centre of mass in their own directions, so every grid point is drawn into a 36 x 36 picture by direction, keeping the farthest. Each point is used with its mirror image in the teapot's plane of symmetry. The engine's hull points can be chosen instead. |
 | Picking | GPU | Part and (u, v) are drawn to a float target and one pixel is read. |
-| Where the nodes are; the collision hulls | CPU (WebAssembly), once per teapot | The teapot itself: which points of the source surface are its nodes (rows placed by bisection on CONV's error), and convex hulls for the default physics. `main.cpp` hands the nodes over as textures. Nothing on the CPU is evaluated per frame, per vertex or per pixel, and the physics can run without the hulls. |
+| Where the nodes are; mass and inertia | CPU (WebAssembly), once per teapot | The teapot itself: which points of the source surface are its nodes (rows placed by bisection on CONV's error), and the body's mass, centre of mass and inertia, which the engine takes from its convex hulls. `main.cpp` hands the nodes over as textures. Nothing on the CPU is evaluated per frame, per vertex or per pixel. |
 
 ## Measured against the CPU version
 
@@ -27,12 +27,11 @@ The same teapot as the CPU version, drawn and simulated by WebGL 2.
 - Picture at 960 x 600 against the CPU ray tracer, share of pixels differing by more than 8 of 255: porcelain 0.25%, polished floor 0.25%, texture 0.39%, chrome 0.55%, cutaway 0.96%.
 - A frame: 12 ms at 960 x 600, 21 ms at 1920 x 1200 (chrome with its traced bounce: 28 and 54 ms), on the laptop used for the paper, from 66 528 grid points and 132 096 triangles.
 - Room light and gathered light against the CPU's baked renderer: mean difference 1 to 2 of 255. The two estimate the same integrals differently (32 rays a texel there, 256 directions for all texels here).
-- Rigid body: the standard drop comes to rest upright in both, at the same height, 0.16 units apart and turned 4.7 degrees about the vertical. The CPU's solver (zc_phys) solves a frame's contacts together; the shader takes, in ten passes, the mean of what each contact point asks for.
+- Rigid body: the standard drop comes to rest upright and facing the same way in both (the CPU's is turned 0.3 degrees, the GPU's not at all), 0.16 units apart along its path; the GPU's rests with its surface on the floor, the CPU's 0.007 in. The CPU's solver (zc_phys) solves a frame's contacts together; the shader takes, in ten passes, the mean of what each contact point asks for, so the two are not the same step for step.
 
 ## Not the same
 
 - Traced rays meet the grid's triangles, not the surface itself.
-- With the surface itself meeting the floor, the standard drop ends resting on its lid in the current build and upright with the hull points; a tumbling drop is sensitive to which points make contact.
 - For one body the GPU is the slower place for the physics: a frame's steps with the read-back take 6 ms against 0.13 ms on the CPU. The CPU's engine can be chosen in the page.
 
 ## Build
