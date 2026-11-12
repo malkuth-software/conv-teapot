@@ -203,6 +203,10 @@ public:
         desc.hulls = std::move(accepted);
         shape_ = zc::phys::cook(desc);
         hulls_ = desc.hulls.size();
+        collision_points_.clear();
+        for (const zc::phys::HullDesc& hull : desc.hulls) {
+            for (const zc::phys::Vec3& p : hull.points) { collision_points_.push_back(to_model(p)); }
+        }
         {
             // The inverse of the body-frame inertia, for the grab.
             const std::array<double, 9>& a = shape_.inertia;
@@ -226,6 +230,28 @@ public:
     double mass() const { return shape_.mass; }
     bool moved() const { return moved_; }
     bool asleep() const { return world_->all_asleep(); }
+    // For a simulation elsewhere (the GPU's), in the model's axes and length
+    // unit: the points of the collision hulls at rest, the centre of mass, the
+    // inverse of the inertia about it (per kg unit^2), and the radius the
+    // poke turns by.
+    const std::vector<Vec3>& collision_points() const { return collision_points_; }
+    Vec3 centre_of_mass() const { return to_model(shape_.com_offset); }
+    double poke_radius() const { return shape_.radius / metres; }
+    std::array<double, 9> inverse_inertia_model() const {
+        // Model to engine axes: (x, y, z) -> (x, -z, y), a rotation P; the tensor in the model's axes is P^T A P.
+        static constexpr double p[3][3] = {{1, 0, 0}, {0, 0, -1}, {0, 1, 0}};
+        std::array<double, 9> out{};
+        for (int i = 0; i < 3; ++i) {
+            for (int j = 0; j < 3; ++j) {
+                double sum = 0.0;
+                for (int a = 0; a < 3; ++a) {
+                    for (int b = 0; b < 3; ++b) { sum += p[a][i] * inverse_inertia_[std::size_t(a * 3 + b)] * p[b][j]; }
+                }
+                out[std::size_t(i * 3 + j)] = sum * metres * metres;
+            }
+        }
+        return out;
+    }
     double kinetic() const { return world_->kinetic_energy(); }
     std::size_t contacts() const { return world_->contacts().size(); }
     const zc::phys::SolveStats stats() const { return world_->solve_stats(); }
@@ -389,6 +415,7 @@ private:
     std::size_t hulls_ = 0;
     zc::phys::Vec3 grab_local_{}, grab_target_{}; // the held point in the body frame; where the pointer is
     std::array<double, 9> inverse_inertia_{};
+    std::vector<Vec3> collision_points_;
     bool holding_ = false, moved_ = false;
     double accumulator_ = 0.0;
 };

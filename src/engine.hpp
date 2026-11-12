@@ -176,6 +176,11 @@ public:
     Scene scene_now() { return build_scene(); }
     const std::vector<std::size_t>& scene_parts() const { return scene_parts_; }
     const Rigid& pose() const { return pose_now_; }
+    // The pose from a simulation elsewhere: the engine's own is then not run.
+    void set_pose(const Rigid& pose) {
+        pose_now_ = pose;
+        ++pose_;
+    }
     const std::vector<std::unique_ptr<Texture>>& textures() const { return textures_; }
     std::uint64_t shown_signature() const { return signature() + build_count_ * 1000003ull; }
     bool advance(double dt) {

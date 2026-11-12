@@ -16,7 +16,7 @@ constexpr int atlas_width = 2048;
 std::vector<float> cells, shapes, lattice_meta, part_meta, vertices, trim_table, trim_data, trim_table_exact;
 double rest_bounds[4] = {0, 0, 0, 1};
 std::vector<std::uint32_t> indices;
-std::vector<double> state(64, 0.0), evaluated(9, 0.0);
+std::vector<double> state(64, 0.0), evaluated(9, 0.0), body;
 std::uint64_t built_for = 0;
 
 struct LatticeEntry {
@@ -254,6 +254,33 @@ EMSCRIPTEN_KEEPALIVE void tp_pointer(int kind, double x, double y, int orbit, in
     if (kind == 1) { engine->pointer_move(x, y); }
     if (kind == 2) { engine->pointer_up(); }
     if (kind == 3) { engine->poke_at(x, y, part, u, v); }
+}
+// The rigid body for a simulation on the GPU: mass, centre of mass, inverse
+// inertia (9), poke radius, number of collision points, then the points.
+EMSCRIPTEN_KEEPALIVE const double* tp_body() {
+    const tconv::TeapotSim& sim = engine->sim;
+    const tconv::Vec3 com = sim.centre_of_mass();
+    const std::array<double, 9> inverse = sim.inverse_inertia_model();
+    body = {sim.mass(), com.x, com.y, com.z};
+    body.insert(body.end(), inverse.begin(), inverse.end());
+    body.push_back(sim.poke_radius());
+    body.push_back(double(sim.collision_points().size()));
+    for (const tconv::Vec3& p : sim.collision_points()) { body.insert(body.end(), {p.x, p.y, p.z}); }
+    return body.data();
+}
+// The pose from that simulation: rotation by rows, then translation.
+EMSCRIPTEN_KEEPALIVE void tp_pose(double a0, double a1, double a2, double a3, double a4, double a5, double a6, double a7, double a8, double x, double y, double z) {
+    tconv::Rigid pose;
+    const double a[9] = {a0, a1, a2, a3, a4, a5, a6, a7, a8};
+    for (int k = 0; k < 9; ++k) { pose.a[k] = a[k]; }
+    pose.b = tconv::Vec3{x, y, z};
+    engine->set_pose(pose);
+}
+// A point of a shown part as the pose has it now.
+EMSCRIPTEN_KEEPALIVE const double* tp_point(int part, double u, double v) {
+    const tconv::Vec3 p = engine->pose().point(engine->teapot().parts[engine->scene_parts()[std::size_t(part)]]->conv.position(u, v));
+    evaluated[0] = p.x; evaluated[1] = p.y; evaluated[2] = p.z;
+    return evaluated.data();
 }
 EMSCRIPTEN_KEEPALIVE void tp_zoom(double factor) { engine->zoom(factor); }
 // Place the camera: angles in radians about the point looked at.

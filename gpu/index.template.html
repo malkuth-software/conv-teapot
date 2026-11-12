@@ -106,6 +106,8 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
       </fieldset>
       <fieldset>
         <legend>Simulation</legend>
+        <label class="row">Physics
+          <select id="physics"><option value="gpu" selected>on the GPU (a shader step)</option><option value="cpu">in the engine (CPU)</option></select></label>
         <button class="primary" id="drop">Drop</button><button id="pause">Run</button><button id="reset">Reset</button>
         <p class="hint">Drag the teapot: it is held at the point you picked. Drag the background, or hold <kbd>Shift</kbd>, to orbit. Scroll to zoom. Double-click to poke. Arrow keys fly the camera, <kbd>Page Up</kbd> and <kbd>Page Down</kbd> raise and lower it, <kbd>Shift</kbd> slows it, <kbd>Home</kbd> returns it.</p>
       </fieldset>
@@ -141,6 +143,20 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
   const held = new Set();
   const flightKeys = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown'];
   let slow = false, wasFlying = false, running = false;
+  // The rigid body: stepped by a shader, or by the engine.
+  const physics = new TeapotPhysics(gpu);
+  const physicsChoice = document.getElementById('physics');
+  const onGpu = () => physicsChoice.value === 'gpu';
+  let bodyFor = -1, grabDepth = 0;
+  // The shader's state from the engine's pose (after a reset, a drop, a new teapot).
+  const takePose = () => {
+    const s = new Float64Array(engine.HEAPF64.buffer, engine._tp_frame(0), 12);
+    physics.fromPose(Array.from(s.subarray(0, 9)), Array.from(s.subarray(9, 12)));
+  };
+  const givePose = () => {
+    const { a, b } = physics.pose();
+    engine._tp_pose(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], b[0], b[1], b[2]);
+  };
   const pauseButton = document.getElementById('pause');
   const stateNow = (dt) => new Float64Array(engine.HEAPF64.buffer, engine._tp_frame(dt), 48).slice();
   const sync = new Uint8Array(4);
@@ -153,11 +169,22 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
       engine._tp_fly(axis('ArrowUp', 'ArrowDown') * reach, axis('ArrowRight', 'ArrowLeft') * reach, axis('PageUp', 'PageDown') * reach);
       dirty = true;
     }
+    if (onGpu() && physics.running) {
+      // Shown at half speed, like the engine's.
+      if (physics.advance(dt * 0.5, 0)) { givePose(); }
+      dirty = true;
+    }
     if (dirty || running) {
-      const state = stateNow(dt);
-      running = state[27] > 0.5;
+      const state = stateNow(onGpu() ? 0 : dt);
+      running = onGpu() ? physics.running : state[27] > 0.5;
       try {
         if (gpu.upload()) { remeasure = true; }
+        if (bodyFor !== gpu.vertexCount + state[30] * 1e6) {
+          // A new teapot: its body, at rest where the engine has it.
+          physics.setBody(engine);
+          takePose();
+          bodyFor = gpu.vertexCount + state[30] * 1e6;
+        }
         const start = performance.now();
         gpu.draw(state);
         if (remeasure && !running) {
@@ -175,7 +202,8 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
       dirty = false;
       const check = gpu.check;
       stats.textContent = `${measured.toFixed(1)} ms/frame on the GPU at ${canvas.width}\u00d7${canvas.height}` +
-        (running ? ` · physics ${state[29].toFixed(2)} ms, ${state[28]} contacts` : '') + `\n` +
+        (running ? (onGpu() ? ` · physics on the GPU: ${physics.steps} steps over ${physics.count} hull points, ${physics.stepMs.toFixed(2)} ms with the read-back`
+                            : ` · physics ${state[29].toFixed(2)} ms, ${state[28]} contacts`) : '') + `\n` +
         `${state[30]} nodes · ${gpu.vertexCount} vertices · ${gpu.triangleCount} triangles, each vertex and pixel evaluated from the lattice\n` +
         (gpu.roomMs ? `room light: ${gpu.options.directions} directions in ${gpu.roomMs.toFixed(0)} ms` + (gpu.thrownMs ? `, gathered in ${gpu.thrownMs.toFixed(0)} ms` : '') + ` · ` : '') +
         (check ? `shaders against the CPU at ${check.points} points: largest distance ${check.worst.toExponential(2)}, largest angle between normals ${check.worstAngle.toFixed(4)}\u00b0`
@@ -206,9 +234,21 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
     resize(w, h);
   });
   document.getElementById('check').addEventListener('click', () => { gpu.compare(); dirty = true; });
-  document.getElementById('drop').addEventListener('click', () => { engine._tp_action(0); dirty = true; });
-  document.getElementById('reset').addEventListener('click', () => { engine._tp_action(1); dirty = true; });
-  pauseButton.addEventListener('click', () => { engine._tp_set(12, running ? 0 : 1); dirty = true; });
+  document.getElementById('drop').addEventListener('click', () => {
+    engine._tp_action(0);
+    if (onGpu()) { engine._tp_set(12, 0); takePose(); physics.running = true; }
+    dirty = true;
+  });
+  document.getElementById('reset').addEventListener('click', () => {
+    engine._tp_action(1);
+    if (onGpu()) { takePose(); physics.running = false; physics.grab = null; }
+    dirty = true;
+  });
+  pauseButton.addEventListener('click', () => {
+    if (onGpu()) { physics.running = !physics.running; physics.still = 0; } else { engine._tp_set(12, running ? 0 : 1); }
+    dirty = true;
+  });
+  physicsChoice.addEventListener('change', () => { engine._tp_action(1); takePose(); physics.running = false; physics.grab = null; dirty = true; });
 
   const place = (event) => {
     const box = canvas.getBoundingClientRect();
@@ -220,19 +260,43 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
     const [x, y] = place(event);
     const orbit = event.shiftKey || event.button === 2;
     const [part, u, v] = orbit ? [-1, 0, 0] : hit(x, y);
-    engine._tp_pointer(0, x, y, orbit ? 1 : 0, part, u, v);
+    if (onGpu() && part >= 0) {
+      // Hold the body where it was picked, at that depth along the view.
+      const point = Array.from(new Float64Array(engine.HEAPF64.buffer, engine._tp_point(part, u, v), 3));
+      const view = gpu.lastView;
+      grabDepth = (point[0] - view.eye[0]) * view.forward[0] + (point[1] - view.eye[1]) * view.forward[1] + (point[2] - view.eye[2]) * view.forward[2];
+      physics.hold(point);
+    } else {
+      engine._tp_pointer(0, x, y, orbit ? 1 : 0, onGpu() ? -1 : part, u, v);
+    }
     dirty = true;
   });
+  // Where a pixel's ray is at a depth along the view.
+  const along = (x, y, depth) => {
+    const view = gpu.lastView, nx = 2 * x / width - 1, ny = 1 - 2 * y / height;
+    return [0, 1, 2].map((k) => view.eye[k] + (view.forward[k] + view.right[k] * nx + view.up[k] * ny) * depth);
+  };
   canvas.addEventListener('pointermove', (event) => {
     if (event.buttons === 0) { return; }
     const [x, y] = place(event);
-    engine._tp_pointer(1, x, y, 0, -1, 0, 0);
+    if (onGpu() && physics.grab) { physics.grab.target = along(x, y, grabDepth); } else { engine._tp_pointer(1, x, y, 0, -1, 0, 0); }
     dirty = true;
   });
-  const lift = () => { engine._tp_pointer(2, 0, 0, 0, -1, 0, 0); dirty = true; };
+  const lift = () => { physics.grab = null; engine._tp_pointer(2, 0, 0, 0, -1, 0, 0); dirty = true; };
   canvas.addEventListener('pointerup', lift);
   canvas.addEventListener('pointercancel', lift);
-  canvas.addEventListener('dblclick', (event) => { const [x, y] = place(event); const [part, u, v] = hit(x, y); engine._tp_pointer(3, x, y, 0, part, u, v); dirty = true; });
+  canvas.addEventListener('dblclick', (event) => {
+    const [x, y] = place(event);
+    const [part, u, v] = hit(x, y);
+    if (onGpu() && part >= 0) {
+      const point = Array.from(new Float64Array(engine.HEAPF64.buffer, engine._tp_point(part, u, v), 3));
+      const ray = along(x, y, 1).map((p, k) => p - gpu.lastView.eye[k]), length = Math.hypot(...ray);
+      physics.poke(point, ray.map((r) => r / length), 1.2 / 0.07);
+    } else if (!onGpu()) {
+      engine._tp_pointer(3, x, y, 0, part, u, v);
+    }
+    dirty = true;
+  });
   canvas.addEventListener('contextmenu', (event) => event.preventDefault());
   canvas.addEventListener('wheel', (event) => { event.preventDefault(); engine._tp_zoom(Math.exp(event.deltaY * 0.0012)); dirty = true; }, { passive: false });
   const typing = (event) => ['INPUT', 'SELECT', 'TEXTAREA'].includes(event.target.tagName) && event.target.type !== 'checkbox';
@@ -244,7 +308,7 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
   });
   window.addEventListener('keyup', (event) => { slow = event.shiftKey; held.delete(event.key); dirty = true; });
   window.addEventListener('blur', () => held.clear());
-  window.teapot = { engine, gpu, redraw: () => { dirty = true; }, state: () => stateNow(0) };
+  window.teapot = { engine, gpu, physics, redraw: () => { dirty = true; }, state: () => stateNow(0) };
   setTimeout(() => { try { gpu.compare(); dirty = true; } catch (error) { console.error(error); } }, 600);
 })();
 </script>
