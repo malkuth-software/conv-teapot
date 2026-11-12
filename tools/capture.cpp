@@ -125,6 +125,7 @@ int main(int argc, char** argv) {
         render_part.per_v = part->per_v;
         render_part.two_sided = part->sampled;
         render_part.interior_from = part->interior ? 0.0 : part->interior_from;
+        render_part.routed = part->group != "lid";
         render_part.solid = teapot_options.version == Version::v2026_unified; // the unified sheets close a solid: wall, interior and joins
         scene_index[part_index] = long(scene.parts.size());
         scene.parts.push_back(render_part);
@@ -171,6 +172,7 @@ int main(int argc, char** argv) {
     options.mesh_lines = number("lines", 0) != 0;
     options.live_reflection = number("live", 1) != 0;
     options.mirror_traced = number("mirror", 1) != 0;
+    options.mirror_routes = number("routes", 1) != 0;
     options.ambient = int(number("ambient", 3));
     options.plain_inside = number("plaininside", 0) != 0;
     options.exact_shadows = number("exact", 1) != 0;
@@ -273,6 +275,7 @@ int main(int argc, char** argv) {
         predict.push_back(renderer.stats.ms_predict);
         solve.push_back(renderer.stats.ms_solve);
     }
+    if (renderer.routes_ms() > 0.0) { std::printf("mirror routes: %.2f ms\n", renderer.routes_ms()); }
     const auto median = [](std::vector<double> v) { std::sort(v.begin(), v.end()); return v[v.size() / 2]; };
     const RenderStats& s = renderer.stats;
     std::printf("%s %s %dx%d nodes=%zu lattice=%zu candidates=%zu solves=%zu evaluations=%zu hits=%zu visits=%zu edge_pixels=%zu\n",

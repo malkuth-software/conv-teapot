@@ -406,6 +406,7 @@ private:
             render_part.per_v = part->per_v;
             render_part.two_sided = part->sampled;
             render_part.interior_from = part->interior ? 0.0 : part->interior_from;
+            render_part.routed = part->group != "lid";
             render_part.solid = version == Version::v2026_unified; // the unified sheets close a solid: wall, interior and joins
             scene.parts.push_back(render_part);
             scene_parts_.push_back(index);

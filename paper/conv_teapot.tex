@@ -1423,18 +1423,30 @@ at the cost of a few arithmetic operations per pixel: 11\,ms for a
 $960\times600$ chrome frame against 141\,ms traced (34 against 483 on
 one thread). The
 emitters do not include the teapot itself, so the knob is not
-reflected in the lid nor the handle in the body. For those, the mirror
-ray is now also met with the baked mesh's own triangles, and the point
-it reaches is shaded from its light map as the pixel's own point is,
-its mirror answered by the emitters. The triangles stand in a tree of
-boxes, one subtree a part, built with the mesh and carried by the pose
-when the body moves. A ray passes over boxes wholly behind the tangent
-plane it leaves, and each triangle is told beforehand which of sixteen
-blocks of its own part lie wholly behind the tangent planes at its
-corners; for most of the body's outside that is all of the body but the
-block it is in. A chrome frame at $960\times600$ then takes 32\,ms
-against 16 without the teapot in its own reflection; with the switch
-off the picture is the one before, pixel for pixel.
+reflected in the lid nor the handle in the body. For the body, the
+handle and the spout (the lid is left out for now), the mirror ray is
+now met with the baked mesh's own triangles and followed from piece to
+piece up to three times: the spout in the body, the body in that spout,
+the spout in that body. Each point it reaches is shaded from its light
+map, and the last one's mirror is answered by the emitters, so the
+floor deep in the reflections is the same stand-in, with the same baked
+shadow, as in the first. Where the body has moved, the floor is met
+where it now lies. The triangles stand in a tree of boxes, one subtree a
+part, built with the mesh and carried by the pose when the body moves.
+The routes between the pieces are baked with it. For every triangle and
+every one of 256 cells of directions, the bake marks whether a mirror
+ray from the triangle in that cell may land on a piece at all: the
+triangle's possible starting points lie in a sphere, each box of the
+tree in another, and the cell in a cone, and a cell is marked only if
+its cone meets the angle some box's sphere fills, for boxes in front of
+the triangle's tangent planes. A ray in an unmarked cell leaves the
+pieces at once and is not walked; the picture is the same with the
+routes as without them, pixel for pixel. The bake takes 0.12\,s on six
+threads (0.41\,s on one). A chrome frame at $960\times600$ takes
+29\,ms with three bounces, against 34\,ms for one bounce walked without
+routes and 21\,ms with the emitters alone. The routes mark which
+directions may land, not where: storing the landing point too, so that
+a bounce is a lookup instead of a walk, is left for later.
 
 \subsection{The mesh as a seed}
 

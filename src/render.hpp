@@ -47,6 +47,9 @@ struct RenderPart {
     // negative, v <= -interior_from - 1. A point there sees the floor and the
     // sky only through an opening.
     double interior_from = 1e30;
+    // Whether the part is in the baked mesh's mirror routes: it shows the others in its mirror and
+    // they show it. (The lid is not, for now: the routes model the body, the handle and the spout.)
+    bool routed = true;
     bool faces_cavity(double v) const { return interior_from >= 0.0 ? v >= interior_from : v <= -interior_from - 1.0; }
 };
 
@@ -96,6 +99,8 @@ struct RenderOptions {
     // With live reflections, the mirror ray is also met with the mesh's own triangles, so the body
     // shows the handle, the spout and the lid in itself. Off: only the emitters answer it.
     bool mirror_traced = true;
+    // Use the baked routes to pass over mirror rays that leave the pieces at once (off only to check that they change nothing).
+    bool mirror_routes = true;
     // Baked light, experimental: how the room's diffuse light reaches a point.
     // 0: a function of the normal alone, as if nothing were in the way.
     // 1: times the baked open fraction, from the mean open direction.
@@ -509,6 +514,7 @@ inline std::uint8_t to_byte(double linear) {
 class Renderer {
 public:
     RenderStats stats;
+    double routes_ms() const { return mirror_tree_.ms_routes; }
 
     void render(const Scene& scene, const Camera& camera, const RenderOptions& options, Frame& frame) {
         using namespace detail;
@@ -2320,6 +2326,10 @@ private:
         shadow_version_ = mesh.version;
     }
 
+    // How many times a mirror ray is followed from piece to piece (body, handle, spout) before
+    // the emitters answer: the spout in the body, the body in that spout, the spout in that body.
+    static constexpr int kMirrorLevels = 3;
+
     // A point of the baked mesh, shaded: its light map texel and, for the pose-free bake, the light
     // from the normal as it is turned now and the mirror direction. depth 0: a pixel's own point,
     // whose mirror ray may meet the mesh; depth 1: a point that mirror ray reached.
@@ -2383,15 +2393,16 @@ private:
                 std::uint32_t seen_triangle = 0;
                 float seen_w[3];
                 double reach_body = 0.0;
-                if (depth == 0 && options.mirror_traced && mirror_tree_.ready() &&
+                if (depth < kMirrorLevels && options.mirror_traced && mirror_tree_.ready() && scene.parts[part].routed &&
                     mirror_tree_.nearest(scene, p, reflected, &normal, triangle, seen_part, seen_triangle, seen_w, reach_body)) {
                     // The teapot shows itself: the point of the mesh the mirror ray reaches,
-                    // shaded as this point is, its own mirror answered by the emitters.
-                    work.no_floor();
+                    // shaded as this point is, its own mirror followed the same way, up to
+                    // kMirrorLevels bounces, then answered by the emitters.
+                    if (depth == 0) { work.no_floor(); }
                     const std::uint32_t* other = &mesh.triangles[std::size_t(seen_triangle) * 3];
                     mirror = shade_baked(scene, options, view, seen_part, mesh.vertices[other[0]], mesh.vertices[other[1]], mesh.vertices[other[2]], seen_w,
                                          reflected, lod + 1.0f, double(seen_w[0] * mesh.vertices[other[0]].v + seen_w[1] * mesh.vertices[other[1]].v +
-                                                                     seen_w[2] * mesh.vertices[other[2]].v), work, 1);
+                                                                     seen_w[2] * mesh.vertices[other[2]].v), work, depth + 1, seen_triangle);
                 } else if (scene.parts[part].faces_cavity(hit_v) && !scene.leaves_cavity(reflected)) {
                     if (depth == 0) { work.no_floor(); }
                     mirror = cavity();
@@ -2515,8 +2526,9 @@ private:
         build_shadow_map_mesh(scene, options);
         if (options.method == Method::raster && options.gloss && options.lighting && options.mirror_traced && mesh.lit && mesh.lit_diffuse_only &&
             mirror_tree_.identity != mesh.identity) {
-            mirror_tree_.build(mesh, scene.pose, options.threads);
+            mirror_tree_.build(mesh, scene, scene.pose, options.threads);
         }
+        mirror_tree_.use_routes = options.mirror_routes;
         if (options.method == Method::seeded && options.gloss && options.lighting) {
             // The traced bounce needs the lattices and their tree.
             transport_lattices(scene, view, nullptr, options);
@@ -2659,14 +2671,51 @@ private:
         std::vector<float> corners;          // nine numbers a triangle, in `order`
         std::vector<std::uint32_t> part_root, part_end; // each part's nodes: [root, end)
         std::vector<std::uint16_t> unclear;  // per mesh triangle: the blocks of its own part it is not clear of
+        // The routes: for each mesh triangle, which directions (in the pose the tree was built in) a
+        // mirror ray from it may land on the routed pieces in. 256 cells of an octahedral map of the
+        // sphere, four words a triangle. A ray in a cell that is not marked leaves the pieces at once.
+        static constexpr int kCells = 16;
+        static constexpr double kOpenBelow = 2.0;   // a box filling less sky than two cells is not opened: its cells are marked as it stands
+        std::vector<std::uint64_t> routes;
+        std::vector<unsigned char> routed;  // per part
+        double ms_routes = 0.0;
+        bool use_routes = true;
         std::uint64_t identity = 0;
+        // The octahedral cell of a unit direction.
+        static int cell_of(Vec3 d) {
+            const double sum = std::fabs(d.x) + std::fabs(d.y) + std::fabs(d.z);
+            double u = d.x / sum, v = d.y / sum;
+            if (d.z < 0.0) {
+                const double fu = (1.0 - std::fabs(v)) * (u >= 0.0 ? 1.0 : -1.0), fv = (1.0 - std::fabs(u)) * (v >= 0.0 ? 1.0 : -1.0);
+                u = fu;
+                v = fv;
+            }
+            const int i = std::min(kCells - 1, std::max(0, int((u * 0.5 + 0.5) * kCells))), j = std::min(kCells - 1, std::max(0, int((v * 0.5 + 0.5) * kCells)));
+            return j * kCells + i;
+        }
+        static Vec3 direction_of(double u, double v) {
+            Vec3 d{u, v, 1.0 - std::fabs(u) - std::fabs(v)};
+            if (d.z < 0.0) {
+                const double fu = (1.0 - std::fabs(v)) * (u >= 0.0 ? 1.0 : -1.0), fv = (1.0 - std::fabs(u)) * (v >= 0.0 ? 1.0 : -1.0);
+                d.x = fu;
+                d.y = fv;
+            }
+            return normalize(d);
+        }
+        bool may_land(std::uint32_t triangle, Vec3 d) const {
+            if (routes.empty()) { return true; }
+            const int cell = cell_of(d);
+            return ((routes[std::size_t(triangle) * 4 + std::size_t(cell >> 6)] >> (cell & 63)) & 1u) != 0;
+        }
         Rigid pose;                          // the pose the mesh stood in
         bool ready() const { return !nodes.empty(); }
         static constexpr int kBlockDepth = 4;
 
-        void build(const Mesh& mesh, const Rigid& now, int threads) {
+        void build(const Mesh& mesh, const Scene& scene, const Rigid& now, int threads) {
             identity = mesh.identity;
             pose = now;
+            routed.assign(mesh.parts.size(), 0);
+            for (std::size_t p = 0; p < mesh.parts.size() && p < scene.parts.size(); ++p) { routed[p] = scene.parts[p].routed ? 1 : 0; }
             const std::size_t count = mesh.triangle_count();
             std::vector<float> centre(count * 3), box(count * 6);
             order.resize(count);
@@ -2791,6 +2840,158 @@ private:
                     }
                 });
             }
+            bake_routes(mesh, threads);
+        }
+
+        // Which directions from each triangle may land on a routed piece. The triangle's possible
+        // starting points lie in a sphere round it; a box of the tree lies in a sphere round it; a
+        // cell of directions lies in a cone round its centre. A cell is marked only if its cone
+        // meets the angle the box's sphere fills seen from the triangle's sphere, for some leaf box
+        // in front of the triangle's tangent planes (and, on its own part, in a block it is not clear
+        // of). Every direction that can land is in a marked cell.
+        void bake_routes(const Mesh& mesh, int threads) {
+            const auto started = std::chrono::steady_clock::now();
+            const std::size_t count = mesh.triangle_count();
+            routes.assign(count * 4, ~std::uint64_t(0));
+            // Each cell's centre and the widest angle from it to its edge.
+            std::vector<Vec3> centre(kCells * kCells);
+            std::vector<double> spread(kCells * kCells), spread_cos(kCells * kCells), spread_sin(kCells * kCells);
+            for (int j = 0; j < kCells; ++j) {
+                for (int i = 0; i < kCells; ++i) {
+                    const double u0 = 2.0 * i / kCells - 1.0, v0 = 2.0 * j / kCells - 1.0, step = 2.0 / kCells;
+                    const Vec3 c = direction_of(u0 + 0.5 * step, v0 + 0.5 * step);
+                    double widest = 0.0;
+                    for (int k = 0; k <= 8; ++k) {
+                        for (int e = 0; e < 4; ++e) {
+                            const double f = k / 8.0;
+                            const double u = e == 0 ? u0 + f * step : e == 1 ? u0 + step : e == 2 ? u0 + (1.0 - f) * step : u0;
+                            const double v = e == 0 ? v0 : e == 1 ? v0 + f * step : e == 2 ? v0 + step : v0 + (1.0 - f) * step;
+                            widest = std::max(widest, std::acos(std::max(-1.0, std::min(1.0, dot(c, direction_of(u, v))))));
+                        }
+                    }
+                    centre[std::size_t(j * kCells + i)] = c;
+                    spread[std::size_t(j * kCells + i)] = widest * 1.02 + 1e-3;
+                    spread_cos[std::size_t(j * kCells + i)] = std::cos(spread[std::size_t(j * kCells + i)]);
+                    spread_sin[std::size_t(j * kCells + i)] = std::sin(spread[std::size_t(j * kCells + i)]);
+                }
+            }
+            double widest_cell = 0.0;
+            for (double a : spread) { widest_cell = std::max(widest_cell, a); }
+            const auto sphere_of = [](const TreeNode& node, Vec3& c, double& r) {
+                c = Vec3{0.5 * (double(node.low[0]) + node.high[0]), 0.5 * (double(node.low[1]) + node.high[1]), 0.5 * (double(node.low[2]) + node.high[2])};
+                r = 0.5 * std::sqrt(double(node.high[0] - node.low[0]) * (node.high[0] - node.low[0]) + double(node.high[1] - node.low[1]) * (node.high[1] - node.low[1]) +
+                                    double(node.high[2] - node.low[2]) * (node.high[2] - node.low[2]));
+            };
+            detail::parallel_rows(int((count + 63) / 64), threads, [&](int begin, int end, int) {
+                std::vector<std::uint32_t> blocks;
+                for (std::size_t t = std::size_t(begin) * 64; t < std::min(count, std::size_t(end) * 64); ++t) {
+                    const std::size_t part = mesh.triangle_part[t];
+                    std::uint64_t* out = &routes[t * 4];
+                    if (routed[part] == 0) { continue; }   // not routed: never asked
+                    out[0] = out[1] = out[2] = out[3] = 0;
+                    Vec3 n[3], c{};
+                    double level[3];
+                    for (int k = 0; k < 3; ++k) {
+                        const MeshVertex& vertex = mesh.vertices[mesh.triangles[t * 3 + std::size_t(k)]];
+                        n[k] = normalize(vertex.n);
+                        // The corners are kept in floats: a point on the plane may be 1e-7 off it.
+                        level[k] = dot(n[k], vertex.p) + 2e-6;
+                        c = c + vertex.p * (1.0 / 3.0);
+                    }
+                    double r = 0.0;
+                    for (int k = 0; k < 3; ++k) { r = std::max(r, length(mesh.vertices[mesh.triangles[t * 3 + std::size_t(k)]].p - c)); }
+                    r += 3e-3;   // the ray starts 2e-3 off the surface
+                    const auto behind = [&](const TreeNode& node) {
+                        for (int k = 0; k < 3; ++k) {
+                            const double reach = std::fmax(n[k].x * double(node.low[0]), n[k].x * double(node.high[0])) + std::fmax(n[k].y * double(node.low[1]), n[k].y * double(node.high[1])) +
+                                                 std::fmax(n[k].z * double(node.low[2]), n[k].z * double(node.high[2]));
+                            if (reach > level[k]) { return false; }
+                        }
+                        return true;
+                    };
+                    // Down a subtree with the cells still in question.
+                    // The cells a sphere (centre bc, radius br) may be seen in, of those asked.
+                    const auto seen_in = [&](Vec3 bc, double br, std::uint64_t* pass, double& fills) {
+                        const Vec3 to = bc - c;
+                        const double far = length(to);
+                        fills = 3.2;
+                        if (!(far > r + br)) { return; }
+                        const Vec3 unit = to * (1.0 / far);
+                        const double fs = (r + br) / far, fc = std::sqrt(std::max(0.0, 1.0 - fs * fs));
+                        fills = std::asin(fs);
+                        for (int w = 0; w < 4; ++w) {
+                            std::uint64_t bits = pass[w];
+                            while (bits != 0) {
+                                const int b = __builtin_ctzll(bits);
+                                bits &= bits - 1;
+                                const std::size_t k = std::size_t(w * 64 + b);
+                                // cos(spread + fills), unless the sum passes pi (then every direction is within it)
+                                if (spread[k] + fills < 3.14159265358979 && dot(centre[k], unit) < spread_cos[k] * fc - spread_sin[k] * fs) { pass[w] &= ~(std::uint64_t(1) << b); }
+                            }
+                        }
+                    };
+                    // Cells already marked are not asked again; a box that fills less of the sky
+                    // than a cell does is not opened (its cells are marked as it stands: more than
+                    // need be, never fewer).
+                    const std::function<void(std::uint32_t, const std::uint64_t*)> walk = [&](std::uint32_t index, const std::uint64_t* asked) {
+                        const TreeNode& node = nodes[index];
+                        std::uint64_t pass[4] = {asked[0] & ~out[0], asked[1] & ~out[1], asked[2] & ~out[2], asked[3] & ~out[3]};
+                        if ((pass[0] | pass[1] | pass[2] | pass[3]) == 0 || behind(node)) { return; }
+                        Vec3 bc;
+                        double br, fills;
+                        sphere_of(node, bc, br);
+                        seen_in(bc, br, pass, fills);
+                        if ((pass[0] | pass[1] | pass[2] | pass[3]) == 0) { return; }
+                        if (node.count > 0) {
+                            // A leaf: each of its triangles, unless all its corners are behind the tangent planes
+                            // (as the triangle's neighbours are where the surface is convex), by its own sphere.
+                            for (std::uint32_t k = node.first; k < node.first + node.count; ++k) {
+                                const float* q = &corners[std::size_t(k) * 9];
+                                bool ahead = false;
+                                for (int v = 0; v < 3 && !ahead; ++v) {
+                                    for (int e = 0; e < 3 && !ahead; ++e) { ahead = n[e].x * double(q[v * 3]) + n[e].y * double(q[v * 3 + 1]) + n[e].z * double(q[v * 3 + 2]) > level[e]; }
+                                }
+                                if (!ahead) { continue; }
+                                const Vec3 tc{(double(q[0]) + q[3] + q[6]) / 3.0, (double(q[1]) + q[4] + q[7]) / 3.0, (double(q[2]) + q[5] + q[8]) / 3.0};
+                                double tr = 0.0;
+                                for (int v = 0; v < 3; ++v) { tr = std::max(tr, length(Vec3{q[v * 3], q[v * 3 + 1], q[v * 3 + 2]} - tc)); }
+                                std::uint64_t mine[4] = {pass[0] & ~out[0], pass[1] & ~out[1], pass[2] & ~out[2], pass[3] & ~out[3]};
+                                double unused;
+                                seen_in(tc, tr * 1.0001 + 1e-6, mine, unused);
+                                for (int w = 0; w < 4; ++w) { out[w] |= mine[w]; }
+                            }
+                            return;
+                        }
+                        if (fills < kOpenBelow * widest_cell) {
+                            for (int w = 0; w < 4; ++w) { out[w] |= pass[w]; }
+                            return;
+                        }
+                        walk(index + 1, pass);
+                        walk(node.first, pass);
+                    };
+                    // A mirror ray leaves on the front of the surface: the cells wholly behind the
+                    // tangent planes at all three corners are never asked for, and not baked.
+                    std::uint64_t all[4] = {0, 0, 0, 0};
+                    for (std::size_t k = 0; k < std::size_t(kCells * kCells); ++k) {
+                        bool front = false;
+                        for (int e = 0; e < 3 && !front; ++e) { front = dot(centre[k], n[e]) > -spread_sin[k] - 1e-6; }   // within 90 degrees plus the cell's spread
+                        if (front) { all[k >> 6] |= std::uint64_t(1) << (k & 63); }
+                    }
+                    for (std::size_t p = 0; p < part_root.size(); ++p) {
+                        if (routed[p] == 0 || part_end[p] <= part_root[p]) { continue; }
+                        if (p != part) {
+                            walk(part_root[p], all);
+                            continue;
+                        }
+                        // Its own part: only the blocks it is not clear of.
+                        for (std::uint32_t index = part_root[p]; index < part_end[p]; ++index) {
+                            const TreeNode& node = nodes[index];
+                            if (node.block != 255 && ((unclear[t] >> node.block) & 1u) != 0) { walk(index, all); }
+                        }
+                    }
+                }
+            });
+            ms_routes = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
         }
 
         // The nearest triangle along a ray of the room from `origin`; `facing` (or null) the normal
@@ -2824,6 +3025,8 @@ private:
                     may_meet = unclear[from];
                 }
             }
+            // A direction its triangle's routes say leaves the pieces at once needs no walk.
+            if (use_routes && may_meet != 0xffffu && !may_land(from, d)) { return false; }
             const double inv[3] = {1.0 / (std::fabs(d.x) > 1e-300 ? d.x : 1e-300), 1.0 / (std::fabs(d.y) > 1e-300 ? d.y : 1e-300), 1.0 / (std::fabs(d.z) > 1e-300 ? d.z : 1e-300)};
             const double oo[3] = {o.x, o.y, o.z}, nn[3] = {n.x, n.y, n.z};
             double best = 1e30;
@@ -2832,7 +3035,7 @@ private:
             std::uint32_t stack[96];
             int top = 0;
             for (std::size_t p = part_root.size(); p-- > 0;) {
-                if (part_end[p] > part_root[p]) { stack[top++] = part_root[p]; }
+                if (part_end[p] > part_root[p] && (routed.empty() || routed[p] != 0)) { stack[top++] = part_root[p]; }
             }
             while (top > 0) {
                 const std::uint32_t index = stack[--top];
