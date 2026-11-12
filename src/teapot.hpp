@@ -406,6 +406,11 @@ inline Teapot make_teapot(const TeapotOptions& options) {
             part->row_param.assign(plan.row_arc.begin(), plan.row_arc.end());
             {
                 // The body turns inward at the top of its rim, the lid at its widest row.
+                // The rows on the cavity's side are the body's after the rim. The lid's are
+                // its underside, on the side of its lower end: the meridian is chained from
+                // the end on the axis at the smallest height, which for the lid is the
+                // middle of its underside, so they are the rows before the widest one
+                // (negative interior_from). The top of the lid and the knob face the room.
                 const Lattice& l = part->conv.lattice;
                 std::size_t turn = 0;
                 for (std::size_t v = 0; v < l.nv; ++v) {
@@ -413,7 +418,8 @@ inline Teapot make_teapot(const TeapotOptions& options) {
                     const double best = is_body ? l.at(0, turn).y : std::hypot(l.at(0, turn).x, l.at(0, turn).z);
                     if (here > best) { turn = v; }
                 }
-                part->interior_from = double(turn);
+                const bool underside_first = !is_body && l.at(0, 0).y < l.at(0, l.nv - 1).y;
+                part->interior_from = underside_first ? -double(turn) - 1.0 : double(turn);
             }
             part->conv.bubble = options.bubble;
             part->conv.compile();
