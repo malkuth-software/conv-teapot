@@ -1023,10 +1023,14 @@ and from then on a frame costs no evaluation.
 
 \subsection{Where to put the vertices}
 
-We tried four layouts on the unified teapot and measured each mesh
-against the surface at seven points in every triangle: the distance from
-the flat triangle to the surface at the same parameters, and the angle
-between the interpolated vertex normal and the true one.
+We tried five layouts on the unified teapot and measured each mesh
+against its four sheets at seven points in every triangle: the distance
+from the flat triangle to the nearest point of the surface, found by
+sliding along the surface from the point with the same parameters and
+never across a crease, and the angle between the interpolated vertex
+normal and the surface's normal there. The join bands are left out of
+the measure: the interior spout join folds on itself, a fault of that
+join which would be charged to whichever layout met it.
 
 \emph{Uniform}: every lattice cell cut $k$ by $k$. \emph{Bounds}: a
 tensor grid in which each column and row of cells is cut as often as the
@@ -1043,7 +1047,9 @@ takes in every vertex its neighbours left on its border.
 \emph{Clusters}: $k$-means over dense surface samples in position and
 normal, run with the mini-batch moving-average updates of
 e-means~\cite{emeans}, each cluster giving its most central sample as a
-vertex and the dual of the clusters on the sample grid as triangles.
+vertex and the dual of the clusters on the sample grid as triangles. The fifth,
+a family of layouts from the curvature metric, has a subsection of its
+own below.
 
 \begin{table}[H]
 \caption{Vertex layouts on the unified teapot (3104 nodes). Distance in
@@ -1057,42 +1063,131 @@ model units; a pixel at the teapot is about 0.011}
  & & \multicolumn{2}{c|}{Distance} & \multicolumn{2}{c}{Normal (deg)}\\
 Layout & Vertices & max & rms & max & rms\\
 \hline
-Uniform $2\times2$ & 12786 & $2.1\times10^{-2}$ & $6.5\times10^{-3}$ & 79 & 1.21\\
-Uniform $4\times4$ & 49430 & $5.5\times10^{-3}$ & $1.6\times10^{-3}$ & 36 & 0.34\\
-Bounds, $\varepsilon=10^{-2}$ & 7351 & $1.7\times10^{-2}$ & $5.1\times10^{-3}$ & 62 & 1.68\\
-Bounds, $\varepsilon=5\times10^{-3}$ & 11060 & $9.9\times10^{-3}$ & $3.1\times10^{-3}$ & 57 & 1.61\\
-Tree, $\varepsilon=10^{-2}$ & 10506 & $2.1\times10^{-2}$ & $3.3\times10^{-3}$ & 62 & 1.38\\
-Tree, $\varepsilon=2\times10^{-2}$, $20^\circ$ & 8991 & $2.6\times10^{-2}$ & $6.4\times10^{-3}$ & 12 & 0.75\\
-Tree, $\varepsilon=10^{-2}$, $20^\circ$ & 14189 & $2.1\times10^{-2}$ & $2.9\times10^{-3}$ & 12 & 0.68\\
-Tree, $\varepsilon=5\times10^{-3}$, $10^\circ$ & 29498 & $1.3\times10^{-2}$ & $1.7\times10^{-3}$ & 7.7 & 0.40\\
-Clusters, 12000 & 11984 & $3.8\times10^{-2}$ & $3.3\times10^{-3}$ & 145 & 6.87\\
+Uniform $2\times2$ & 12786 & $1.9\times10^{-2}$ & $5.1\times10^{-3}$ & 39 & 3.15\\
+Uniform $4\times4$ & 49430 & $4.7\times10^{-3}$ & $1.3\times10^{-3}$ & 9.4 & 0.80\\
+Bounds, $10^{-2}$ & 7351 & $1.4\times10^{-2}$ & $3.5\times10^{-3}$ & 51 & 2.21\\
+Bounds, $5\times10^{-3}$ & 11060 & $6.4\times10^{-3}$ & $2.2\times10^{-3}$ & 51 & 1.70\\
+Tree, $10^{-2}$ & 10506 & $9.1\times10^{-3}$ & $2.0\times10^{-3}$ & 75 & 1.78\\
+Tree, $2\times10^{-2}$, $20^\circ$ & 8991 & $1.5\times10^{-2}$ & $4.5\times10^{-3}$ & 25 & 3.86\\
+Tree, $10^{-2}$, $20^\circ$ & 14189 & $9.0\times10^{-3}$ & $1.7\times10^{-3}$ & 23 & 1.79\\
+Tree, $5\times10^{-3}$, $10^\circ$ & 29498 & $3.9\times10^{-3}$ & $1.1\times10^{-3}$ & 7.1 & 1.15\\
+Clusters, 12000 & 11984 & $3.7\times10^{-2}$ & $1.8\times10^{-3}$ & 117 & 6.58\\
+\hline
+\multicolumn{6}{l}{\emph{From the metric}: (a) $2\times10^{-2}$, $20^\circ$; (b) $10^{-2}$, $20^\circ$; (c) $5\times10^{-3}$, $10^\circ$}\\
+(a) nucleated, unchecked & 2869 & $1.6\times10^{-1}$ & $8.6\times10^{-3}$ & 77 & 8.61\\
+(b) nucleated & 5586 & $1.9\times10^{-2}$ & $4.2\times10^{-3}$ & 11 & 2.69\\
+(b) lattice nodes & 6749 & $1.9\times10^{-2}$ & $5.3\times10^{-3}$ & 9.9 & 2.41\\
+(c) nucleated & 14144 & $2.3\times10^{-2}$ & $1.7\times10^{-3}$ & 58 & 1.31\\
+(c) lattice nodes & 12464 & $1.0\times10^{-2}$ & $2.6\times10^{-3}$ & 5.4 & 1.31\\
 \hline
 \end{tabular}
 \end{table}
 
-Three things came out (Table~\ref{tab:layouts}; the full sweep is in
-\texttt{results/mesh\_study.txt}). First, distance alone is the wrong
-criterion. A bend of radius 0.03 fits inside a tolerance of 0.01 as a
-single flat piece turning $60^\circ$, and the shading across it is then
-wrong however the normals are interpolated; a limit on the turn of the
-normal is what buys smoothness. The tree with $\varepsilon=10^{-2}$ and a
-$20^\circ$ limit has a third of the vertices of the uniform $4\times4$
-mesh and a third of its worst normal error. Second, the lattice data do
-bound vertex placement, and cheaply: the bounds layout is built in a
-third of the time and needs fewest vertices for a given \emph{distance},
-but being a tensor grid it cannot follow the bends locally and loses on
-the normal. Third, clustering is not competitive here. With equal
-vertices it is worse on every measure and a hundred times slower to
-build, and its dual triangulation can fold. The surface comes with a
-parameterization and an error that can be asked for, and a layout that
-uses neither gives both away. Our crude dual is partly to blame, and a
-proper restricted Delaunay triangulation might do better; we did not
-build one. The picture itself stops improving near 10\,000 vertices:
-against the traced frame, about 500 of 99\,000 surface pixels differ in
-coverage for every layout past that size. The engine's default is the
-tree with $\varepsilon=10^{-2}$ and $20^\circ$: 14\,189 vertices and
-26\,538 triangles from 49\,972 evaluations in 33\,ms. A node on a
-crease becomes two vertices, one per side, each with its side's normal.
+Of the first four layouts (Table~\ref{tab:layouts}; the full sweep is in
+\texttt{results/mesh\_study.txt}; the layouts from the metric are the
+subsection after next) three things can be said. First, distance alone
+is the wrong criterion. A bend of radius 0.03 fits inside a tolerance of
+0.01 as a single flat piece turning $60^\circ$, and the shading across it
+is then wrong however the normals are interpolated: the tree by distance
+alone has a worst normal error of $75^\circ$, and a $20^\circ$ limit on
+the turn of the normal along an edge brings that to $23^\circ$ for a
+third more vertices. Second, the lattice data do bound vertex placement,
+and cheaply: the bounds layout holds a distance about as well per vertex
+as the tree, in half the time and a quarter of the evaluations, but
+being a tensor grid it cannot follow the bends locally and its worst
+normal stays at $51^\circ$. Third, clustering by nearest centre in
+position and normal is not competitive: worse on every measure but one,
+a hundred times slower to build, and its dual triangulation can fold.
+The uniform $4\times4$ mesh is the most faithful of the fixed layouts
+and costs three and a half times the tree's vertices. The picture itself
+stops improving near 10\,000 vertices: against the traced frame, about
+500 of 99\,000 surface pixels differ in coverage for every layout past
+that size. The engine's default is the tree with $\varepsilon=10^{-2}$
+and $20^\circ$: 14\,189 vertices and 26\,538 triangles from 49\,972
+evaluations in 33\,ms. A node on a crease becomes two vertices, one per
+side, each with its side's normal.
+
+\subsection{What sets the count}
+
+The problem is a classical one, the best piecewise-linear approximation
+of a smooth surface, and for flat triangles through points of the
+surface its answer is known in the limit of many triangles. Locally the
+surface is $z=\tfrac12(\kappa_1x^2+\kappa_2y^2)$; stretching $x$ and $y$
+by $\sqrt{\kappa_1}$ and $\sqrt{\kappa_2}$ makes it a paraboloid of
+revolution, on which the best triangle is equilateral and errs by half
+the square of its circumradius. Undoing the stretch, a largest distance
+$\varepsilon$ needs
+\begin{equation}
+ T_\varepsilon=\frac{2}{3\sqrt3}\,\frac{1}{\varepsilon}\int\!\sqrt{|K|}\;dA
+\end{equation}
+triangles, $K$ the Gaussian curvature, each stretched by
+$\sqrt{\kappa_1/\kappa_2}$ along the direction of least curvature; and a
+normal that turns by at most $\alpha$ along any edge needs
+\begin{equation}
+ T_\alpha=\frac{4}{\sqrt3}\,\frac{1}{\alpha^2}\int\!|K|\;dA .
+\end{equation}
+Position costs the root of the curvature and smoothness the curvature
+itself, with different powers of the tolerance. Both integrals can be
+read from the lattice alone: the five-sample differences that CONV
+already forms for its jets give the first and second fundamental forms
+at every node, and from the nodes of the unified teapot
+$\int\!\sqrt{|K|}\,dA=76.4$ and $\int\!|K|\,dA=168.5$, against 76.6 and
+167.1 from differences of the evaluated surface. The typical ratio
+$\kappa_1/\kappa_2$ is 15 on the body. By these formulas a distance of
+0.02 needs about 740 vertices and a $20^\circ$ turn about 3200 triangles,
+where the tree uses 9000 vertices and 26\,500 triangles: an order of
+magnitude, in the limit.
+
+\subsection{Layouts from the metric}
+
+To see how much of that can be had, we built the layout the formulas
+describe. From the nodes, with $\mathrm{I}$, $\mathrm{II}$ and
+$\mathrm{III}=\mathrm{II}\,\mathrm{I}^{-1}\mathrm{II}$ the three
+fundamental forms in $(u,v)$,
+\begin{equation}
+ M=\frac{|\mathrm{II}|}{8\varepsilon}+\frac{\mathrm{III}}{\alpha^2}+\frac{\mathrm{I}}{L^2}
+\end{equation}
+measures a step in units of one allowed edge: its chord strays by
+$\varepsilon$, or its normal turns by $\alpha$, or it is $L$ long. Seeds
+are placed; their cells are grown over a grid of samples by shortest
+paths in $M$, so each is one connected piece; the seeds may then be
+moved toward the means of their cells with the moving-average updates
+of e-means~\cite{emeans}; and the triangles are the dual of the cells.
+Creases, ends and poles are pinned rows with seeds of their own. Three
+ways of placing the seeds were tried: at random; \emph{nucleated}, one at
+a time, each where the surface is furthest in $M$ from every seed so
+far; and at the \emph{lattice nodes} themselves, whose rows CONV's own
+error has already crowded where the shape is hard.
+
+Unchecked, the nucleated mesh has the predicted count and is wrong in
+places by 0.16 (Table~\ref{tab:layouts}). Two things that the metric
+does not contain account for it. A pinned row is a curve in its own
+right: a chord of the rim strays by the circle's sag whatever the
+surface's normal curvature along it, so such rows must be sized by the
+curve's own curvature. And where one principal curvature vanishes, on
+top of the lip or on a nearly flat disc, the metric calls an edge along
+that direction free, but a straight chord leaves the line of zero
+curvature sideways, into surface that bends sharply. That is a
+third-order effect and only the error itself sees it. So every triangle
+is tried against the surface at its middle and the middles of its edges,
+and one that fails gets a seed where it fails worst.
+
+Checked in this way, nucleated seeds reach the quality of the tree with
+$\varepsilon=2\times10^{-2}$ and $20^\circ$ from 5586 vertices in place
+of 8991, and have no advantage left at 14\,000, where a few triangles
+also remain out of tolerance because the refinement did not converge.
+To pass the check at the coarse setting nucleated seeds needed 5354
+vertices, random ones 6174 and lattice nodes 6550; moving averages
+brought the random start to 5626 and did nothing for the other two. The
+lattice nodes are the most even start: they end with no triangle far
+out of tolerance at either setting, and at the fine one they give a
+worst normal error of $5.4^\circ$ from 12\,464 vertices, which the tree
+does not reach with 29\,498. Their distance is the weaker side, and the
+traced picture is still slightly closer to the tree's. All of these
+cost about a second and a million evaluations to build, against 30\,ms
+and 50\,000. The gain is real and far smaller than the limit promised,
+because a teapot is mostly creases, poles and lines of zero curvature.
+The engine keeps the tree.
 
 \subsection{Rasterizer}
 
@@ -1156,14 +1251,14 @@ tolerance of a silhouette, the mesh's own point is shown.
 \scriptsize
 \begin{tabular}{l|cc|c}
 \hline
- & \multicolumn{2}{c|}{Time (ms)} & Evaluations\\
-Method & all threads & one thread & per surface pixel\\
+ & \multicolumn{2}{c|}{Time (ms), threads} & Evaluations\\
+Method & all & one & per pixel\\
 \hline
 Per ray, hierarchy & 150 & 410 & 4.1\\
 Transport & 91 & 261 & 3.8\\
 Seeded by the mesh & 37 & 125 & 2.0\\
 Mesh, shaded per pixel & 15 & 45 & 0.16\\
-Mesh, baked light and emitters & 11 & 36 & 0.08\\
+Mesh, baked light, emitters & 11 & 36 & 0.08\\
 \hline
 \end{tabular}
 \end{table}
@@ -1257,7 +1352,9 @@ implementation on one shared machine, and vary by a quarter between
 sessions. The baked mesh is flat between its vertices: its silhouette is
 the surface's only to the tolerance it was baked at, a light map holds
 the diffuse light of one pose, and the emitters that answer its mirror
-directions do not include the teapot itself. The node-count comparison covers surfaces that suit a
+directions do not include the teapot itself. The vertex-count limits quoted are asymptotic and assume
+elliptic points; their constants are derived here for a paraboloid. The
+node-count comparison covers surfaces that suit a
 lattice; it says nothing about shapes of arbitrary topology, where
 subdivision surfaces are at home.
 

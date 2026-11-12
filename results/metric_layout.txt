@@ -1,0 +1,26 @@
+Unified teapot, 3104 nodes. Ray-traced reference at 960x600: 137.9 ms (all threads), 310.0 ms (one thread).
+A pixel at the teapot is about 0.011 model units.
+
+layout                             vertices triangles    evals build ms |   dev max   dev rms |  nrm max  nrm rms |  coverage  colour |  ms all  ms one
+From the lattice nodes alone: Int sqrt|K| dA = 76.43, Int |K| dA = 168.52 (by differences of the evaluated surface: 76.57 and 167.05)
+
+layout                             vertices triangles    evals build ms |   dev max   dev rms |  nrm max  nrm rms |  coverage  colour |  ms all  ms one
+tree 2e-02 + 20 deg                    8991     16604    31744     25.1 |  1.51e-02  4.51e-03 |    25.43    3.860 |       559   0.667 |   18.53   55.74
+tree 1e-02 + 20 deg                   14189     26538    49972     40.6 |  8.96e-03  1.72e-03 |    23.36    1.794 |       534   0.611 |   18.48   52.85
+tree 5e-03 + 10 deg                   29498     56018   105808     79.2 |  3.88e-03  1.13e-03 |     7.11    1.154 |       565   0.597 |   19.50   56.25
+metric 2e-2 20deg, no check            2869      5613     2869    448.8 |  1.58e-01  8.56e-03 |    76.96    8.609 |       749   0.975 |   16.93   47.94
+metric 2e-2 20deg, checked             5374     10658  1037198   1342.9 |  1.58e-01  5.03e-03 |    74.87    3.004 |       708   0.852 |   17.11   48.84
+metric 2e-2 20deg, checked x24         5395     10691  1794851   2146.1 |  1.58e-01  5.02e-03 |    12.34    2.898 |       708   0.851 |   17.24   50.09
+  nucleate only, checked               5354     10623   971306   1195.1 |  6.03e-02  5.03e-03 |    74.87    2.967 |       731   0.881 |   17.29   49.47
+  random + emeans, checked             5626     11186   886842   1009.9 |  5.14e-02  5.31e-03 |    10.72    2.858 |       649   0.862 |   17.69   50.00
+  random only, checked                 6174     12301  1094334    990.8 |  3.96e-02  5.57e-03 |    10.62    2.760 |       773   0.921 |   18.13   52.82
+  half the seeds, checked              4634      9256   772794   1069.9 |  2.13e-01  6.83e-03 |    58.47    3.282 |      1182   1.084 |   17.20   49.87
+  lattice nodes, no check              3176      6280     3176     53.6 |  7.35e-02  2.03e-02 |    75.13    8.539 |      1601   1.242 |   22.87   68.37
+  lattice nodes, checked               6550     13047  1111302   1011.4 |  4.61e-02  5.54e-03 |     9.93    2.465 |       649   0.740 |   17.21   51.60
+  lattice nodes + emeans, checked      6580     13118  1197380   1446.7 |  5.79e-02  5.70e-03 |    74.92    2.674 |       605   0.821 |   18.97   55.98
+  nodes, checked, 1e-2 20deg           6749     13461   960317    952.7 |  1.91e-02  5.33e-03 |     9.93    2.409 |       648   0.728 |   18.02   54.53
+  nodes, checked, 5e-3 10deg          12464     24603  2103824   2018.4 |  9.98e-03  2.60e-03 |     5.39    1.310 |       511   0.644 |   20.45   55.91
+metric 4e-2 30deg, checked             2944      5873   493888    876.5 |  1.49e-01  9.02e-03 |    16.64    4.840 |      1290   1.141 |   18.36   52.76
+metric 1e-2 20deg, checked             5586     11089   999442   1452.7 |  1.94e-02  4.23e-03 |    11.08    2.688 |       543   0.774 |   19.41   56.89
+metric 1e-2 15deg, checked             8045     15929  1507933   1797.5 |  1.94e-02  3.27e-03 |    74.82    2.130 |       518   0.738 |   19.02   54.34
+metric 5e-3 10deg, checked            14144     27960  2662368   3153.3 |  2.27e-02  1.69e-03 |    58.47    1.313 |       516   0.654 |   19.76   57.34

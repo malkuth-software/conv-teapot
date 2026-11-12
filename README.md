@@ -96,6 +96,16 @@ engine of PlaySuite's rock-stacking game (wrench-transport solver).
   there), so it swings from the hand. This needed one addition to the vendored
   engine, `World::add_velocity`; see `third_party/zc_phys/PROVENANCE.md`.
 
+- **What sets the vertex count** (`tools/curvature_budget.cpp`,
+  `out/mesh_study metric`, `results/metric_layout.txt`). The curvature
+  integrals that bound a mesh can be read from the lattice nodes alone, within
+  1% of the evaluated surface. Layouts built from that metric (seeds at
+  random, nucleated, or at the lattice nodes; cells by shortest path; e-means
+  relaxation; then a check against the surface) need about 40% fewer vertices
+  than the tree when coarse and none fewer by 14 000. Seeding at the lattice
+  nodes is the most even and gives the best normals at the fine setting. They
+  take a second to build. The engine keeps the tree.
+
 One 960 x 600 frame of the unified teapot, all threads / one thread: per-ray
 150 / 410 ms, transport 91 / 261, seeded 37 / 125, mesh shaded per pixel
 15 / 45, mesh with baked light and emitters 11 / 36.

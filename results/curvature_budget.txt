@@ -1,0 +1,22 @@
+part             area Int sqrt|K|    Int |K|  elliptic     ratio | Int kmax^2 (isotropic normal cost)
+body            73.07      42.53      55.57       89%      15.0 | 1729.6
+lid             12.53      13.25      41.45       69%       9.7 | 964.9
+handle           3.31       5.07      10.89       56%       4.8 | 146.6
+spout            6.77      10.52      28.55       54%       9.3 | 509.8
+handle_join      0.23       1.05       6.27        4%       2.8 | 23.8
+handle_join      0.29       1.15       6.50        5%       3.1 | 27.0
+spout_join       0.73       1.89       5.63        5%       3.1 | 19.8
+spout_join       0.24       1.12      12.19       19%      90.1 | 14015.0
+all             97.17      76.57     167.05   (4 pi = 12.57)             | 17436.4
+
+distance: triangles = 0.385 * Int sqrt|K| dA / e;  vertices about half
+  e = 2e-02:     1474 triangles,      737 vertices
+  e = 1e-02:     2947 triangles,     1474 vertices
+  e = 5e-03:     5894 triangles,     2947 vertices
+  e = 2e-03:    14736 triangles,     7368 vertices
+  e = 1e-03:    29472 triangles,    14736 vertices
+normal turn along an edge: triangles = 2.309 * Int |K| dA / a^2 (anisotropic), 2.309 * Int kmax^2 dA / a^2 (equilateral)
+  a = 30 deg:     1407 triangles anisotropic,   146879 equilateral
+  a = 20 deg:     3166 triangles anisotropic,   330478 equilateral
+  a = 10 deg:    12664 triangles anisotropic,  1321910 equilateral
+  a =  5 deg:    50657 triangles anisotropic,  5287642 equilateral
