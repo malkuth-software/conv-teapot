@@ -728,61 +728,75 @@ private:
         std::vector<std::uint8_t>& counts = mirrored ? mirror_counts_ : counts_;
         all.resize(pixels * max_candidates);
         counts.assign(pixels, 0);
-        // Each worker owns a band of rows and writes only there, so the
+        // Each worker owns bands of rows and writes only there, so the
         // candidate lists need no locks and their order is deterministic.
+        // The lattice's cells are first filed under the bands of eight rows
+        // they may reach, in their own order, once; a band then reads only
+        // its own cells. Bands are handed out a few at a time, so that a
+        // slower core takes fewer of them instead of holding up the frame.
         std::vector<std::size_t> added(64, 0);
-        int workers = options.threads > 0 ? options.threads : int(std::thread::hardware_concurrency());
-        workers = std::max(1, std::min(workers, 64));
-#ifdef TCONV_SINGLE_THREAD
-        workers = 1;
-#endif
-        const int bands = workers == 1 ? 1 : workers * 4;
-        detail::parallel_rows(bands, workers, [&](int band_begin, int band_end, int worker) {
+        const int band_rows = 8;
+        const int bands = (view.height + band_rows - 1) / band_rows;
+        band_cells_.resize(std::size_t(bands));
+        for (std::vector<std::uint64_t>& cells : band_cells_) { cells.clear(); }
+        for (std::size_t part = 0; part < scene.parts.size(); ++part) {
+            const detail::PartLattice& lattice = lattices_[part];
+            const std::vector<float>& screen_y = mirrored ? lattice.my : lattice.sy;
+            for (int j = 0; j + 1 < lattice.nv; ++j) {
+                const float* sy0 = &screen_y[std::size_t(j) * std::size_t(lattice.nu)];
+                const float* sy1 = sy0 + lattice.nu;
+                for (int i = 0; i + 1 < lattice.nu; ++i) {
+                    if (lattice.cell_buried(i, j)) { continue; }
+                    const float low = std::min(std::min(sy0[i], sy0[i + 1]), std::min(sy1[i], sy1[i + 1]));
+                    const float high = std::max(std::max(sy0[i], sy0[i + 1]), std::max(sy1[i], sy1[i + 1]));
+                    if (!(high >= -2.0f) || !(low <= float(view.height) + 2.0f)) { continue; }
+                    // A prediction reaches the rows from floor(low - 0.6) to ceil(high + 0.6): two rows each way covers it.
+                    // (One row, as before, lost a few predictions at every band's edge, so the picture depended on the number of threads.)
+                    const int first = std::max(0, int(std::floor((low - 2.0f) / float(band_rows))));
+                    const int last = std::min(bands - 1, int(std::floor((high + 2.0f) / float(band_rows))));
+                    const std::uint64_t cell = (std::uint64_t(part) << 40) | (std::uint64_t(j) << 20) | std::uint64_t(i);
+                    for (int band = first; band <= last; ++band) { band_cells_[std::size_t(band)].push_back(cell); }
+                }
+            }
+        }
+        detail::parallel_rows(bands, options.threads, [&](int band_begin, int band_end, int worker) {
             for (int band = band_begin; band < band_end; ++band) {
-                const int row_begin = int(std::int64_t(view.height) * band / bands);
-                const int row_end = int(std::int64_t(view.height) * (band + 1) / bands);
-                predict_band(scene, view, mirrored, all.data(), counts.data(), row_begin, row_end, added[std::size_t(worker)]);
+                const int row_begin = band * band_rows, row_end = std::min(view.height, row_begin + band_rows);
+                predict_band(scene, view, mirrored, all.data(), counts.data(), row_begin, row_end, band_cells_[std::size_t(band)], added[std::size_t(worker)]);
             }
         });
         for (std::size_t count : added) { stats.candidates += count; }
     }
 
     void predict_band(const Scene& scene, const detail::View& view, bool mirrored, Candidate* all, std::uint8_t* counts, int row_begin,
-                      int row_end, std::size_t& added) const {
-        for (std::size_t part = 0; part < scene.parts.size(); ++part) {
+                      int row_end, const std::vector<std::uint64_t>& cells, std::size_t& added) const {
+        for (const std::uint64_t cell : cells) {
+            const std::size_t part = std::size_t(cell >> 40);
+            const int j = int((cell >> 20) & 0xfffff), i = int(cell & 0xfffff);
             const detail::PartLattice& lattice = lattices_[part];
             const float step = float(lattice.step);
-            for (int j = 0; j + 1 < lattice.nv; ++j) {
-                const std::vector<float>& screen_x = mirrored ? lattice.mx : lattice.sx;
-                const std::vector<float>& screen_y = mirrored ? lattice.my : lattice.sy;
-                const std::vector<float>& screen_z = mirrored ? lattice.mz : lattice.sz;
-                const float* sy0 = &screen_y[std::size_t(j) * std::size_t(lattice.nu)];
-                const float* sy1 = sy0 + lattice.nu;
-                for (int i = 0; i + 1 < lattice.nu; ++i) {
-                    const float low = std::min(std::min(sy0[i], sy0[i + 1]), std::min(sy1[i], sy1[i + 1]));
-                    const float high = std::max(std::max(sy0[i], sy0[i + 1]), std::max(sy1[i], sy1[i + 1]));
-                    if (high < float(row_begin) - 1.0f || low > float(row_end) + 1.0f || lattice.cell_buried(i, j)) { continue; }
-                    float corner[4][5];
-                    bool visible = true;
-                    int gone = 0;
-                    for (int c = 0; c < 4; ++c) {
-                        const int ci = i + (c & 1), cj = j + (c >> 1);
-                        const std::size_t index = std::size_t(cj) * std::size_t(lattice.nu) + std::size_t(ci);
-                        gone += scene.removed(lattice.p[index]) ? 1 : 0;
-                        corner[c][0] = screen_x[index];
-                        corner[c][1] = screen_y[index];
-                        corner[c][2] = screen_z[index];
-                        corner[c][3] = float(ci) * step;
-                        corner[c][4] = float(cj) * step;
-                        visible = visible && screen_z[index] > 0.05f;
-                    }
-                    // A cell wholly in the half a cutaway removed predicts nothing:
-                    // it would only take a place in the pixel's short list.
-                    if (!visible || gone == 4) { continue; }
-                    predict_triangle(all, counts, view.width, row_begin, row_end, std::uint16_t(part), step, corner[0], corner[1], corner[3], added);
-                    predict_triangle(all, counts, view.width, row_begin, row_end, std::uint16_t(part), step, corner[0], corner[3], corner[2], added);
-                }
+            const std::vector<float>& screen_x = mirrored ? lattice.mx : lattice.sx;
+            const std::vector<float>& screen_y = mirrored ? lattice.my : lattice.sy;
+            const std::vector<float>& screen_z = mirrored ? lattice.mz : lattice.sz;
+            float corner[4][5];
+            bool visible = true;
+            int gone = 0;
+            for (int c = 0; c < 4; ++c) {
+                const int ci = i + (c & 1), cj = j + (c >> 1);
+                const std::size_t index = std::size_t(cj) * std::size_t(lattice.nu) + std::size_t(ci);
+                gone += scene.removed(lattice.p[index]) ? 1 : 0;
+                corner[c][0] = screen_x[index];
+                corner[c][1] = screen_y[index];
+                corner[c][2] = screen_z[index];
+                corner[c][3] = float(ci) * step;
+                corner[c][4] = float(cj) * step;
+                visible = visible && screen_z[index] > 0.05f;
             }
+            // A cell wholly in the half a cutaway removed predicts nothing:
+            // it would only take a place in the pixel's short list.
+            if (!visible || gone == 4) { continue; }
+            predict_triangle(all, counts, view.width, row_begin, row_end, std::uint16_t(part), step, corner[0], corner[1], corner[3], added);
+            predict_triangle(all, counts, view.width, row_begin, row_end, std::uint16_t(part), step, corner[0], corner[3], corner[2], added);
         }
     }
 
@@ -2585,6 +2599,7 @@ private:
     Mesh cut_mesh_;
     std::vector<float> triangle_lod_;
     std::vector<Candidate> candidates_, mirror_candidates_;
+    std::vector<std::vector<std::uint64_t>> band_cells_; // the lattice cells that may reach each band of rows
     std::vector<std::uint8_t> counts_, mirror_counts_;
     std::vector<Quad> quads_;
     std::vector<Node> nodes_;

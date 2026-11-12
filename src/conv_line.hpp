@@ -36,8 +36,29 @@ inline Dual operator*(double k, const Dual& a) { return {k * a.v, k * a.ds, k * 
 inline Dual operator*(const Dual& a, double k) { return {k * a.v, k * a.ds, k * a.dt}; }
 inline Dual operator/(const Dual& a, double k) { return {a.v / k, a.ds / k, a.dt / k}; }
 
+// A value with its derivative in one parameter. A surface point needs the
+// derivative along the rows only through the admission across them: the rows'
+// values do not depend on the parameter across, whose derivative comes from the
+// basis alone. So the admission carries two numbers, not three.
+struct Dual1 {
+    double v = 0.0;
+    double d = 0.0;
+    Dual1() = default;
+    Dual1(double value) : v(value) {}
+    Dual1(double value, double derivative) : v(value), d(derivative) {}
+};
+inline Dual1 operator+(const Dual1& a, const Dual1& b) { return {a.v + b.v, a.d + b.d}; }
+inline Dual1 operator-(const Dual1& a, const Dual1& b) { return {a.v - b.v, a.d - b.d}; }
+inline Dual1 operator-(const Dual1& a) { return {-a.v, -a.d}; }
+inline Dual1 operator*(const Dual1& a, const Dual1& b) { return {a.v * b.v, a.d * b.v + a.v * b.d}; }
+inline Dual1 operator+(double k, const Dual1& a) { return {k + a.v, a.d}; }
+inline Dual1 operator*(double k, const Dual1& a) { return {k * a.v, k * a.d}; }
+inline Dual1 operator*(const Dual1& a, double k) { return {k * a.v, k * a.d}; }
+inline Dual1 operator/(const Dual1& a, double k) { return {a.v / k, a.d / k}; }
+
 inline double value_of(double x) { return x; }
 inline double value_of(const Dual& x) { return x.v; }
+inline double value_of(const Dual1& x) { return x.v; }
 
 // min and max select one argument whole, so a dual keeps the derivative of
 // the selected branch: the map is piecewise affine and this is its
@@ -232,6 +253,16 @@ template<class T> inline void order(T& a, T& b) {
 // Capacity threshold: the largest of five prefix forms after a
 // nine-comparator sort (CONV paper, Corollary "Five prefix forms").
 template<class T> inline T capacity_threshold(std::array<T, 5> w, const T& mass) {
+    // The first form is the largest whenever the mass is under five times the
+    // smallest capacity: each later form is then smaller than the one before
+    // it. That is every cell whose currents were not clipped (its mass is
+    // rounding), and the answer is the same one the sort below would give.
+    // (4.5 for 5 keeps the comparison clear of rounding.)
+    {
+        double least = value_of(w[0]);
+        for (int j = 1; j < 5; ++j) { least = value_of(w[j]) < least ? value_of(w[j]) : least; }
+        if (value_of(mass) < 4.5 * least) { return mass / 5.0; }
+    }
     order(w[0], w[1]);
     order(w[3], w[4]);
     order(w[2], w[4]);

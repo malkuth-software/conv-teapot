@@ -271,13 +271,40 @@ public:
 
 private:
     SurfacePoint eval_own(double u, double v) const {
-        const Dual ds_seed(0.0, 1.0, 0.0), dt_seed(0.0, 0.0, 1.0);
-        Dual out[3];
-        evaluate<Dual>(u, v, ds_seed, dt_seed, out);
+        // The rows' cells at u, value and derivative along the row; the cell across
+        // them admitted from those; then its value, its derivative along the row
+        // (the admitted currents' own) and across (the basis's).
+        std::size_t cell_u = 0, cell_v = 0;
+        double s = 0.0, t = 0.0;
+        locate(u, cells_u(), lattice.wrap_u, cell_u, s);
+        locate(v, lattice.cells_v(), false, cell_v, t);
+        const Basis<Dual1> basis_s = make_basis(Dual1(s, 1.0));
+        const Basis<Dual1> basis_t = make_basis(Dual1(t, 1.0));
+        Dual1 w[3][8];
+        const std::size_t cu = cells_u();
+        for (int k = 0; k < 8; ++k) {
+            const long row = long(cell_v) - 3 + k;
+            if (row < 0 || row >= long(lattice.nv) || (k == 0 && !outer_low_[cell_v]) || (k == 7 && !outer_high_[cell_v])) { continue; }
+            const Cell<double>* cells = &rows_[(std::size_t(row) * cu + cell_u) * 3];
+            for (int channel = 0; channel < 3; ++channel) { w[channel][k] = eval_cell(cells[channel], basis_s); }
+        }
+        double p[3], du[3], dv[3];
+        for (int channel = 0; channel < 3; ++channel) {
+            const Cell<Dual1> cell = compile_cell(w[channel], shapes_v_[cell_v], bubble);
+            double value = cell.anchor.v, along = cell.anchor.d, across = 0.0;
+            for (int j = 0; j < 5; ++j) {
+                value += cell.c[j].v * basis_t.tau[j].v;
+                along += cell.c[j].d * basis_t.tau[j].v;
+                across += cell.c[j].v * basis_t.tau[j].d;
+            }
+            p[channel] = value + cell.bubble.v * basis_t.psi.v;
+            du[channel] = along + cell.bubble.d * basis_t.psi.v;
+            dv[channel] = across + cell.bubble.v * basis_t.psi.d;
+        }
         SurfacePoint point;
-        point.p = {out[0].v, out[1].v, out[2].v};
-        point.du = {out[0].ds, out[1].ds, out[2].ds};
-        point.dv = {out[0].dt, out[1].dt, out[2].dt};
+        point.p = {p[0], p[1], p[2]};
+        point.du = {du[0], du[1], du[2]};
+        point.dv = {dv[0], dv[1], dv[2]};
         return point;
     }
 

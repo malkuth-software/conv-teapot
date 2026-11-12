@@ -15,6 +15,7 @@
 // trimmed away.
 #pragma once
 #include "surface.hpp"
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <vector>
@@ -35,6 +36,22 @@ struct Trim {
     // every point to belong to exactly one sheet, and uses these.
     std::vector<std::array<double, 2>> loop_exact;
     std::vector<double> cut_exact;
+    // The box of each loop, found once (bound()): a point outside it is not inside the loop.
+    bool bounded = false;
+    double box[2][4] = {{0, 0, 0, 0}, {0, 0, 0, 0}}; // drawn, exact: least u, most u, least v, most v
+    void bound() {
+        for (int which = 0; which < 2; ++which) {
+            const std::vector<std::array<double, 2>>& points = which == 1 && !loop_exact.empty() ? loop_exact : loop;
+            double* b = box[which];
+            b[0] = b[2] = 1e300;
+            b[1] = b[3] = -1e300;
+            for (const auto& q : points) {
+                b[0] = std::min(b[0], q[0]); b[1] = std::max(b[1], q[0]);
+                b[2] = std::min(b[2], q[1]); b[3] = std::max(b[3], q[1]);
+            }
+        }
+        bounded = !loop.empty();
+    }
 
     bool hides(double u, double v, bool exact = false) const {
         const std::vector<double>& cut = exact && !cut_exact.empty() ? cut_exact : this->cut;
@@ -49,6 +66,10 @@ struct Trim {
         }
         if (loop.empty()) { return false; }
         if (period_u > 0.0) { u -= period_u * std::round((u - centre_u) / period_u); }
+        if (bounded) {
+            const double* b = box[exact && !loop_exact.empty() ? 1 : 0];
+            if (u < b[0] || u > b[1] || v < b[2] || v > b[3]) { return false; }
+        }
         bool inside = false;
         for (std::size_t i = 0, j = loop.size() - 1; i < loop.size(); j = i++) {
             const double ui = loop[i][0], vi = loop[i][1], uj = loop[j][0], vj = loop[j][1];
@@ -247,6 +268,7 @@ inline void round_trim_outlines(JoinResult& result) {
             }
         }
     }
+    result.body_trim.bound();
 }
 
 } // namespace tconv
