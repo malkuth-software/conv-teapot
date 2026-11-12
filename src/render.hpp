@@ -520,6 +520,7 @@ public:
         }
         // Per-ray tracing serves the independent method and every incoherent ray.
         need_bvh(scene, options.method == Method::independent || (options.gloss && options.lighting));
+        count_crossings(scene, view, options, frame.width, frame.height);
         stats.ms_predict = now_ms() - mid;
         const double solve_start = now_ms();
         resolve_and_shade(scene, view, mirror, mirror_ready, options, frame);
@@ -747,9 +748,11 @@ private:
                     if (high < float(row_begin) - 1.0f || low > float(row_end) + 1.0f || lattice.cell_buried(i, j)) { continue; }
                     float corner[4][5];
                     bool visible = true;
+                    int gone = 0;
                     for (int c = 0; c < 4; ++c) {
                         const int ci = i + (c & 1), cj = j + (c >> 1);
                         const std::size_t index = std::size_t(cj) * std::size_t(lattice.nu) + std::size_t(ci);
+                        gone += scene.removed(lattice.p[index]) ? 1 : 0;
                         corner[c][0] = screen_x[index];
                         corner[c][1] = screen_y[index];
                         corner[c][2] = screen_z[index];
@@ -757,7 +760,9 @@ private:
                         corner[c][4] = float(cj) * step;
                         visible = visible && screen_z[index] > 0.05f;
                     }
-                    if (!visible) { continue; }
+                    // A cell wholly in the half a cutaway removed predicts nothing:
+                    // it would only take a place in the pixel's short list.
+                    if (!visible || gone == 4) { continue; }
                     predict_triangle(all, counts, view.width, row_begin, row_end, std::uint16_t(part), step, corner[0], corner[1], corner[3], added);
                     predict_triangle(all, counts, view.width, row_begin, row_end, std::uint16_t(part), step, corner[0], corner[3], corner[2], added);
                 }
@@ -779,6 +784,59 @@ private:
         std::uint16_t part;
         std::uint16_t i, j;
     };
+
+    // Cutaway: how often each pixel's ray crosses the surface in the removed
+    // half, by drawing the lattice cells there as triangles and counting
+    // them. Counting among a pixel's few solved predictions is not
+    // reliable: the list is short and a missed or repeated hit flips the
+    // answer along every silhouette.
+    void count_crossings(const Scene& scene, const detail::View& view, const RenderOptions& options, int width, int height) {
+        cut_visibility_.samples.clear();
+        if (!scene.cut) { return; }
+        Mesh& mesh = cut_mesh_;
+        mesh.vertices.clear();
+        mesh.triangles.clear();
+        mesh.triangle_part.clear();
+        mesh.triangle_trimmed.clear();
+        for (std::size_t part = 0; part < lattices_.size(); ++part) {
+            const detail::PartLattice& lattice = lattices_[part];
+            const std::uint32_t first = std::uint32_t(mesh.vertices.size());
+            for (int j = 0; j < lattice.nv; ++j) {
+                for (int i = 0; i < lattice.nu; ++i) {
+                    MeshVertex vertex;
+                    vertex.p = lattice.p[std::size_t(j) * std::size_t(lattice.nu) + std::size_t(i)];
+                    vertex.u = float(i * lattice.step);
+                    vertex.v = float(j * lattice.step);
+                    vertex.s = vertex.t = 0.0f;
+                    mesh.vertices.push_back(vertex);
+                }
+            }
+            for (int j = 0; j + 1 < lattice.nv; ++j) {
+                for (int i = 0; i + 1 < lattice.nu; ++i) {
+                    if (lattice.cell_buried(i, j)) { continue; }
+                    bool near = false;
+                    for (const Trim* trim : scene.parts[part].trims) {
+                        near = near || detail::trim_near(*trim, i * lattice.step, (i + 1) * lattice.step, j * lattice.step, (j + 1) * lattice.step);
+                    }
+                    const std::uint32_t a = first + std::uint32_t(j * lattice.nu + i), b = a + 1, c = a + std::uint32_t(lattice.nu), d = c + 1;
+                    for (const auto& corners : {std::array<std::uint32_t, 3>{a, b, d}, std::array<std::uint32_t, 3>{a, d, c}}) {
+                        mesh.triangles.insert(mesh.triangles.end(), corners.begin(), corners.end());
+                        mesh.triangle_part.push_back(std::uint16_t(part));
+                        mesh.triangle_trimmed.push_back(near ? 1 : 0);
+                    }
+                }
+            }
+        }
+        std::vector<float> clip(mesh.vertices.size());
+        for (std::size_t k = 0; k < clip.size(); ++k) { clip[k] = float(dot(scene.cut_normal, mesh.vertices[k].p) - scene.cut_offset); }
+        cut_visibility_.resize(width, height, 1);
+        rasterize(
+            mesh, [&](Vec3 p, double& x, double& y, double& z) { view.project(p, x, y, z); },
+            [&](std::uint16_t part, double u, double v, bool exact) { return hidden(scene.parts[part], u, v, exact); },
+            [&](int rows, const std::function<void(int, int)>& body) { detail::parallel_rows(rows, options.threads, [&](int begin, int end, int) { body(begin, end); }); },
+            cut_visibility_, 0.05, clip.data());
+        despeckle_crossings(cut_visibility_);
+    }
 
     // The tree over the lattice quads, kept while the surfaces are the same.
     void need_bvh(const Scene& scene, bool wanted) {
@@ -958,7 +1016,7 @@ private:
                     ++solves;
                     const bool ok = detail::solve_ray(*scene.parts[quad.part].surface, view, dir, tolerance, one_step, 3.0 * lattice.step + 0.5, attempt);
                     evaluations += std::size_t(attempt.evaluations);
-                    if (ok && attempt.t < best_t && !hidden(scene.parts[quad.part], attempt.u, attempt.v)) {
+                    if (ok && attempt.t < best_t && !hidden(scene.parts[quad.part], attempt.u, attempt.v) && !scene.removed(attempt.point.p)) {
                         best_t = attempt.t;
                         best = attempt;
                         best_part = quad.part;
@@ -1392,6 +1450,7 @@ private:
             found = trace_independent(scene, view, dir, options.tolerance_px, options.one_step_px, best, best_part, work.solves,
                                       work.evaluations, work.visits);
         }
+        if (!cut_visibility_.samples.empty()) { crossings = int(cut_visibility_.samples[pixel].crossings); }
         hit = Hit{};
         hit.solves = std::uint16_t(std::min<std::size_t>(work.solves - solves_before, 65535));
         // The floor may be nearer than the surface.
@@ -1918,7 +1977,8 @@ private:
     std::uint64_t lattice_stamp_ = 0, shadow_stamp_ = 0, bvh_stamp_ = 0;
     int lattice_k_ = 0;
     std::uint64_t shadow_version_ = 0; // mesh version the shadow map was drawn from; 0: from the lattices
-    Visibility visibility_;
+    Visibility visibility_, cut_visibility_;
+    Mesh cut_mesh_;
     std::vector<float> triangle_lod_;
     std::vector<Candidate> candidates_, mirror_candidates_;
     std::vector<std::uint8_t> counts_, mirror_counts_;

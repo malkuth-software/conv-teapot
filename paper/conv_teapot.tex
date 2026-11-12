@@ -1353,18 +1353,22 @@ teapot along its plane of symmetry and fill the cut where it passes
 through material. A ray that starts in the removed half and has crossed
 the surface an odd number of times there is inside material when it
 reaches the plane, and shows the cut face; otherwise it continues to
-the first surface in the kept half. The rasterizer counts, at each
-sample, the pieces of surface in the removed half; the ray tracer
-counts the hits among a pixel's predictions. The count requires every
+the first surface in the kept half. The count is made by drawing the
+surface in the removed half as triangles and counting, at each sample,
+how many cover it: the baked mesh's triangles, or for the ray tracers
+the cells of the transported lattice. Counting the hits among a pixel's
+solved predictions was tried first and is not reliable, because the
+list is short and a missed or repeated hit changes the answer along
+every silhouette. Lattice cells wholly in the removed half are also
+left out of prediction, so they do not displace the cells that are
+seen. The count requires every
 point of the teapot to belong to exactly one sheet. The joins overlap
 the surfaces they join by a few percent of their width so that no gap
 shows, and in that overlap a ray would be counted twice; the count
 therefore uses a second set of trim boundaries placed exactly at the
 bands' edges. What remains is a mismatch one sample wide between those
 boundaries and the bands, which is removed from the count. Geometry in
-the removed half casts no shadow, so light reaches the interior. With
-transport the count is limited to the six predictions kept per pixel
-and is less clean than with the mesh.
+the removed half casts no shadow, so light reaches the interior. 
 
 \section{Motion}
 
