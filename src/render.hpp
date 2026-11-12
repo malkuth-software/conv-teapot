@@ -78,6 +78,7 @@ struct RenderOptions {
     // surface itself: a shadow's edge is then as sharp as the surface makes
     // it, whatever the map's resolution.
     bool exact_shadows = true;
+    int shadow_size = 0;      // side of the shadow map in texels; 0: 512 from lattices, 1024 from the mesh
     // Baked light: keep in the light map only what does not depend on the
     // view, and add reflections per frame from emitters along each pixel's
     // mirror direction (the sky and window above, a stand-in for the floor
@@ -128,6 +129,12 @@ struct Scene {
     std::vector<const Texture*> textures;
     double ground_y = 0.0;
     Mesh* mesh = nullptr; // baked geometry, for Method::raster and for light baking
+    // Cutaway: everything with dot(cut_normal, p) > cut_offset is removed,
+    // and where the cut passes through solid material the cut face is filled.
+    bool cut = false;
+    Vec3 cut_normal{0, 0, 1};
+    double cut_offset = 0.0;
+    bool removed(Vec3 p) const { return cut && dot(cut_normal, p) > cut_offset; }
     Vec3 light = normalize(Vec3{-0.45, 0.85, 0.35}); // direction towards the light
 };
 
@@ -365,8 +372,14 @@ struct ShadowMap {
     // and the results blended by p's position between their centres, so the
     // answer changes continuously as p moves: a shadow's edge is a ramp one
     // texel wide, not a staircase of texels.
+    // Is p outside everything the map covers? Most of the floor is.
+    bool beyond(Vec3 p) const {
+        const Vec3 d = p - centre;
+        const double reach = radius * (1.0 + 4.0 / double(size > 0 ? size : 1));
+        return std::fabs(dot(d, x)) > reach || std::fabs(dot(d, y)) > reach;
+    }
     double lit(Vec3 p, double bias) const {
-        if (size == 0) { return 1.0; }
+        if (size == 0 || beyond(p)) { return 1.0; }
         double sx, sy, sz;
         project(p, sx, sy, sz);
         const double x = sx - 0.5, y = sy - 0.5;
@@ -413,9 +426,24 @@ inline Vec3 environment(Vec3 d) {
     const double t = 0.5 * (d.y + 1.0);
     Vec3 sky = Vec3{0.20, 0.24, 0.30} * (1.0 - t) + Vec3{0.78, 0.84, 0.92} * t;
     if (d.y < 0.0) { sky = Vec3{0.16, 0.15, 0.14} * (1.0 + d.y) + Vec3{0.08, 0.08, 0.08} * (-d.y); }
-    const double az = std::atan2(d.z, d.x);
-    const double window = std::exp(-18.0 * (d.y - 0.55) * (d.y - 0.55)) * (0.5 + 0.5 * std::cos(3.0 * az + 0.6));
+    // cos(3 az + 0.6) for the azimuth az of d, from the triple-angle
+    // identities: no atan2 and no cos per pixel.
+    const double r = std::sqrt(d.x * d.x + d.z * d.z);
+    const double c = r > 1e-12 ? d.x / r : 1.0, sn = r > 1e-12 ? d.z / r : 0.0;
+    const double cos3 = 4.0 * c * c * c - 3.0 * c, sin3 = 3.0 * sn - 4.0 * sn * sn * sn;
+    const double lobe = cos3 * 0.8253356149096783 - sin3 * 0.5646424733950354; // cos 0.6, sin 0.6
+    const double window = std::exp(-18.0 * (d.y - 0.55) * (d.y - 0.55)) * (0.5 + 0.5 * lobe);
     return sky + Vec3{1.0, 0.98, 0.92} * (0.9 * window * window);
+}
+
+// Fixed powers by multiplication: pow() is the slowest thing a pixel does.
+inline double fifth(double x) {
+    const double x2 = x * x;
+    return x2 * x2 * x;
+}
+inline double ninetieth(double x) {
+    const double x2 = x * x, x4 = x2 * x2, x8 = x4 * x4, x16 = x8 * x8, x32 = x16 * x16, x64 = x32 * x32;
+    return x64 * x16 * x8 * x2;
 }
 
 inline double smoothstep(double a, double b, double x) {
@@ -539,18 +567,21 @@ private:
         const Vec3 helper = std::fabs(scene.light.y) < 0.9 ? Vec3{0, 1, 0} : Vec3{1, 0, 0};
         shadow_.x = normalize(cross(helper, shadow_.z));
         shadow_.y = cross(shadow_.z, shadow_.x);
-        shadow_.clear(512);
+        shadow_.clear(options.shadow_size > 0 ? options.shadow_size : 512);
         for (std::size_t part = 0; part < lattices_.size(); ++part) {
             const detail::PartLattice& lattice = lattices_[part];
             for (int j = 0; j + 1 < lattice.nv; ++j) {
                 for (int i = 0; i + 1 < lattice.nu; ++i) {
                     double corner[4][5];
+                    int gone = 0;
                     for (int c = 0; c < 4; ++c) {
                         const std::size_t index = std::size_t(j + (c >> 1)) * std::size_t(lattice.nu) + std::size_t(i + (c & 1));
+                        gone += scene.removed(lattice.p[index]) ? 1 : 0;
                         shadow_.project(lattice.p[index], corner[c][0], corner[c][1], corner[c][2]);
                         corner[c][3] = double(i + (c & 1)) * lattice.step;
                         corner[c][4] = double(j + (c >> 1)) * lattice.step;
                     }
+                    if (gone == 4) { continue; } // removed by the cutaway: casts no shadow
                     detail::raster_depth(shadow_, corner[0], corner[1], corner[3], std::uint16_t(part));
                     detail::raster_depth(shadow_, corner[0], corner[3], corner[2], std::uint16_t(part));
                 }
@@ -969,7 +1000,7 @@ private:
                 ++work.solves;
                 const bool hit = detail::solve_ray(*scene.parts[seed.part].surface, view, scene.light, options.tolerance_px * 4.0, options.one_step_px, 2.5, solve);
                 work.evaluations += std::size_t(solve.evaluations);
-                if (hit && solve.t > 0.03 && !hidden(scene.parts[seed.part], solve.u, solve.v)) { return false; }
+                if (hit && solve.t > 0.03 && !hidden(scene.parts[seed.part], solve.u, solve.v) && !scene.removed(solve.point.p)) { return false; }
             }
         }
         return true;
@@ -982,6 +1013,7 @@ private:
     // lies on (0xffff: none, the floor) and (self_u, self_v) where.
     double shadow_lit(const Scene& scene, const RenderOptions& options, const detail::View& primary, Vec3 p, double bias, double pixel, Vec3 t1, Vec3 t2,
                       std::uint16_t self, double self_u, double self_v, Work& work) const {
+        if (shadow_.size == 0 || shadow_.beyond(p)) { return 1.0; }
         if (!options.exact_shadows || !(pixel > 0.0) || shadow_.part.empty()) { return shadow_.lit(p, bias); }
         const double turn = self < scene.parts.size() && scene.parts[self].surface->periodic_u() ? double(scene.parts[self].surface->cells_u()) : 0.0;
         const auto own = [&](std::uint16_t part, float u, float v) {
@@ -1110,7 +1142,7 @@ private:
             if (options.wire != Wire::only && !options.diffuse_only) {
                 const double n_v = std::fmax(0.0, dot(normal, to_eye));
                 const double f0 = chrome ? 0.86 : 0.05;
-                const double fresnel = f0 + (1.0 - f0) * std::pow(1.0 - n_v, 5.0);
+                const double fresnel = f0 + (1.0 - f0) * detail::fifth(1.0 - n_v);
                 const Vec3 reflected = incoming - normal * (2.0 * dot(incoming, normal));
                 if (options.gloss) {
                     // A glaze over the body colour: what the mirror direction shows,
@@ -1123,7 +1155,7 @@ private:
                     colour = under * (1.0 - fresnel) + Vec3{mirror.x * tint.x, mirror.y * tint.y, mirror.z * tint.z} * (fresnel * mirror_dim(lit, n_l));
                 } else {
                     const Vec3 half = normalize(scene.light + to_eye);
-                    const double specular = std::pow(std::fmax(0.0, dot(normal, half)), 90.0) * lit;
+                    const double specular = detail::ninetieth(std::fmax(0.0, dot(normal, half))) * lit;
                     colour = colour * (1.0 - 0.6 * fresnel) + detail::environment(reflected) * (0.6 * fresnel) + Vec3{1, 1, 1} * (0.55 * specular);
                 }
             }
@@ -1145,19 +1177,27 @@ private:
         return colour;
     }
 
-    static bool hidden(const RenderPart& part, double u, double v) {
+    static bool hidden(const RenderPart& part, double u, double v, bool exact = false) {
         for (const Trim* trim : part.trims) {
-            if (trim->hides(u, v)) { return true; }
+            if (trim->hides(u, v, exact)) { return true; }
         }
         return false;
     }
 
     // Nearest hit among a pixel's transported predictions.
     bool resolve_candidates(const Scene& scene, const RenderOptions& options, const detail::View& view, Vec3 dir, const Candidate* list,
-                            int count, detail::Solve& best, std::uint16_t& best_part, Work& work) const {
+                            int count, detail::Solve& best, std::uint16_t& best_part, Work& work, int* crossings = nullptr) const {
         bool found = false;
+        // With a cutaway every prediction is solved: the hits in the removed
+        // half are counted (each once), for the cut face.
+        struct Seen {
+            std::uint16_t part;
+            double u, v;
+        };
+        Seen seen[max_candidates];
+        int seen_count = 0;
         for (int k = 0; k < count; ++k) {
-            if (found && double(list[k].z_low) > best.t) { break; }
+            if (!scene.cut && found && double(list[k].z_low) > best.t) { break; }
             detail::Solve attempt;
             attempt.u = list[k].u;
             attempt.v = list[k].v;
@@ -1165,6 +1205,18 @@ private:
             ++work.solves;
             const bool ok = detail::solve_ray(*scene.parts[list[k].part].surface, view, dir, options.tolerance_px, options.one_step_px, reach, attempt);
             work.evaluations += std::size_t(attempt.evaluations);
+            if (ok && scene.removed(attempt.point.p)) {
+                if (hidden(scene.parts[list[k].part], attempt.u, attempt.v, true)) { continue; }
+                bool repeat = false;
+                for (int j = 0; j < seen_count; ++j) {
+                    repeat = repeat || (seen[j].part == list[k].part && std::fabs(seen[j].u - attempt.u) < 0.05 && std::fabs(seen[j].v - attempt.v) < 0.05);
+                }
+                if (!repeat) {
+                    seen[seen_count++] = {list[k].part, attempt.u, attempt.v};
+                    if (crossings != nullptr) { ++*crossings; }
+                }
+                continue;
+            }
             if (ok && hidden(scene.parts[list[k].part], attempt.u, attempt.v)) { continue; }
             if (ok && (!found || attempt.t < best.t)) {
                 best = attempt;
@@ -1173,6 +1225,23 @@ private:
             }
         }
         return found;
+    }
+
+    // The cut face. A ray that starts in the removed half and has crossed
+    // the surface an odd number of times there is inside solid material
+    // when it reaches the cutting plane, and shows the cut face.
+    static bool cut_face(const Scene& scene, const RenderOptions& options, const detail::View& view, Vec3 dir, bool odd, double ground_t, Hit& hit, Vec3& colour) {
+        if (!scene.cut || !odd || !(dot(scene.cut_normal, view.eye) > scene.cut_offset)) { return false; }
+        const double along = dot(scene.cut_normal, dir);
+        if (!(along < -1e-12)) { return false; }
+        const double t = (scene.cut_offset - dot(scene.cut_normal, view.eye)) / along;
+        if (!(t > 0.0) || (ground_t > 0.0 && ground_t < t && view.eye.y > scene.ground_y)) { return false; }
+        hit.t = float(t);
+        hit.part = 0xffff; // not a surface: it cannot be picked
+        const Vec3 clay{0.36, 0.26, 0.22};
+        const double light = options.lighting ? 0.55 + 0.6 * std::fmax(0.0, dot(scene.cut_normal, scene.light)) : 1.0;
+        colour = clay * light;
+        return true;
     }
 
     // One camera sample at screen position (sx, sy), using the predictions
@@ -1185,8 +1254,9 @@ private:
         std::uint16_t best_part = 0;
         const std::size_t solves_before = work.solves;
         bool found;
+        int crossings = 0;
         if (options.method == Method::transport) {
-            found = resolve_candidates(scene, options, view, dir, &candidates_[pixel * max_candidates], counts_[pixel], best, best_part, work);
+            found = resolve_candidates(scene, options, view, dir, &candidates_[pixel * max_candidates], counts_[pixel], best, best_part, work, &crossings);
         } else {
             found = trace_independent(scene, view, dir, options.tolerance_px, options.one_step_px, best, best_part, work.solves,
                                       work.evaluations, work.visits);
@@ -1196,6 +1266,8 @@ private:
         // The floor may be nearer than the surface.
         double ground_t = -1.0;
         if (options.ground && std::fabs(dir.y) > 1e-9) { ground_t = (scene.ground_y - view.eye.y) / dir.y; }
+        Vec3 face;
+        if (cut_face(scene, options, view, dir, (crossings & 1) != 0, ground_t, hit, face)) { return face; }
         if (found && !(ground_t > 0.0 && ground_t < best.t - 1e-4 && view.eye.y > scene.ground_y)) {
             hit.u = float(best.u);
             hit.v = float(best.v);
@@ -1228,7 +1300,7 @@ private:
                 plain.ground = false;
                 seen = reflected_radiance(scene, plain, view, p + Vec3{0.0, 2e-3, 0.0}, reflected, work);
             }
-            const double fresnel = 0.07 + 0.93 * std::pow(1.0 - std::fabs(unit.y), 5.0);
+            const double fresnel = 0.07 + 0.93 * detail::fifth(1.0 - std::fabs(unit.y));
             const double fade = smoothstep(18.0, 60.0, ground_t);
             colour = colour * (1.0 - fresnel * (1.0 - fade)) + seen * (fresnel * (1.0 - fade));
         }
@@ -1426,7 +1498,10 @@ private:
             shadow_version_ = 0;
             return;
         }
-        if (shadow_version_ == mesh.version && shadow_.size != 0) { return; }
+        const double cut_key = scene.cut ? scene.cut_offset + 7.0 * scene.cut_normal.x + 13.0 * scene.cut_normal.y + 17.0 * scene.cut_normal.z + 1e3 : 0.0;
+        const int wanted_size = options.shadow_size > 0 ? options.shadow_size : 1024;
+        if (shadow_version_ == mesh.version && shadow_.size == wanted_size && cut_key == shadow_cut_) { return; }
+        shadow_cut_ = cut_key;
         Vec3 low{1e30, 1e30, 1e30}, high{-1e30, -1e30, -1e30};
         for (const MeshVertex& vertex : mesh.vertices) {
             low = {std::min(low.x, vertex.p.x), std::min(low.y, vertex.p.y), std::min(low.z, vertex.p.z)};
@@ -1438,7 +1513,7 @@ private:
         const Vec3 helper = std::fabs(scene.light.y) < 0.9 ? Vec3{0, 1, 0} : Vec3{1, 0, 0};
         shadow_.x = normalize(cross(helper, shadow_.z));
         shadow_.y = cross(shadow_.z, shadow_.x);
-        shadow_.clear(1024); // drawn once per pose, not per frame
+        shadow_.clear(options.shadow_size > 0 ? options.shadow_size : 1024); // drawn once per pose, not per frame
         std::vector<double> projected(mesh.vertices.size() * 5);
         for (std::size_t k = 0; k < mesh.vertices.size(); ++k) {
             shadow_.project(mesh.vertices[k].p, projected[k * 5], projected[k * 5 + 1], projected[k * 5 + 2]);
@@ -1446,6 +1521,11 @@ private:
             projected[k * 5 + 4] = double(mesh.vertices[k].v);
         }
         for (std::size_t t = 0; t < mesh.triangle_count(); ++t) {
+            // What the cutaway removed casts no shadow, so light reaches the inside.
+            if (scene.removed(mesh.vertices[mesh.triangles[t * 3]].p) && scene.removed(mesh.vertices[mesh.triangles[t * 3 + 1]].p) &&
+                scene.removed(mesh.vertices[mesh.triangles[t * 3 + 2]].p)) {
+                continue;
+            }
             detail::raster_depth(shadow_, &projected[std::size_t(mesh.triangles[t * 3]) * 5], &projected[std::size_t(mesh.triangles[t * 3 + 1]) * 5],
                                  &projected[std::size_t(mesh.triangles[t * 3 + 2]) * 5], mesh.triangle_part[t]);
         }
@@ -1462,6 +1542,8 @@ private:
         double ground_t = -1.0;
         if (options.ground && std::fabs(dir.y) > 1e-9) { ground_t = (scene.ground_y - view.eye.y) / dir.y; }
         const double depth = sample.triangle != 0xffffffffu ? 1.0 / double(sample.iz) : 0.0;
+        Vec3 face;
+        if (cut_face(scene, options, view, dir, sample.crossings % 2 != 0, ground_t, hit, face)) { return face; }
         if (sample.triangle == 0xffffffffu || (ground_t > 0.0 && ground_t < depth - 1e-4 && view.eye.y > scene.ground_y)) {
             if (!(ground_t > 0.0)) { return options.gloss || options.floor_reflection ? sky(scene, view.eye, dir) : background(dir); }
             return floor_colour(scene, options, view.eye + dir * ground_t, ground_t, &view, &work);
@@ -1511,7 +1593,7 @@ private:
                 if (dot(normal, to_eye) < 0.0) { normal = normal * -1.0; }
                 const bool chrome = options.material == 1 && options.texture == 0;
                 const double f0 = chrome ? 0.86 : 0.05;
-                const double fresnel = f0 + (1.0 - f0) * std::pow(1.0 - std::fmax(0.0, dot(normal, to_eye)), 5.0);
+                const double fresnel = f0 + (1.0 - f0) * detail::fifth(1.0 - std::fmax(0.0, dot(normal, to_eye)));
                 const Vec3 reflected = incoming - normal * (2.0 * dot(incoming, normal));
                 if (options.gloss) {
                     const Vec3 p = a.p * double(w[0]) + b.p * double(w[1]) + c.p * double(w[2]) + normal * 2e-3;
@@ -1533,7 +1615,7 @@ private:
                     colour = under * (1.0 - fresnel) + Vec3{mirror.x * tint.x, mirror.y * tint.y, mirror.z * tint.z} * (fresnel * mirror_dim(lit, dot(normal, scene.light)));
                 } else {
                     const Vec3 half = normalize(scene.light + to_eye);
-                    const double specular = std::pow(std::fmax(0.0, dot(normal, half)), 90.0) * lit;
+                    const double specular = detail::ninetieth(std::fmax(0.0, dot(normal, half))) * lit;
                     colour = colour * (1.0 - 0.6 * fresnel) + environment(reflected) * (0.6 * fresnel) + Vec3{1, 1, 1} * (0.55 * specular);
                 }
             }
@@ -1593,11 +1675,17 @@ private:
         const double raster_start = now_ms();
         const int scale = std::max(1, std::min(3, options.supersample));
         visibility_.resize(frame.width, frame.height, scale);
+        std::vector<float> clip;
+        if (scene.cut) {
+            clip.resize(mesh.vertices.size());
+            for (std::size_t k = 0; k < clip.size(); ++k) { clip[k] = float(dot(scene.cut_normal, mesh.vertices[k].p) - scene.cut_offset); }
+        }
         rasterize(
             mesh, [&](Vec3 p, double& x, double& y, double& z) { view.project(p, x, y, z); },
-            [&](std::uint16_t part, double u, double v) { return hidden(scene.parts[part], u, v); },
+            [&](std::uint16_t part, double u, double v, bool exact) { return hidden(scene.parts[part], u, v, exact); },
             [&](int rows, const std::function<void(int, int)>& body) { parallel_rows(rows, options.threads, [&](int begin, int end, int) { body(begin, end); }); },
-            visibility_);
+            visibility_, 0.05, clip.empty() ? nullptr : clip.data());
+        if (scene.cut) { despeckle_crossings(visibility_); }
         // Level of the light map for every triangle: texels per pixel.
         const bool textured = options.method == Method::raster && options.baked_light && mesh.lit;
         if (textured) {
@@ -1633,7 +1721,7 @@ private:
                     for (int k = 1; k < scale * scale && flat; ++k) {
                         const VisibilitySample& other = visibility_.at(x * scale + k % scale, y * scale + k / scale);
                         const bool a = first.triangle != 0xffffffffu, b = other.triangle != 0xffffffffu;
-                        if (a != b) {
+                        if (a != b || (first.crossings & 1) != (other.crossings & 1)) {
                             flat = false;
                         } else if (a && other.triangle != first.triangle) {
                             flat = mesh.triangle_part[other.triangle] == mesh.triangle_part[first.triangle] && std::fabs(other.iz - first.iz) < 0.004f * first.iz;
@@ -1688,6 +1776,7 @@ private:
 
     std::vector<detail::PartLattice> lattices_;
     detail::ShadowMap shadow_;
+    double shadow_cut_ = 0.0;
     std::uint64_t shadow_version_ = 0; // mesh version the shadow map was drawn from; 0: from the lattices
     Visibility visibility_;
     std::vector<float> triangle_lod_;

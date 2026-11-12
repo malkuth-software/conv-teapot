@@ -55,6 +55,11 @@ EMSCRIPTEN_KEEPALIVE void tp_set(int key, double value) {
     case 33: e.light_texel = value; break;
     case 34: e.render.live_reflection = value != 0; e.mesh.lit = false; break;
     case 35: e.render.exact_shadows = value != 0; e.mesh.lit = false; break;
+    case 36: e.side = int(value); e.mesh.lit = false; break;
+    case 37: e.joins = value != 0; e.rebuild(); break;
+    case 38: e.mesh_options.match_edge_normals = value != 0; break;
+    case 39: e.mesh_options.diagonal = int(value); break;
+    case 40: e.quick_while_moving = value != 0; break;
     default: break;
     }
 }
@@ -72,6 +77,14 @@ EMSCRIPTEN_KEEPALIVE void tp_action(int action) {
     if (action == 2) { engine->bake_vertices(); }
     if (action == 3) { engine->bake_light(); }
 }
+
+// The baked mesh as OBJ text: returns its length; tp_export_data points at it.
+static std::string exported;
+EMSCRIPTEN_KEEPALIVE int tp_export(int z_up) {
+    exported = engine->export_obj(z_up != 0);
+    return int(exported.size());
+}
+EMSCRIPTEN_KEEPALIVE const char* tp_export_data() { return exported.data(); }
 
 EMSCRIPTEN_KEEPALIVE double tp_stat(int index) {
     const tconv::RenderStats& s = engine->renderer.stats;

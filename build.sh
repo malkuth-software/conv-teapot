@@ -19,4 +19,5 @@ $CXX $FLAGS tools/curvature_budget.cpp -o out/curvature_budget
 $CXX $FLAGS tools/rotation_study.cpp -o out/rotation_study
 $CXX $FLAGS tests/line_check.cpp -o out/line_check
 $CXX $FLAGS tests/grab_check.cpp out/zc_phys.a -o out/grab_check
+$CXX $FLAGS tests/engine_check.cpp out/zc_phys.a -o out/engine_check
 echo built

@@ -8,7 +8,7 @@ mkdir -p out
 em++ -std=c++20 -O3 -ffp-contract=off -fwasm-exceptions -DTCONV_SINGLE_THREAD web/main.cpp third_party/zc_phys/*.cpp -o out/teapot_engine.js \
   -sSINGLE_FILE=1 -sALLOW_MEMORY_GROWTH=1 -sSTACK_SIZE=8MB -sMODULARIZE=1 -sEXPORT_NAME=TeapotEngine -sENVIRONMENT=web \
   -sEXPORTED_RUNTIME_METHODS=HEAPU8 \
-  -sEXPORTED_FUNCTIONS=_malloc,_free,_tp_init,_tp_draw,_tp_set,_tp_pointer,_tp_zoom,_tp_action,_tp_stat
+  -sEXPORTED_FUNCTIONS=_malloc,_free,_tp_init,_tp_draw,_tp_set,_tp_pointer,_tp_zoom,_tp_action,_tp_stat,_tp_export,_tp_export_data
 python3 - <<'PY'
 template = open("web/index.template.html").read()
 engine = open("out/teapot_engine.js").read().replace("</script>", "<\\/script>")

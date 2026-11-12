@@ -131,6 +131,13 @@ int main(int argc, char** argv) {
     }
     for (const auto& texture : textures) { scene.textures.push_back(texture.get()); }
 
+    // side=left|right: cut the teapot along its plane of symmetry and show one half.
+    const std::string side = get("side", "both");
+    if (side != "both") {
+        scene.cut = true;
+        scene.cut_normal = pose.direction({0.0, 0.0, side == "left" ? 1.0 : -1.0});
+        scene.cut_offset = dot(scene.cut_normal, pose.b);
+    }
     RenderOptions options;
     const std::string method = get("method", "transport");
     options.method = method == "independent" ? Method::independent : method == "raster" ? Method::raster : method == "seeded" ? Method::seeded : Method::transport;

@@ -72,6 +72,9 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
         <label class="check"><input type="checkbox" data-key="25" checked> body</label>
         <label class="check"><input type="checkbox" data-key="26" checked> show interior</label>
         <label class="check"><input type="checkbox" data-key="21" id="blinn" checked> Blinn scale</label>
+        <label class="check"><input type="checkbox" data-key="37" checked> joins (chamfer)</label>
+        <label class="row">Side
+          <select data-key="36"><option value="0">both</option><option value="1">left (cutaway)</option><option value="2">right (cutaway)</option></select></label>
         <p class="hint" id="versionNote"></p>
       </fieldset>
       <fieldset>
@@ -115,6 +118,7 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
         <label class="row">Frame
           <select id="size"><option value="480x300" selected>480 × 300</option><option value="640x400">640 × 400</option><option value="960x600">960 × 600</option></select></label>
         <label class="check"><input type="checkbox" data-key="19" checked> edge samples</label>
+        <label class="check"><input type="checkbox" data-key="40" checked> quick frames while moving</label>
         <label class="check"><input type="checkbox" data-key="11"> show solver work</label>
       </fieldset>
       <fieldset>
@@ -131,6 +135,12 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
         <label class="check"><input type="checkbox" data-key="30" checked> show baked light</label>
         <label class="check"><input type="checkbox" data-key="34" checked> moving reflections</label>
         <label class="check"><input type="checkbox" data-key="31"> show triangles</label>
+        <label class="check"><input type="checkbox" data-key="38"> match edge normals</label>
+        <label class="row">Triangulation
+          <select data-key="39"><option value="0">shorter diagonal</option><option value="1">one direction</option><option value="2">flipped</option><option value="3">symmetric</option></select></label>
+        <label class="row">Download
+          <select id="objUp"><option value="0">y-up</option><option value="1">z-up</option></select></label>
+        <button id="objSave">Download mesh (.obj)</button>
         <p class="hint">Bake vertices samples the CONV surfaces once to a triangle mesh, drawn by a CPU rasterizer with no surface evaluation per frame. Bake light then has the ray tracer shade every texel of a light map as seen from the camera now; with moving reflections on, the map keeps only light that does not depend on the view, and highlights and the floor’s reflection are added each frame from emitters along the mirror direction: the sky and window above, and below an invisible stand-in for the floor that carries its baked shadow.</p>
       </fieldset>
       <fieldset>
@@ -152,7 +162,7 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
   try { engine = await TeapotEngine(); } catch (error) { stats.textContent = 'The engine failed to start: ' + error; return; }
   const canvas = document.getElementById('view');
   const context = canvas.getContext('2d');
-  let width = 480, height = 300, image = null, dirty = true, last = performance.now(), smooth = 0;
+  let width = 480, height = 300, image = null, dirty = true, last = performance.now(), smooth = 0, wasRunning = false;
   const resize = (w, h) => {
     width = w; height = h; canvas.width = w; canvas.height = h;
     engine._tp_init(w, h);
@@ -185,6 +195,9 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
         (s(11) > 0 ? ` · ${(s(11) / (width * height)).toFixed(1)} BVH nodes per ray` : '');
       stats.style.whiteSpace = 'pre-wrap';
       pauseButton.textContent = running() ? 'Pause' : 'Run';
+      // The frame drawn while moving is a quick one: draw once more when it stops.
+      if (wasRunning && !running()) { dirty = true; }
+      wasRunning = running();
     }
     requestAnimationFrame(frame);
   };
@@ -221,6 +234,16 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
   const useMesh = () => { const m = document.getElementById('method'); if (m.value !== '2') { m.value = '2'; engine._tp_set(3, 2); } };
   document.getElementById('bakeVertices').addEventListener('click', () => { useMesh(); engine._tp_action(2); dirty = true; });
   document.getElementById('bakeLight').addEventListener('click', () => { useMesh(); engine._tp_action(3); dirty = true; });
+  document.getElementById('objSave').addEventListener('click', () => {
+    const length = engine._tp_export(Number(document.getElementById('objUp').value));
+    const pointer = engine._tp_export_data();
+    const blob = new Blob([engine.HEAPU8.slice(pointer, pointer + length)], { type: 'text/plain' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = 'conv-teapot.obj';
+    link.click();
+    URL.revokeObjectURL(link.href);
+  });
   document.getElementById('drop').addEventListener('click', () => { engine._tp_action(0); dirty = true; });
   document.getElementById('reset').addEventListener('click', () => { engine._tp_action(1); dirty = true; });
   pauseButton.addEventListener('click', () => { engine._tp_set(12, running() ? 0 : 1); dirty = true; });

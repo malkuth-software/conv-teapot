@@ -29,8 +29,16 @@ struct Trim {
     // Or beyond a cut that varies around a tube: v < cut(u) or v > cut(u).
     std::vector<double> cut; // one value per node column
     bool below = false;
+    // The same boundaries at the band's own edge, with no overlap. Drawing
+    // uses the ones above, which stop inside the band so no gap shows;
+    // counting how often a ray crosses the surface (for a cutaway) needs
+    // every point to belong to exactly one sheet, and uses these.
+    std::vector<std::array<double, 2>> loop_exact;
+    std::vector<double> cut_exact;
 
-    bool hides(double u, double v) const {
+    bool hides(double u, double v, bool exact = false) const {
+        const std::vector<double>& cut = exact && !cut_exact.empty() ? cut_exact : this->cut;
+        const std::vector<std::array<double, 2>>& loop = exact && !loop_exact.empty() ? loop_exact : this->loop;
         if (!cut.empty()) {
             const double n = double(cut.size());
             double x = u - std::floor(u / n) * n;
@@ -52,7 +60,7 @@ struct Trim {
 
 struct JoinResult {
     bool ok = false;
-    Lattice blend;   // the join surface: closed around, 9 rows across the band
+    Lattice blend;   // the join surface: closed around, `across` rows across the band
     Trim body_trim;  // the part of the body under the join
     Trim tube_trim;  // the buried part of the tube
 };
@@ -80,10 +88,15 @@ struct BodyBranch {
 };
 
 // Join the end of `tube` at row `end_row` (0 or its last row) to the body.
+// `across` is the number of rows across the band. The band's edge tangent is
+// taken from its first four rows, over which the blend weight must still be
+// small: where the two surfaces are far apart for the band's width (the
+// spout's channel inside the body) nine rows are too few and the band
+// leaves the body at an angle.
 // `inside_is_smaller_radius` is true for the exterior branch (the tube is
 // buried where its radius is below the body's) and false for the interior.
 inline JoinResult make_join(const Surface& body, const BodyBranch& branch, bool inside_is_smaller_radius, const Surface& tube,
-                            bool at_first_row, double width, std::size_t body_nu) {
+                            bool at_first_row, double width, std::size_t body_nu, int across = 9) {
     JoinResult result;
     const std::size_t columns = tube.cells_u();
     const double rows = double(tube.cells_v());
@@ -137,7 +150,6 @@ inline JoinResult make_join(const Surface& body, const BodyBranch& branch, bool 
     centre_u /= double(columns);
     centre_v /= double(columns);
     const auto beta = [](double t) { return t * t * t * (10.0 + t * (6.0 * t - 15.0)); };
-    const int across = 9;
     result.blend.wrap_u = true;
     result.blend.closure = Closure::cubic;
     result.blend.nu = columns;
@@ -158,28 +170,52 @@ inline JoinResult make_join(const Surface& body, const BodyBranch& branch, bool 
         const double norm = std::hypot(out_u, out_v);
         out_u /= norm;
         out_v /= norm;
+        // A walk of a given length along each surface, in short steps that
+        // read the surface's own speed as they go. One step from the speed
+        // at the start is off where rows are graded or the surface turns,
+        // and the band then misses the surface it should leave tangentially.
+        const int steps = 8;
+        const auto on_body_at = [&](double distance) {
+            std::array<double, 2> q{body_u[k], body_v[k]};
+            for (int step = 0; step < steps; ++step) {
+                const SurfacePoint here = body.eval(q[0], q[1]);
+                q[0] += distance / steps * out_u / std::max(1e-9, length(here.du));
+                q[1] += distance / steps * out_v / std::max(1e-9, length(here.dv));
+            }
+            return q;
+        };
+        const auto on_tube_at = [&](double distance) {
+            double w = crossing[k];
+            for (int step = 0; step < steps; ++step) { w += direction * distance / steps / std::max(1e-9, length(tube.eval(u, w).dv)); }
+            return w;
+        };
+        (void)speed_u;
+        (void)speed_v;
+        (void)tube_speed;
         for (int j = 0; j < across; ++j) {
             const double tau = double(j) / double(across - 1);
-            const double on_body_distance = width * (1.0 - tau), on_tube_distance = width * tau;
-            const Vec3 a = body.position(body_u[k] + on_body_distance * out_u / speed_u, body_v[k] + on_body_distance * out_v / speed_v);
-            const Vec3 b = tube.position(u, crossing[k] + direction * on_tube_distance / tube_speed);
+            const std::array<double, 2> q = on_body_at(width * (1.0 - tau));
+            const Vec3 a = body.position(q[0], q[1]);
+            const Vec3 b = tube.position(u, on_tube_at(width * tau));
             result.blend.at(k, std::size_t(j)) = a * (1.0 - beta(tau)) + b * beta(tau);
         }
         // Trims stop inside the band so that no gap shows at its edges. The
         // band begins tangent to the surface it leaves, so the overlap is two
         // coincident sheets.
         const double keep = 0.93 * width;
-        result.tube_trim.cut[k] = crossing[k] + direction * keep / tube_speed;
-        result.body_trim.loop.push_back({body_u[k] + keep * out_u / speed_u, body_v[k] + keep * out_v / speed_v});
+        result.tube_trim.cut[k] = on_tube_at(keep);
+        result.body_trim.loop.push_back(on_body_at(keep));
+        result.tube_trim.cut_exact.push_back(on_tube_at(width));
+        result.body_trim.loop_exact.push_back(on_body_at(width));
     }
     // The cut on the body is a smooth closed curve through those points, not
     // the polygon with straight sides between them: where the body's rows
     // are dense a straight side in (u, v) bows out past the band's edge and
     // leaves a sliver of the body cut away with nothing over it.
-    {
-        const std::vector<std::array<double, 2>> corner = result.body_trim.loop;
+    for (std::vector<std::array<double, 2>>* outline : {&result.body_trim.loop, &result.body_trim.loop_exact}) {
+        const std::vector<std::array<double, 2>> corner = *outline;
         const std::size_t n = corner.size();
-        result.body_trim.loop.clear();
+        outline->clear();
         for (std::size_t k = 0; k < n; ++k) {
             const auto &p0 = corner[(k + n - 1) % n], &p1 = corner[k], &p2 = corner[(k + 1) % n], &p3 = corner[(k + 2) % n];
             for (int step = 0; step < 8; ++step) {
@@ -188,7 +224,7 @@ inline JoinResult make_join(const Surface& body, const BodyBranch& branch, bool 
                 for (std::size_t c = 0; c < 2; ++c) {
                     q[c] = 0.5 * (p0[c] * (-t3 + 2 * t2 - t) + p1[c] * (3 * t3 - 5 * t2 + 2) + p2[c] * (-3 * t3 + 4 * t2 + t) + p3[c] * (t3 - t2));
                 }
-                result.body_trim.loop.push_back(q);
+                outline->push_back(q);
             }
         }
     }

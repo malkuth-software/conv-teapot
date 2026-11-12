@@ -114,6 +114,18 @@ engine of PlaySuite's rock-stacking game (wrench-transport solver).
   position and 62 degrees in the normal on the 1976 lattice). The engine keeps
   the lattice at rest and carries the pose (`PosedSurface`).
 
+- **Options after the official page.** Side (left or right half, with the
+  cut face filled), joins on or off, match edge normals, triangulation
+  direction, and a download of the baked mesh as OBJ in y-up or z-up.
+- **Interior join.** The spout's channel now meets the cavity within 3.3
+  degrees (17 before): its band has seventeen rows across, and band points
+  are found by walking true distances along each surface.
+- **Speed in the browser.** While the picture is changing it is drawn at
+  half size with one visibility sample per pixel, and the mesh is carried by
+  the pose. At 960 x 600 a moving frame takes about 21 ms with the mesh and
+  49 ms with transport. WebAssembly SIMD and link-time optimisation were
+  tried and gave nothing: the arithmetic is scalar double precision.
+
 One 960 x 600 frame of the unified teapot, all threads / one thread: per-ray
 150 / 410 ms, transport 91 / 261, seeded 37 / 125, mesh shaded per pixel
 15 / 45, mesh with baked light and emitters 11 / 36.

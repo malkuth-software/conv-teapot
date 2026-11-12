@@ -40,6 +40,13 @@ struct MeshOptions {
     Layout layout = Layout::tree;
     double tolerance = 2e-3; // model units: bounds and tree
     int uniform = 4;         // cuts per cell: uniform
+    // Along a crease a vertex is normally two, one per side, each with its
+    // side's normal. Matched, it is one vertex with the mean of the two, which
+    // shades the crease as a rounded edge.
+    bool match_edge_normals = false;
+    // Which diagonal cuts a four-cornered piece: 0 the shorter, 1 and 2 the
+    // two fixed directions, 3 mirrored about the plane of symmetry.
+    int diagonal = 0;
     double angle = 0.0;      // bounds and tree: also cut until the normal turns no more than this many degrees along an edge (0: off)
 };
 
@@ -379,7 +386,7 @@ struct MeshBuilder {
 
     // `side`: -1 for a piece that lies below the vertex's row, +1 above.
     std::uint32_t vertex(long iu, long iv, const MeshPart& part, int side = 0) {
-        const bool on_crease = iv % mesh_resolution == 0 && crease[std::size_t(iv / mesh_resolution)] != 0 && side != 0;
+        const bool on_crease = iv % mesh_resolution == 0 && crease[std::size_t(iv / mesh_resolution)] != 0 && side != 0 && !options.match_edge_normals;
         if (on_crease) {
             // A crease vertex exists once per side, with that side's normal.
             const std::uint64_t side_key = key(iu, iv) ^ (side < 0 ? 0x4000000000000000ull : 0x2000000000000000ull);
@@ -404,6 +411,11 @@ struct MeshBuilder {
         MeshVertex vertex;
         vertex.p = sp.p;
         vertex.n = sp.du;
+        if (options.match_edge_normals && iv % mesh_resolution == 0 && crease[std::size_t(iv / mesh_resolution)] != 0) {
+            const double u = double(closing ? 0 : iu) / double(mesh_resolution), v = double(iv) / double(mesh_resolution);
+            vertex.n = normalize(mesh_point(surface, u, v - 1e-4).du + mesh_point(surface, u, v + 1e-4).du);
+            mesh.evaluations += 2;
+        }
         vertex.u = float(double(iu) / double(mesh_resolution));
         vertex.v = float(double(iv) / double(mesh_resolution));
         vertex.s = float(double(iu) / double(cu * mesh_resolution));
@@ -527,7 +539,9 @@ struct MeshBuilder {
             if (ring.size() == 4) {
                 // The shorter diagonal.
                 const Vec3 a = mesh.vertices[ring[0]].p, b = mesh.vertices[ring[1]].p, c = mesh.vertices[ring[2]].p, d = mesh.vertices[ring[3]].p;
-                if (length(a - c) <= length(b - d)) {
+                // Mirrored: the two halves of a closed part, either side of u = half a turn, are cut opposite ways.
+                const bool forward = options.diagonal == 1 || (options.diagonal == 3 && (surface.periodic_u() ? r.u0 < turn / 2 : true));
+                if (options.diagonal == 0 ? length(a - c) <= length(b - d) : forward) {
                     triangle(ring[0], ring[1], ring[2], part_index);
                     triangle(ring[0], ring[2], ring[3], part_index);
                 } else {
@@ -582,6 +596,7 @@ struct VisibilitySample {
     float iz = 0.0f;                    // 1 / view depth; 0: nothing
     std::uint32_t triangle = 0xffffffffu;
     float l1 = 0.0f, l2 = 0.0f;         // screen-affine weights of the second and third corner
+    std::uint32_t crossings = 0;        // cutaway: surface crossed this many times in the removed half
 };
 
 struct Visibility {
@@ -597,6 +612,22 @@ struct Visibility {
     const VisibilitySample& at(int x, int y) const { return samples[std::size_t(y) * std::size_t(width) + std::size_t(x)]; }
 };
 
+// A crossing count that is odd in a line one sample wide is the mismatch of
+// two boundaries that should coincide, not material: such samples are made
+// even, so the cut face shows no hairlines.
+inline void despeckle_crossings(Visibility& vis) {
+    std::vector<unsigned char> odd(vis.samples.size());
+    for (std::size_t k = 0; k < odd.size(); ++k) { odd[k] = vis.samples[k].crossings & 1u; }
+    for (int y = 1; y + 1 < vis.height; ++y) {
+        for (int x = 1; x + 1 < vis.width; ++x) {
+            const std::size_t k = std::size_t(y) * std::size_t(vis.width) + std::size_t(x);
+            if (odd[k] == 0) { continue; }
+            const bool across = odd[k - 1] == 0 && odd[k + 1] == 0, down = odd[k - std::size_t(vis.width)] == 0 && odd[k + std::size_t(vis.width)] == 0;
+            if (across || down) { ++vis.samples[k].crossings; }
+        }
+    }
+}
+
 // Perspective-correct weights of the three corners from a sample.
 inline void corner_weights(const Visibility& vis, const Mesh& mesh, const VisibilitySample& sample, float* w) {
     const std::uint32_t* corner = &mesh.triangles[std::size_t(sample.triangle) * 3];
@@ -608,11 +639,11 @@ inline void corner_weights(const Visibility& vis, const Mesh& mesh, const Visibi
 }
 
 // Draw the mesh into the visibility buffer. `project(p, x, y, z)` gives a
-// pixel position and view depth; `hidden(part, u, v)` is asked for samples
+// pixel position and view depth; `hidden(part, u, v, exact)` is asked for samples
 // of triangles that cross a trim; `rows(count, body)` runs body(begin, end)
 // over ranges of bands of rows, possibly on several threads.
 template<class Project, class Hidden, class Rows>
-void rasterize(const Mesh& mesh, Project project, Hidden hidden, Rows rows, Visibility& vis, double near = 0.05) {
+void rasterize(const Mesh& mesh, Project project, Hidden hidden, Rows rows, Visibility& vis, double near = 0.05, const float* clip = nullptr) {
     const std::size_t count = mesh.vertices.size();
     vis.sx.resize(count);
     vis.sy.resize(count);
@@ -684,20 +715,54 @@ void rasterize(const Mesh& mesh, Project project, Hidden hidden, Rows rows, Visi
             const float iza = vis.iz[ia], dzb = vis.iz[ib] - iza, dzc = vis.iz[ic] - iza;
             const bool trimmed = mesh.triangle_trimmed[t] != 0;
             for (int y = y0; y <= y1; ++y) {
-                std::int64_t w0 = row0, w1 = row1, w2 = row2;
-                VisibilitySample* out = &vis.samples[std::size_t(y) * std::size_t(vis.width) + std::size_t(x0)];
-                for (int x = x0; x <= x1; ++x, ++out, w0 += e0x * 256, w1 += e1x * 256, w2 += e2x * 256) {
-                    if ((w0 | w1 | w2) < 0) { continue; }
+                // The run of samples inside the triangle on this row, from the
+                // three edge functions: no sample is tested one by one.
+                int first = x0, last = x1;
+                bool empty = false;
+                const std::int64_t rows_now[3] = {row0, row1, row2}, steps[3] = {e0x * 256, e1x * 256, e2x * 256};
+                for (int e = 0; e < 3; ++e) {
+                    if (steps[e] > 0) {
+                        if (rows_now[e] < 0) { first = std::max(first, x0 + int((-rows_now[e] + steps[e] - 1) / steps[e])); }
+                    } else if (rows_now[e] < 0) {
+                        empty = true;
+                    } else if (steps[e] < 0) {
+                        last = std::min(last, x0 + int(rows_now[e] / -steps[e]));
+                    }
+                }
+                if (empty || first > last) {
+                    row0 += e0y * 256;
+                    row1 += e1y * 256;
+                    row2 += e2y * 256;
+                    continue;
+                }
+                std::int64_t w1 = row1 + steps[1] * (first - x0), w2 = row2 + steps[2] * (first - x0);
+                VisibilitySample* out = &vis.samples[std::size_t(y) * std::size_t(vis.width) + std::size_t(first)];
+                for (int x = first; x <= last; ++x, ++out, w1 += steps[1], w2 += steps[2]) {
                     const float lb = float(w1) * inverse, lc = float(w2) * inverse;
                     const float iz = iza + lb * dzb + lc * dzc;
-                    if (!(iz > out->iz)) { continue; }
+                    if (clip == nullptr && !(iz > out->iz)) { continue; }
                     const float l1 = swapped ? lc : lb, l2 = swapped ? lb : lc;
+                    if (clip != nullptr) {
+                        // `clip` is each vertex's distance past the cutting plane.
+                        // A piece of surface in the removed half is not drawn, only counted.
+                        const std::uint32_t* corner = &mesh.triangles[t * 3];
+                        const float wa = (1.0f - l1 - l2) * vis.iz[corner[0]], wb = l1 * vis.iz[corner[1]], wc = l2 * vis.iz[corner[2]];
+                        if (wa * clip[corner[0]] + wb * clip[corner[1]] + wc * clip[corner[2]] > 0.0f) {
+                            if (!trimmed || !hidden(mesh.triangle_part[t],
+                                                    double((wa * mesh.vertices[corner[0]].u + wb * mesh.vertices[corner[1]].u + wc * mesh.vertices[corner[2]].u) / (wa + wb + wc)),
+                                                    double((wa * mesh.vertices[corner[0]].v + wb * mesh.vertices[corner[1]].v + wc * mesh.vertices[corner[2]].v) / (wa + wb + wc)), true)) {
+                                ++out->crossings;
+                            }
+                            continue;
+                        }
+                    }
+                    if (!(iz > out->iz)) { continue; }
                     if (trimmed) {
                         const std::uint32_t* corner = &mesh.triangles[t * 3];
                         const float wa = (1.0f - l1 - l2) * vis.iz[corner[0]], wb = l1 * vis.iz[corner[1]], wc = l2 * vis.iz[corner[2]];
                         const float sum = wa + wb + wc;
                         const MeshVertex &va = mesh.vertices[corner[0]], &vb = mesh.vertices[corner[1]], &vc = mesh.vertices[corner[2]];
-                        if (hidden(mesh.triangle_part[t], double((wa * va.u + wb * vb.u + wc * vc.u) / sum), double((wa * va.v + wb * vb.v + wc * vc.v) / sum))) { continue; }
+                        if (hidden(mesh.triangle_part[t], double((wa * va.u + wb * vb.u + wc * vc.u) / sum), double((wa * va.v + wb * vb.v + wc * vc.v) / sum), false)) { continue; }
                     }
                     out->iz = iz;
                     out->triangle = std::uint32_t(t);

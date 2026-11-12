@@ -47,10 +47,10 @@ rows placed by a piecewise projective warp whose density is set by CONV's
 own error, and the mean relative curvature jump along the profile falls
 from 0.16 to 0.003. The handle and spout are joined to the body by blends
 that interpolate between the two surfaces. These joins are ours, not the
-2026 model's chamfers, and we report where they are rough. Given the same
+2026 model's chamfers, and we report how closely they meet the body. Given the same
 nodes on targets native to no method, CONV needs as few as the globally
 solved $C^2$ spline and a half to a quarter of what a local bicubic
-needs; the whole 2026 teapot is 3104 nodes. Finally the surface can be
+needs; the whole 2026 teapot is 3232 nodes. Finally the surface can be
 baked: sampled once to vertices chosen by its own error, drawn by a CPU
 rasterizer with no evaluation per frame, and lit from a texture that the
 ray tracer paints, with reflections that follow the camera taken from
@@ -594,17 +594,27 @@ replaces.
 \hline
 Join & Gap max & Normal mismatch max\\
 \hline
-Handle, upper & $3.7\times10^{-4}$ & $1.6^\circ$\\
-Handle, lower & $1.4\times10^{-4}$ & $4.2^\circ$\\
-Spout base & $4.6\times10^{-4}$ & $1.3^\circ$\\
-Spout channel, interior & $4.2\times10^{-4}$ & $17.1^\circ$\\
+Handle, upper & $3.7\times10^{-4}$ & $1.5^\circ$\\
+Handle, lower & $1.6\times10^{-4}$ & $3.2^\circ$\\
+Spout base & $7.9\times10^{-4}$ & $1.6^\circ$\\
+Spout channel, interior & $1.6\times10^{-4}$ & $3.3^\circ$\\
 \hline
 \end{tabular}
 \end{table}
 
-The exterior joins agree with the body to a few degrees; the mismatch
-comes from sampling \eqref{eq:join} at only sixteen columns around. The
-interior join is rough and we would not present it as finished.
+The joins agree with the body to a few degrees; the mismatch comes from
+sampling \eqref{eq:join} at only sixteen columns around. Two details of
+the sampling matter. The band's points are found by walking the given
+distance along each surface in short steps that read the surface's own
+speed, not by one step from the speed at the start, which is wrong where
+rows are graded. And the band's edge tangent is taken by CONV from its
+first four rows, over which the blend weight $\beta$ must still be
+small. With nine rows across, the fourth row has $\beta=0.28$, and the
+tangent is off by about $0.11\,\Delta/w$ radians, $\Delta$ the distance
+between the two surfaces and $w$ the band's width. On the exterior
+joins that is a degree or two. On the interior join, where the spout's
+channel meets the cavity and $\Delta/w$ is near 3, it was $17^\circ$;
+with seventeen rows across that band it is $3.3^\circ$.
 Fig.~\ref{fig:unified} shows reflection lines running from the body
 through the join onto the spout without a break.
 
@@ -614,7 +624,9 @@ spout differs from the official one. What they show is that a join needs
 no new kind of surface: it is the same blend between two continuous
 surfaces that CONV already uses between its two factor orders.
 
-The unified teapot has 3104 nodes in eight lattices, against 5346 in 66,
+The unified teapot has 3232 nodes in eight lattices (3104 before the
+interior join was given seventeen rows; the layout measurements of
+Section~\ref{sec:baked} were made on that model), against 5346 in 66,
 and every sheet lies within $7.5\times10^{-4}$ of its source. (Placed by
 radius of curvature the same sheets took 5392 nodes and strayed by up to
 $1.1\times10^{-2}$.) A $640\times400$ frame of it takes 44\,ms by
@@ -1305,6 +1317,26 @@ light map painted by the ray tracer.}
 \label{fig:mesh}
 \end{figure*}
 
+\subsection{Cutaway}
+
+The official page shows the left or right half of the model. We cut the
+teapot along its plane of symmetry and fill the cut where it passes
+through material. A ray that starts in the removed half and has crossed
+the surface an odd number of times there is inside material when it
+reaches the plane, and shows the cut face; otherwise it continues to
+the first surface in the kept half. The rasterizer counts, at each
+sample, the pieces of surface in the removed half; the ray tracer
+counts the hits among a pixel's predictions. The count requires every
+point of the teapot to belong to exactly one sheet. The joins overlap
+the surfaces they join by a few percent of their width so that no gap
+shows, and in that overlap a ray would be counted twice; the count
+therefore uses a second set of trim boundaries placed exactly at the
+bands' edges. What remains is a mismatch one sample wide between those
+boundaries and the bands, which is removed from the count. Geometry in
+the removed half casts no shadow, so light reaches the interior. With
+transport the count is limited to the six predictions kept per pixel
+and is less clean than with the mesh.
+
 \section{Motion}
 
 Since every node is a surface point, the collision shape of the teapot
@@ -1404,13 +1436,13 @@ lattices. Across their seams those lattices do not carry curvature
 continuity. Whole sheets reduce the curvature jump from 0.16 to 0.003: the body with its interior is one
 lattice, the lid another, with rows placed by a projective warp, and the
 handle and spout meet the body in joins that are blends of the two
-surfaces. With rows placed by CONV's own error the whole teapot is 3104
+surfaces. With rows placed by CONV's own error the whole teapot is 3232
 nodes, and on targets native to no method a CONV lattice needs as few
 nodes as the globally solved $C^2$ spline while reading only the nodes
 around a cell. When speed matters more than exactness the lattice bakes
 to a mesh whose vertices its own error places, lit by a texture the ray
 tracer paints, at a tenth of the cost of tracing. Unfinished: a residue
-of curvature jump where rows are coarse, a rough interior join, and
+of curvature jump where rows are coarse, and
 joins that differ from the chamfers Yuksel designed.
 
 \section*{Attribution}
