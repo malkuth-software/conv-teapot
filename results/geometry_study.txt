@@ -1,0 +1,56 @@
+deviation from the Bezier teapot (model units; the body is 4.0 wide)
+per  nodes   bubble        max        rms     | linear max   linear rms
+-- seamless, paper closure
+  2    152   none        2.058e-01  4.849e-02 | 2.989e-01   9.244e-02
+  2    152   continuous  2.069e-01  4.830e-02 | 2.989e-01   9.244e-02
+  3    324   none        9.408e-02  1.737e-02 | 1.686e-01   4.273e-02
+  3    324   continuous  8.795e-02  1.719e-02 | 1.686e-01   4.273e-02
+  4    560   none        6.437e-02  9.610e-03 | 1.053e-01   2.437e-02
+  4    560   continuous  5.919e-02  9.469e-03 | 1.053e-01   2.437e-02
+  6   1224   none        3.890e-02  4.734e-03 | 5.131e-02   1.094e-02
+  6   1224   continuous  3.502e-02  4.651e-03 | 5.131e-02   1.094e-02
+  8   2144   none        2.771e-02  2.963e-03 | 3.007e-02   6.179e-03
+  8   2144   continuous  2.464e-02  2.907e-03 | 3.007e-02   6.179e-03
+ 12   4752   none        1.752e-02  1.519e-03 | 1.388e-02   2.754e-03
+ 12   4752   continuous  1.536e-02  1.486e-03 | 1.388e-02   2.754e-03
+-- seamless, cubic closure
+  2    152   none        1.874e-01  3.827e-02 | 2.989e-01   9.244e-02
+  2    152   continuous  1.870e-01  3.803e-02 | 2.989e-01   9.244e-02
+  3    324   none        9.408e-02  1.415e-02 | 1.686e-01   4.273e-02
+  3    324   continuous  8.795e-02  1.392e-02 | 1.686e-01   4.273e-02
+  4    560   none        6.437e-02  8.828e-03 | 1.053e-01   2.437e-02
+  4    560   continuous  5.919e-02  8.673e-03 | 1.053e-01   2.437e-02
+  6   1224   none        3.890e-02  4.644e-03 | 5.131e-02   1.094e-02
+  6   1224   continuous  3.502e-02  4.559e-03 | 5.131e-02   1.094e-02
+  8   2144   none        2.771e-02  2.944e-03 | 3.007e-02   6.179e-03
+  8   2144   continuous  2.464e-02  2.888e-03 | 3.007e-02   6.179e-03
+ 12   4752   none        1.752e-02  1.516e-03 | 1.388e-02   2.754e-03
+ 12   4752   continuous  1.536e-02  1.484e-03 | 1.388e-02   2.754e-03
+-- seams at patch boundaries, cubic closure
+  2    152   none        2.297e-01  5.379e-02 | 2.989e-01   9.244e-02
+  2    152   continuous  2.297e-01  5.379e-02 | 2.989e-01   9.244e-02
+  3    324   none        2.916e-05  1.341e-06 | 1.686e-01   4.273e-02
+  3    324   continuous  2.916e-05  1.341e-06 | 1.686e-01   4.273e-02
+  4    560   none        2.220e-15  4.136e-16 | 1.053e-01   2.437e-02
+  4    560   continuous  2.220e-15  4.137e-16 | 1.053e-01   2.437e-02
+  6   1224   none        3.382e-15  6.206e-16 | 5.131e-02   1.094e-02
+  6   1224   continuous  3.382e-15  6.206e-16 | 5.131e-02   1.094e-02
+  8   2144   none        2.391e-15  4.141e-16 | 3.007e-02   6.179e-03
+  8   2144   continuous  2.391e-15  4.141e-16 | 3.007e-02   6.179e-03
+ 12   4752   none        3.560e-15  6.544e-16 | 1.388e-02   2.754e-03
+ 12   4752   continuous  3.560e-15  6.544e-16 | 1.388e-02   2.754e-03
+
+per-part deviation at per = 4, continuous bubble
+  body    nodes  272  max 1.794e-15  rms 3.193e-16  orientation +1
+  lid     nodes  144  max 1.804e-15  rms 4.399e-16  orientation +1
+  handle  nodes   72  max 1.405e-15  rms 4.792e-16  orientation +1
+  spout   nodes   72  max 2.220e-15  rms 5.852e-16  orientation +1
+
+continuity: largest jump between samples one step apart along u
+surface            bubble       step 1e-4    step 1e-6    step 1e-8
+teapot             none         8.391e-05    8.087e-07    8.085e-09
+teapot             standard     8.391e-05    8.087e-07    8.085e-09
+teapot             continuous   8.391e-05    8.087e-07    8.085e-09
+rough body         none         1.842e-03    1.434e-06    1.347e-08
+rough body         standard     2.036e-03    1.299e-04    1.347e-08
+rough body         continuous   1.865e-03    1.355e-06    1.347e-08

@@ -1,0 +1,77 @@
+host: Apple A18 Pro, 6 cores; Apple clang version 21.0.0 (clang-2100.3.34.2); flags -O3 -ffp-contract=off
+date: 2026-11-11; load averages: 4.85 4.37 3.79
+view: azimuth 100, elevation 16, distance 11; CONV exact teapot, 560 nodes, lattice 4 per node interval; median of 21 frames
+== edge_samples=0 size=640x400 threads=0 method=transport
+conv transport 640x400 nodes=560 lattice=8548 candidates=101716 solves=50134 evaluations=65050 hits=43729 visits=0 edge_pixels=0
+  median of 21: total 17.40 ms (lattice+shadow 4.28, predict/bvh 3.50, solve+shade 9.60); solves/hit 1.146 evaluations/hit 1.488
+== edge_samples=0 size=640x400 threads=0 method=independent
+conv independent 640x400 nodes=560 lattice=8548 candidates=0 solves=83001 evaluations=90972 hits=43744 visits=2180068 edge_pixels=0
+  median of 21: total 29.11 ms (lattice+shadow 5.00, predict/bvh 1.47, solve+shade 22.46); solves/hit 1.897 evaluations/hit 2.080
+== edge_samples=0 size=640x400 threads=1 method=transport
+conv transport 640x400 nodes=560 lattice=8548 candidates=101723 solves=50135 evaluations=65058 hits=43729 visits=0 edge_pixels=0
+  median of 21: total 48.37 ms (lattice+shadow 4.97, predict/bvh 6.69, solve+shade 36.68); solves/hit 1.146 evaluations/hit 1.488
+== edge_samples=0 size=640x400 threads=1 method=independent
+conv independent 640x400 nodes=560 lattice=8548 candidates=0 solves=83001 evaluations=90972 hits=43744 visits=2180068 edge_pixels=0
+  median of 21: total 87.35 ms (lattice+shadow 4.99, predict/bvh 1.43, solve+shade 80.77); solves/hit 1.897 evaluations/hit 2.080
+== edge_samples=0 size=960x600 threads=0 method=transport
+conv transport 960x600 nodes=560 lattice=8548 candidates=219154 solves=107050 evaluations=131463 hits=98462 visits=0 edge_pixels=0
+  median of 21: total 30.30 ms (lattice+shadow 4.69, predict/bvh 4.80, solve+shade 20.85); solves/hit 1.087 evaluations/hit 1.335
+== edge_samples=0 size=960x600 threads=0 method=independent
+conv independent 960x600 nodes=560 lattice=8548 candidates=0 solves=186792 evaluations=206332 hits=98465 visits=4905872 edge_pixels=0
+  median of 21: total 59.58 ms (lattice+shadow 5.34, predict/bvh 1.53, solve+shade 52.78); solves/hit 1.897 evaluations/hit 2.095
+== edge_samples=0 size=960x600 threads=1 method=transport
+conv transport 960x600 nodes=560 lattice=8548 candidates=219158 solves=107053 evaluations=131473 hits=98462 visits=0 edge_pixels=0
+  median of 21: total 90.87 ms (lattice+shadow 5.01, predict/bvh 9.53, solve+shade 76.29); solves/hit 1.087 evaluations/hit 1.335
+== edge_samples=0 size=960x600 threads=1 method=independent
+conv independent 960x600 nodes=560 lattice=8548 candidates=0 solves=186792 evaluations=206332 hits=98465 visits=4905872 edge_pixels=0
+  median of 21: total 221.39 ms (lattice+shadow 5.37, predict/bvh 1.54, solve+shade 214.29); solves/hit 1.897 evaluations/hit 2.095
+== edge_samples=1 size=640x400 threads=0 method=transport
+conv transport 640x400 nodes=560 lattice=8548 candidates=101716 solves=91124 evaluations=179279 hits=43729 visits=0 edge_pixels=5471
+  median of 21: total 40.02 ms (lattice+shadow 5.46, predict/bvh 4.31, solve+shade 30.01); solves/hit 2.084 evaluations/hit 4.100
+== edge_samples=1 size=640x400 threads=0 method=independent
+conv independent 640x400 nodes=560 lattice=8548 candidates=0 solves=119641 evaluations=149263 hits=43744 visits=3183984 edge_pixels=5443
+  median of 21: total 50.35 ms (lattice+shadow 5.71, predict/bvh 1.66, solve+shade 42.70); solves/hit 2.735 evaluations/hit 3.412
+== edge_samples=1 size=640x400 threads=1 method=transport
+conv transport 640x400 nodes=560 lattice=8548 candidates=101723 solves=91132 evaluations=179312 hits=43729 visits=0 edge_pixels=5471
+  median of 21: total 124.26 ms (lattice+shadow 6.15, predict/bvh 8.29, solve+shade 109.75); solves/hit 2.084 evaluations/hit 4.101
+== edge_samples=1 size=640x400 threads=1 method=independent
+conv independent 640x400 nodes=560 lattice=8548 candidates=0 solves=119641 evaluations=149263 hits=43744 visits=3183984 edge_pixels=5443
+  median of 21: total 166.24 ms (lattice+shadow 6.14, predict/bvh 1.70, solve+shade 158.44); solves/hit 2.735 evaluations/hit 3.412
+== edge_samples=1 size=960x600 threads=0 method=transport
+conv transport 960x600 nodes=560 lattice=8548 candidates=219154 solves=157196 evaluations=275774 hits=98462 visits=0 edge_pixels=6970
+  median of 21: total 61.01 ms (lattice+shadow 5.54, predict/bvh 6.20, solve+shade 48.91); solves/hit 1.597 evaluations/hit 2.801
+== edge_samples=1 size=960x600 threads=0 method=independent
+conv independent 960x600 nodes=560 lattice=8548 candidates=0 solves=233713 evaluations=290263 hits=98465 visits=6299262 edge_pixels=6954
+  median of 21: total 91.19 ms (lattice+shadow 5.94, predict/bvh 1.80, solve+shade 83.36); solves/hit 2.374 evaluations/hit 2.948
+== edge_samples=1 size=960x600 threads=1 method=transport
+conv transport 960x600 nodes=560 lattice=8548 candidates=219158 solves=157213 evaluations=275825 hits=98462 visits=0 edge_pixels=6970
+  median of 21: total 198.38 ms (lattice+shadow 6.33, predict/bvh 11.98, solve+shade 180.43); solves/hit 1.597 evaluations/hit 2.801
+== edge_samples=1 size=960x600 threads=1 method=independent
+conv independent 960x600 nodes=560 lattice=8548 candidates=0 solves=233713 evaluations=290263 hits=98465 visits=6299262 edge_pixels=6954
+  median of 21: total 317.30 ms (lattice+shadow 6.31, predict/bvh 1.66, solve+shade 309.29); solves/hit 2.374 evaluations/hit 2.948
+== verify 960x600 (edge samples do not change the per-pixel hits)
+  verify: reprojection residual of 98462 hits: max 0.2021 px, mean 0.00053 px
+  against a 16x-lattice independent reference: agree 98347, hit only here 13, hit only in reference 39, deeper here 21, nearer here 81
+  verify: reprojection residual of 98465 hits: max 0.0730 px, mean 0.00057 px
+  against a 16x-lattice independent reference: agree 98349, hit only here 4, hit only in reference 27, deeper here 58, nearer here 54
+== gloss + polished floor, 640x400, all threads, edge samples on
+  median of 11: total 72.91 ms (lattice+shadow 5.34, predict/bvh 10.61, solve+shade 56.35); solves/hit 3.082 evaluations/hit 5.642
+  median of 11: total 96.74 ms (lattice+shadow 5.98, predict/bvh 1.74, solve+shade 89.24); solves/hit 4.196 evaluations/hit 6.100
+== lattice density (transport, 960x600, all threads, edge samples off)
+  median of 11: total 41.32 ms (lattice+shadow 3.74, predict/bvh 3.62, solve+shade 33.71); solves/hit 1.078 evaluations/hit 2.015
+  verify: reprojection residual of 98430 hits: max 0.2040 px, mean 0.00164 px
+  against a 16x-lattice independent reference: agree 98018, hit only here 15, hit only in reference 73, deeper here 324, nearer here 73
+  median of 11: total 37.86 ms (lattice+shadow 5.73, predict/bvh 6.31, solve+shade 25.63); solves/hit 1.087 evaluations/hit 1.335
+  verify: reprojection residual of 98462 hits: max 0.2021 px, mean 0.00053 px
+  against a 16x-lattice independent reference: agree 98347, hit only here 13, hit only in reference 39, deeper here 21, nearer here 81
+  median of 11: total 50.91 ms (lattice+shadow 9.75, predict/bvh 12.97, solve+shade 28.33); solves/hit 1.122 evaluations/hit 1.374
+  verify: reprojection residual of 98308 hits: max 0.1668 px, mean 0.00082 px
+  against a 16x-lattice independent reference: agree 98183, hit only here 14, hit only in reference 194, deeper here 13, nearer here 98
+== 2026 version (5346 nodes, 66 patch lattices), 640x400, all threads, edge samples on, median of 9
+conv transport 640x400 nodes=5346 lattice=19074 candidates=188223 solves=110767 evaluations=214222 hits=43670 visits=0 edge_pixels=7804
+  median of 9: total 61.05 ms (lattice+shadow 14.79, predict/bvh 10.09, solve+shade 36.35); solves/hit 2.536 evaluations/hit 4.905
+conv independent 640x400 nodes=5346 lattice=19074 candidates=0 solves=160254 evaluations=209000 hits=43737 visits=4314527 edge_pixels=7738
+  median of 9: total 80.29 ms (lattice+shadow 15.02, predict/bvh 4.24, solve+shade 60.08); solves/hit 3.664 evaluations/hit 4.779
+== same, edge samples off
+  median of 9: total 38.55 ms (lattice+shadow 14.96, predict/bvh 9.24, solve+shade 14.10); solves/hit 1.196 evaluations/hit 1.648
+  median of 9: total 55.76 ms (lattice+shadow 14.71, predict/bvh 3.78, solve+shade 36.98); solves/hit 2.328 evaluations/hit 2.623

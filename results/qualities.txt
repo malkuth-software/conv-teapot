@@ -1,0 +1,37 @@
+1. Roundness of the body at its widest ring: (max r - min r) / mean r
+   Bezier original                         4.083e-03
+   CONV exact (per 4)                      4.083e-03
+   CONV round, 12 nodes per turn               9.640e-05   (worst distance of body and lid from the exact revolved profile: 1.967e-04)
+   CONV round, 16 nodes per turn               1.748e-05   (worst distance of body and lid from the exact revolved profile: 4.345e-05)
+   CONV round, 24 nodes per turn               1.555e-06   (worst distance of body and lid from the exact revolved profile: 5.675e-06)
+   CONV round, 32 nodes per turn               2.781e-07   (worst distance of body and lid from the exact revolved profile: 1.343e-06)
+
+2. Continuity across joints away from creases (worst over the teapot)
+   surface                       tangent turn (deg)   curvature jump (abs, relative)
+   Bezier original               along v   0.0000   2.853e+00  1.000e+00
+                                 around   18.8695   1.137e-07  2.748e-08
+   CONV exact                    along v   0.0000   2.853e+00  1.000e+00
+                                 around   18.8695   1.724e-07  1.808e-08
+   CONV round                    along v   0.0000   2.848e+00  1.000e+00
+                                 around    0.0000   1.724e-07  1.808e-08
+   CONV smooth (experimental)    along v  13.1306   5.445e+01  1.000e+00
+                                 around    0.0000   1.489e-03  2.660e-04
+
+3. Deviation of the smooth CONV teapot (model units; body 4.0 wide)
+   per  nodes   from its reference (revolved, arc length)     from the Bezier original
+     3    324   max 7.833e-02  rms 2.035e-02              max 7.833e-02  rms 2.231e-02
+     4    560   max 4.009e-02  rms 8.625e-03              max 4.009e-02  rms 1.233e-02
+     6   1224   max 1.968e-02  rms 3.888e-03              max 2.066e-02  rms 9.490e-03
+     8   2144   max 1.084e-02  rms 2.000e-03              max 2.044e-02  rms 8.846e-03
+
+4. Creases kept (smooth style, per 4): turn of the tangent along v at each seam row
+   body   row 12: Bezier 90.000 deg, CONV smooth 46.602 deg
+   lowest point of the body (the cap is the plane y = 0): 0.000e+00
+
+5. The 2026 version from surface samples (CONV lattice per patch)
+   hold-out error of 5x5 nodes per patch at the 9x9 samples: exterior max 2.112e-03 rms 6.594e-04; interior max 3.660e-03 rms 8.011e-04
+   continuity across patch joints (exterior), 9x9 nodes per patch:
+   1976 (Bezier samples)   28 patches,  44 joints: gap max 1.1e-15; normal turn max 1.7113 deg, mean 0.0623 deg;
+                          curvature jump across the joint: max 2.853e+00; relative: median 0.000, mean 0.186
+   2026 (page samples)     32 patches,  52 joints: gap max 8.7e-08; normal turn max 0.8271 deg, mean 0.1098 deg;
+                          curvature jump across the joint: max 4.938e+01; relative: median 0.000, mean 0.157
