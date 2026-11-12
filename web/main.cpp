@@ -62,6 +62,7 @@ EMSCRIPTEN_KEEPALIVE void tp_set(int key, double value) {
     case 40: e.quick_while_moving = value != 0; break;
     case 41: e.render.ambient = int(value); e.mesh.lit = false; break;
     case 42: e.render.plain_inside = value != 0; e.mesh.lit = false; break;
+    case 43: e.render.mirror_traced = value != 0; break;
     default: break;
     }
 }

@@ -93,6 +93,9 @@ struct RenderOptions {
     // mirror direction (the sky and window above, a stand-in for the floor
     // below), so highlights move with the camera.
     bool live_reflection = true;
+    // With live reflections, the mirror ray is also met with the mesh's own triangles, so the body
+    // shows the handle, the spout and the lid in itself. Off: only the emitters answer it.
+    bool mirror_traced = true;
     // Baked light, experimental: how the room's diffuse light reaches a point.
     // 0: a function of the normal alone, as if nothing were in the way.
     // 1: times the baked open fraction, from the mean open direction.
@@ -2317,6 +2320,106 @@ private:
         shadow_version_ = mesh.version;
     }
 
+    // A point of the baked mesh, shaded: its light map texel and, for the pose-free bake, the light
+    // from the normal as it is turned now and the mirror direction. depth 0: a pixel's own point,
+    // whose mirror ray may meet the mesh; depth 1: a point that mirror ray reached.
+    Vec3 shade_baked(const Scene& scene, const RenderOptions& options, const detail::View& view, std::uint16_t part, const MeshVertex& a, const MeshVertex& b,
+                     const MeshVertex& c, const float* w, Vec3 dir, float lod, double hit_v, Work& work, int depth, std::uint32_t triangle = 0xffffffffu) const {
+        using namespace detail;
+        const Mesh& mesh = *scene.mesh;
+        Vec3 colour;
+        float rgb[4];
+        // The side the eye is on.
+        const Vec3 raw_normal = a.n * double(w[0]) + b.n * double(w[1]) + c.n * double(w[2]);
+        (dot(raw_normal, dir) > 0.0 ? mesh.parts[part].light_back : mesh.parts[part].light).sample(w[0] * a.s + w[1] * b.s + w[2] * c.s, w[0] * a.t + w[1] * b.t + w[2] * c.t, lod, rgb);
+        // Stored display-encoded (gamma 2): back to linear.
+        colour = {double(rgb[0] * rgb[0]) / 65025.0, double(rgb[1] * rgb[1]) / 65025.0, double(rgb[2] * rgb[2]) / 65025.0};
+        if (mesh.lit_diffuse_only) {
+            // The texel is the body's own colour. Light is computed here
+            // from the normal as it is turned now, as shade_surface has
+            // it, with the mirror direction answered by emitters instead
+            // of traced.
+            Vec3 normal = normalize(a.n * double(w[0]) + b.n * double(w[1]) + c.n * double(w[2])) * scene.parts[part].orientation;
+            const Vec3 incoming = normalize(dir), to_eye = incoming * -1.0;
+            if (dot(normal, to_eye) < 0.0) { normal = normal * -1.0; }
+            const double n_l = dot(normal, scene.light);
+            // The baked lit fraction while it holds; the shadow map while the body is turned from it.
+            double lit = double(rgb[3]) / 255.0;
+            if (!light_holds(scene)) {
+                lit = options.shadows && n_l > 0.0 && shadow_.size != 0
+                          ? shadow_.lit(a.p * double(w[0]) + b.p * double(w[1]) + c.p * double(w[2]) + normal * 0.02, shadow_bias(n_l)) : 1.0;
+            }
+            const double diffuse = std::fmax(0.0, n_l) * lit;
+            const double up = 0.5 * (normal.y + 1.0);
+            Vec3 ambient = Vec3{0.30, 0.28, 0.26} * (1.0 - up) + Vec3{0.46, 0.50, 0.56} * up;
+            if (mesh.ambient > 0 && !mesh.parts[part].open.levels.empty()) {
+                // The room's light through what the point sees of it, from the mean open direction.
+                float seen[4];
+                (dot(raw_normal, dir) > 0.0 ? mesh.parts[part].open_back : mesh.parts[part].open).sample_level(0, w[0] * a.s + w[1] * b.s + w[2] * c.s, w[0] * a.t + w[1] * b.t + w[2] * c.t, seen);
+                const double open = double(seen[3]) / 255.0;
+                Vec3 bent = scene.pose.direction({double(seen[0]) / 127.5 - 1.0, double(seen[1]) / 127.5 - 1.0, double(seen[2]) / 127.5 - 1.0});
+                bent = length(bent) > 0.2 ? normalize(bent) : normal;
+                const Vec3 through = ambient_of(bent) * open;
+                Vec3 from_body{};
+                if (mesh.ambient > 2 && !mesh.parts[part].bounce.levels.empty()) {
+                    // The light the body throws on this point, gathered at the bake.
+                    float thrown[4];
+                    (dot(raw_normal, dir) > 0.0 ? mesh.parts[part].bounce_back : mesh.parts[part].bounce).sample_level(0, w[0] * a.s + w[1] * b.s + w[2] * c.s, w[0] * a.t + w[1] * b.t + w[2] * c.t, thrown);
+                    from_body = {double(thrown[0] * thrown[0]) / 32512.5, double(thrown[1] * thrown[1]) / 32512.5, double(thrown[2] * thrown[2]) / 32512.5};
+                } else if (mesh.ambient > 1) {
+                    from_body = (scene.parts[part].faces_cavity(hit_v) ? mesh.cavity_light : ambient * 0.5) * (0.9 * (1.0 - open));
+                }
+                ambient = through + from_body;
+            }
+            colour = Vec3{colour.x * (ambient.x + 0.80 * diffuse), colour.y * (ambient.y + 0.78 * diffuse), colour.z * (ambient.z + 0.74 * diffuse)};
+            const bool chrome = options.material == 1 && options.texture == 0;
+            const double f0 = chrome ? 0.86 : 0.05;
+            const double fresnel = f0 + (1.0 - f0) * detail::fifth(1.0 - std::fmax(0.0, dot(normal, to_eye)));
+            const Vec3 reflected = incoming - normal * (2.0 * dot(incoming, normal));
+            if (options.gloss) {
+                const Vec3 p = a.p * double(w[0]) + b.p * double(w[1]) + c.p * double(w[2]) + normal * 2e-3;
+                Vec3 mirror;
+                std::uint16_t seen_part = 0;
+                std::uint32_t seen_triangle = 0;
+                float seen_w[3];
+                double reach_body = 0.0;
+                if (depth == 0 && options.mirror_traced && mirror_tree_.ready() &&
+                    mirror_tree_.nearest(scene, p, reflected, &normal, triangle, seen_part, seen_triangle, seen_w, reach_body)) {
+                    // The teapot shows itself: the point of the mesh the mirror ray reaches,
+                    // shaded as this point is, its own mirror answered by the emitters.
+                    work.no_floor();
+                    const std::uint32_t* other = &mesh.triangles[std::size_t(seen_triangle) * 3];
+                    mirror = shade_baked(scene, options, view, seen_part, mesh.vertices[other[0]], mesh.vertices[other[1]], mesh.vertices[other[2]], seen_w,
+                                         reflected, lod + 1.0f, double(seen_w[0] * mesh.vertices[other[0]].v + seen_w[1] * mesh.vertices[other[1]].v +
+                                                                     seen_w[2] * mesh.vertices[other[2]].v), work, 1);
+                } else if (scene.parts[part].faces_cavity(hit_v) && !scene.leaves_cavity(reflected)) {
+                    if (depth == 0) { work.no_floor(); }
+                    mirror = cavity();
+                } else if (options.ground && reflected.y < -1e-9 && p.y > scene.ground_y) {
+                    // The stand-in floor: its pattern in closed form, its shadow from the bake.
+                    const double reach = (scene.ground_y - p.y) / reflected.y;
+                    const Vec3 q = p + reflected * reach;
+                    const double fallback = 4.0 * reach / view.focal / std::fmax(0.1, -reflected.y);
+                    const Vec3 base = checker(q, depth == 0 ? work.footprint(q, fallback) : fallback);
+                    const double light = 0.55 + 0.45 * floor_lit_baked(scene, q) * std::fmax(0.0, scene.light.y);
+                    const double fade = smoothstep(18.0, 60.0, reach);
+                    mirror = base * light * (1.0 - fade) + Vec3{0.80, 0.84, 0.90} * fade;
+                } else {
+                    if (depth == 0) { work.no_floor(); }
+                    mirror = sky(scene, p, reflected);
+                }
+                const Vec3 tint = chrome ? Vec3{0.95, 0.96, 0.98} : Vec3{1, 1, 1};
+                const Vec3 under = chrome ? Vec3{0, 0, 0} : colour;
+                colour = under * (1.0 - fresnel) + Vec3{mirror.x * tint.x, mirror.y * tint.y, mirror.z * tint.z} * (fresnel * mirror_dim(lit, dot(normal, scene.light)));
+            } else {
+                const Vec3 half = normalize(scene.light + to_eye);
+                const double specular = detail::ninetieth(std::fmax(0.0, dot(normal, half))) * lit;
+                colour = colour * (1.0 - 0.6 * fresnel) + environment(reflected) * (0.6 * fresnel) + Vec3{1, 1, 1} * (0.55 * specular);
+            }
+        }
+        return colour;
+    }
+
     // One sample of the visibility buffer, shaded. (sx, sy) is its position in pixels.
     Vec3 shade_visible(const Scene& scene, const RenderOptions& options, const detail::View& view, const VisibilitySample& sample, double sx, double sy,
                        Hit& hit, Work& work) const {
@@ -2363,81 +2466,7 @@ private:
             // tolerance at a silhouette): the mesh's own point is shown.
         }
         if (options.method == Method::raster && options.baked_light && mesh.lit && !mesh.parts[part].light.levels.empty()) {
-            float rgb[4];
-            // The side the eye is on.
-            const Vec3 raw_normal = a.n * double(w[0]) + b.n * double(w[1]) + c.n * double(w[2]);
-            (dot(raw_normal, dir) > 0.0 ? mesh.parts[part].light_back : mesh.parts[part].light).sample(w[0] * a.s + w[1] * b.s + w[2] * c.s, w[0] * a.t + w[1] * b.t + w[2] * c.t, triangle_lod_[sample.triangle], rgb);
-            // Stored display-encoded (gamma 2): back to linear.
-            colour = {double(rgb[0] * rgb[0]) / 65025.0, double(rgb[1] * rgb[1]) / 65025.0, double(rgb[2] * rgb[2]) / 65025.0};
-            if (mesh.lit_diffuse_only) {
-                // The texel is the body's own colour. Light is computed here
-                // from the normal as it is turned now, as shade_surface has
-                // it, with the mirror direction answered by emitters instead
-                // of traced.
-                Vec3 normal = normalize(a.n * double(w[0]) + b.n * double(w[1]) + c.n * double(w[2])) * scene.parts[part].orientation;
-                const Vec3 incoming = normalize(dir), to_eye = incoming * -1.0;
-                if (dot(normal, to_eye) < 0.0) { normal = normal * -1.0; }
-                const double n_l = dot(normal, scene.light);
-                // The baked lit fraction while it holds; the shadow map while the body is turned from it.
-                double lit = double(rgb[3]) / 255.0;
-                if (!light_holds(scene)) {
-                    lit = options.shadows && n_l > 0.0 && shadow_.size != 0
-                              ? shadow_.lit(a.p * double(w[0]) + b.p * double(w[1]) + c.p * double(w[2]) + normal * 0.02, shadow_bias(n_l)) : 1.0;
-                }
-                const double diffuse = std::fmax(0.0, n_l) * lit;
-                const double up = 0.5 * (normal.y + 1.0);
-                Vec3 ambient = Vec3{0.30, 0.28, 0.26} * (1.0 - up) + Vec3{0.46, 0.50, 0.56} * up;
-                if (mesh.ambient > 0 && !mesh.parts[part].open.levels.empty()) {
-                    // The room's light through what the point sees of it, from the mean open direction.
-                    float seen[4];
-                    (dot(raw_normal, dir) > 0.0 ? mesh.parts[part].open_back : mesh.parts[part].open).sample_level(0, w[0] * a.s + w[1] * b.s + w[2] * c.s, w[0] * a.t + w[1] * b.t + w[2] * c.t, seen);
-                    const double open = double(seen[3]) / 255.0;
-                    Vec3 bent = scene.pose.direction({double(seen[0]) / 127.5 - 1.0, double(seen[1]) / 127.5 - 1.0, double(seen[2]) / 127.5 - 1.0});
-                    bent = length(bent) > 0.2 ? normalize(bent) : normal;
-                    const Vec3 through = ambient_of(bent) * open;
-                    Vec3 from_body{};
-                    if (mesh.ambient > 2 && !mesh.parts[part].bounce.levels.empty()) {
-                        // The light the body throws on this point, gathered at the bake.
-                        float thrown[4];
-                        (dot(raw_normal, dir) > 0.0 ? mesh.parts[part].bounce_back : mesh.parts[part].bounce).sample_level(0, w[0] * a.s + w[1] * b.s + w[2] * c.s, w[0] * a.t + w[1] * b.t + w[2] * c.t, thrown);
-                        from_body = {double(thrown[0] * thrown[0]) / 32512.5, double(thrown[1] * thrown[1]) / 32512.5, double(thrown[2] * thrown[2]) / 32512.5};
-                    } else if (mesh.ambient > 1) {
-                        from_body = (scene.parts[part].faces_cavity(double(hit.v)) ? mesh.cavity_light : ambient * 0.5) * (0.9 * (1.0 - open));
-                    }
-                    ambient = through + from_body;
-                }
-                colour = Vec3{colour.x * (ambient.x + 0.80 * diffuse), colour.y * (ambient.y + 0.78 * diffuse), colour.z * (ambient.z + 0.74 * diffuse)};
-                const bool chrome = options.material == 1 && options.texture == 0;
-                const double f0 = chrome ? 0.86 : 0.05;
-                const double fresnel = f0 + (1.0 - f0) * detail::fifth(1.0 - std::fmax(0.0, dot(normal, to_eye)));
-                const Vec3 reflected = incoming - normal * (2.0 * dot(incoming, normal));
-                if (options.gloss) {
-                    const Vec3 p = a.p * double(w[0]) + b.p * double(w[1]) + c.p * double(w[2]) + normal * 2e-3;
-                    Vec3 mirror;
-                    if (scene.parts[part].faces_cavity(double(hit.v)) && !scene.leaves_cavity(reflected)) {
-                        work.no_floor();
-                        mirror = cavity();
-                    } else if (options.ground && reflected.y < -1e-9 && p.y > scene.ground_y) {
-                        // The stand-in floor: its pattern in closed form, its shadow from the bake.
-                        const double reach = (scene.ground_y - p.y) / reflected.y;
-                        const Vec3 q = p + reflected * reach;
-                        const Vec3 base = checker(q, work.footprint(q, 4.0 * reach / view.focal / std::fmax(0.1, -reflected.y)));
-                        const double light = 0.55 + 0.45 * floor_lit_baked(scene, q) * std::fmax(0.0, scene.light.y);
-                        const double fade = smoothstep(18.0, 60.0, reach);
-                        mirror = base * light * (1.0 - fade) + Vec3{0.80, 0.84, 0.90} * fade;
-                    } else {
-                        work.no_floor();
-                        mirror = sky(scene, p, reflected);
-                    }
-                    const Vec3 tint = chrome ? Vec3{0.95, 0.96, 0.98} : Vec3{1, 1, 1};
-                    const Vec3 under = chrome ? Vec3{0, 0, 0} : colour;
-                    colour = under * (1.0 - fresnel) + Vec3{mirror.x * tint.x, mirror.y * tint.y, mirror.z * tint.z} * (fresnel * mirror_dim(lit, dot(normal, scene.light)));
-                } else {
-                    const Vec3 half = normalize(scene.light + to_eye);
-                    const double specular = detail::ninetieth(std::fmax(0.0, dot(normal, half))) * lit;
-                    colour = colour * (1.0 - 0.6 * fresnel) + environment(reflected) * (0.6 * fresnel) + Vec3{1, 1, 1} * (0.55 * specular);
-                }
-            }
+            colour = shade_baked(scene, options, view, part, a, b, c, w, dir, triangle_lod_[sample.triangle], double(hit.v), work, 0, sample.triangle);
         } else {
             Solve solve;
             solve.u = double(hit.u);
@@ -2484,6 +2513,10 @@ private:
         const Mesh& mesh = *scene.mesh;
         const double start = now_ms();
         build_shadow_map_mesh(scene, options);
+        if (options.method == Method::raster && options.gloss && options.lighting && options.mirror_traced && mesh.lit && mesh.lit_diffuse_only &&
+            mirror_tree_.identity != mesh.identity) {
+            mirror_tree_.build(mesh, scene.pose, options.threads);
+        }
         if (options.method == Method::seeded && options.gloss && options.lighting) {
             // The traced bounce needs the lattices and their tree.
             transport_lattices(scene, view, nullptr, options);
@@ -2605,6 +2638,255 @@ private:
     Visibility visibility_, cut_visibility_;
     Mesh cut_mesh_;
     std::vector<float> triangle_lod_;
+
+    // A tree of boxes over the baked mesh's triangles, for mirror rays. It is built from the
+    // mesh as it stands, with the pose it stands in; when the body has moved since, a ray is
+    // carried into that pose instead of the tree being built again.
+    //
+    // Each part has its own subtree, cut into up to sixteen blocks (its nodes four levels
+    // down). Every triangle is told beforehand which blocks of its own part lie wholly behind
+    // the tangent planes at its three corners: a mirror ray from the triangle stays in front of
+    // its tangent plane and so cannot meet those, and passes them over. For most of the body's
+    // outside that is all of the body, and the ray has only the handle, spout and lid to look at.
+    struct MirrorTree {
+        struct TreeNode {
+            float low[3], high[3];
+            std::uint32_t first = 0, count = 0; // a leaf: its triangles; otherwise first is the second child (the first follows)
+            std::uint8_t block = 255;           // the block of its part this node is, or 255
+        };
+        std::vector<TreeNode> nodes;
+        std::vector<std::uint32_t> order;    // the triangles, leaves' runs in order
+        std::vector<float> corners;          // nine numbers a triangle, in `order`
+        std::vector<std::uint32_t> part_root, part_end; // each part's nodes: [root, end)
+        std::vector<std::uint16_t> unclear;  // per mesh triangle: the blocks of its own part it is not clear of
+        std::uint64_t identity = 0;
+        Rigid pose;                          // the pose the mesh stood in
+        bool ready() const { return !nodes.empty(); }
+        static constexpr int kBlockDepth = 4;
+
+        void build(const Mesh& mesh, const Rigid& now, int threads) {
+            identity = mesh.identity;
+            pose = now;
+            const std::size_t count = mesh.triangle_count();
+            std::vector<float> centre(count * 3), box(count * 6);
+            order.resize(count);
+            for (std::size_t t = 0; t < count; ++t) {
+                order[t] = std::uint32_t(t);
+                for (int axis = 0; axis < 3; ++axis) {
+                    float low = 1e30f, high = -1e30f;
+                    for (int k = 0; k < 3; ++k) {
+                        const Vec3& q = mesh.vertices[mesh.triangles[t * 3 + std::size_t(k)]].p;
+                        const float x = float(axis == 0 ? q.x : axis == 1 ? q.y : q.z);
+                        low = std::min(low, x);
+                        high = std::max(high, x);
+                    }
+                    box[t * 6 + std::size_t(axis)] = low;
+                    box[t * 6 + 3 + std::size_t(axis)] = high;
+                    centre[t * 3 + std::size_t(axis)] = 0.5f * (low + high);
+                }
+            }
+            nodes.clear();
+            nodes.reserve(count * 2 / 3 + 64);
+            int blocks = 0;
+            // Halved at the middle of the longest side of the centres' box, down to four triangles.
+            const std::function<void(std::uint32_t, std::uint32_t, int)> make = [&](std::uint32_t first, std::uint32_t end, int depth) {
+                const std::size_t at = nodes.size();
+                nodes.push_back({});
+                TreeNode node;
+                float lc[3] = {1e30f, 1e30f, 1e30f}, hc[3] = {-1e30f, -1e30f, -1e30f};
+                for (int axis = 0; axis < 3; ++axis) { node.low[axis] = 1e30f; node.high[axis] = -1e30f; }
+                for (std::uint32_t k = first; k < end; ++k) {
+                    const std::size_t t = order[k];
+                    for (int axis = 0; axis < 3; ++axis) {
+                        node.low[axis] = std::min(node.low[axis], box[t * 6 + std::size_t(axis)]);
+                        node.high[axis] = std::max(node.high[axis], box[t * 6 + 3 + std::size_t(axis)]);
+                        lc[axis] = std::min(lc[axis], centre[t * 3 + std::size_t(axis)]);
+                        hc[axis] = std::max(hc[axis], centre[t * 3 + std::size_t(axis)]);
+                    }
+                }
+                const bool leaf = end - first <= 4;
+                if (depth == kBlockDepth || (leaf && depth < kBlockDepth)) { node.block = std::uint8_t(blocks++); }
+                if (leaf) {
+                    node.first = first;
+                    node.count = end - first;
+                    nodes[at] = node;
+                    return;
+                }
+                const int axis = hc[0] - lc[0] >= hc[1] - lc[1] && hc[0] - lc[0] >= hc[2] - lc[2] ? 0 : hc[1] - lc[1] >= hc[2] - lc[2] ? 1 : 2;
+                const std::uint32_t middle = first + (end - first) / 2;
+                std::nth_element(order.begin() + first, order.begin() + middle, order.begin() + end,
+                                 [&](std::uint32_t x, std::uint32_t y) { return centre[std::size_t(x) * 3 + std::size_t(axis)] < centre[std::size_t(y) * 3 + std::size_t(axis)]; });
+                make(first, middle, depth + 1);
+                node.first = std::uint32_t(nodes.size());
+                node.count = 0;
+                nodes[at] = node;
+                make(middle, end, depth + 1);
+            };
+            part_root.assign(mesh.parts.size(), 0);
+            part_end.assign(mesh.parts.size(), 0);
+            for (std::size_t p = 0; p < mesh.parts.size(); ++p) {
+                part_root[p] = part_end[p] = std::uint32_t(nodes.size());
+                const MeshPart& part = mesh.parts[p];
+                if (part.triangle_count == 0) { continue; }
+                blocks = 0;
+                make(std::uint32_t(part.first_triangle), std::uint32_t(part.first_triangle + part.triangle_count), 0);
+                part_end[p] = std::uint32_t(nodes.size());
+            }
+            corners.resize(count * 9);
+            for (std::size_t k = 0; k < count; ++k) {
+                for (int c = 0; c < 3; ++c) {
+                    const Vec3& q = mesh.vertices[mesh.triangles[std::size_t(order[k]) * 3 + std::size_t(c)]].p;
+                    corners[k * 9 + std::size_t(c) * 3] = float(q.x);
+                    corners[k * 9 + std::size_t(c) * 3 + 1] = float(q.y);
+                    corners[k * 9 + std::size_t(c) * 3 + 2] = float(q.z);
+                }
+            }
+            // Which blocks of its own part each triangle is clear of: every corner of every
+            // triangle in the block on or behind the tangent planes at its three corners. A
+            // subtree whose box is behind them all is clear without looking further.
+            unclear.assign(count, 0xffffu);
+            const auto behind_box = [](const TreeNode& node, const Vec3* n, const double* level) {
+                for (int c = 0; c < 3; ++c) {
+                    const double reach = std::fmax(n[c].x * double(node.low[0]), n[c].x * double(node.high[0])) + std::fmax(n[c].y * double(node.low[1]), n[c].y * double(node.high[1])) +
+                                         std::fmax(n[c].z * double(node.low[2]), n[c].z * double(node.high[2]));
+                    if (reach > level[c]) { return false; }
+                }
+                return true;
+            };
+            const std::function<bool(std::uint32_t, const Vec3*, const double*)> clear = [&](std::uint32_t index, const Vec3* n, const double* level) {
+                const TreeNode& node = nodes[index];
+                if (behind_box(node, n, level)) { return true; }
+                if (node.count == 0) { return clear(index + 1, n, level) && clear(node.first, n, level); }
+                for (std::uint32_t k = node.first; k < node.first + node.count; ++k) {
+                    for (int v = 0; v < 3; ++v) {
+                        const float* q = &corners[std::size_t(k) * 9 + std::size_t(v) * 3];
+                        for (int c = 0; c < 3; ++c) {
+                            if (n[c].x * double(q[0]) + n[c].y * double(q[1]) + n[c].z * double(q[2]) > level[c]) { return false; }
+                        }
+                    }
+                }
+                return true;
+            };
+            std::vector<std::uint32_t> block_node;
+            for (std::size_t p = 0; p < mesh.parts.size(); ++p) {
+                block_node.clear();
+                for (std::uint32_t index = part_root[p]; index < part_end[p]; ++index) {
+                    if (nodes[index].block != 255) { block_node.push_back(index); }
+                }
+                const MeshPart& part = mesh.parts[p];
+                detail::parallel_rows(int((part.triangle_count + 63) / 64), threads, [&](int begin, int end, int) {
+                    for (std::size_t t = part.first_triangle + std::size_t(begin) * 64; t < std::min(part.first_triangle + part.triangle_count, part.first_triangle + std::size_t(end) * 64); ++t) {
+                        Vec3 n[3];
+                        double level[3];
+                        for (int c = 0; c < 3; ++c) {
+                            const MeshVertex& vertex = mesh.vertices[mesh.triangles[t * 3 + std::size_t(c)]];
+                            n[c] = normalize(vertex.n);
+                            level[c] = dot(n[c], vertex.p) + 1e-9;
+                        }
+                        std::uint16_t mask = 0;
+                        for (std::size_t b = 0; b < block_node.size() && b < 16; ++b) {
+                            if (!clear(block_node[b], n, level)) { mask = std::uint16_t(mask | (1u << b)); }
+                        }
+                        unclear[t] = mask;
+                    }
+                });
+            }
+        }
+
+        // The nearest triangle along a ray of the room from `origin`; `facing` (or null) the normal
+        // on the side the ray leaves, so boxes wholly behind its tangent plane are passed over, and
+        // `from` (or 0xffffffff) the mesh triangle the ray leaves, whose clear blocks are passed over.
+        // Gives the part, the triangle (in the mesh), the corners' weights and the distance.
+        bool nearest(const Scene& scene, Vec3 origin, Vec3 dir, const Vec3* facing, std::uint32_t from, std::uint16_t& part, std::uint32_t& triangle, float* w,
+                     double& reach) const {
+            const Mesh& mesh = *scene.mesh;
+            // Into the pose the tree was built in: built = pose(now^-1(world)).
+            const Rigid& now = scene.pose;
+            const auto back = [&](Vec3 d) { return Vec3{now.a[0] * d.x + now.a[3] * d.y + now.a[6] * d.z, now.a[1] * d.x + now.a[4] * d.y + now.a[7] * d.z,
+                                                        now.a[2] * d.x + now.a[5] * d.y + now.a[8] * d.z}; };
+            const Vec3 o = pose.point(back(origin - now.b)), d = pose.direction(back(dir));
+            Vec3 n{};
+            double level = -1e300;
+            if (facing != nullptr) {
+                n = pose.direction(back(*facing));
+                level = dot(n, o) - 1e-6;
+            }
+            // The blocks of the part the ray leaves that it may meet, if it leaves on the side the
+            // mesh's normals point to (the clearance was found for that side).
+            std::uint32_t own_root = 0, own_end = 0;
+            std::uint16_t may_meet = 0xffffu;
+            if (from != 0xffffffffu && facing != nullptr) {
+                const MeshVertex& v0 = mesh.vertices[mesh.triangles[std::size_t(from) * 3]];
+                if (dot(v0.n, *facing) > 0.0) {
+                    const std::uint16_t p = mesh.triangle_part[from];
+                    own_root = part_root[p];
+                    own_end = part_end[p];
+                    may_meet = unclear[from];
+                }
+            }
+            const double inv[3] = {1.0 / (std::fabs(d.x) > 1e-300 ? d.x : 1e-300), 1.0 / (std::fabs(d.y) > 1e-300 ? d.y : 1e-300), 1.0 / (std::fabs(d.z) > 1e-300 ? d.z : 1e-300)};
+            const double oo[3] = {o.x, o.y, o.z}, nn[3] = {n.x, n.y, n.z};
+            double best = 1e30;
+            std::uint32_t found = 0xffffffffu;
+            double fw1 = 0, fw2 = 0;
+            std::uint32_t stack[96];
+            int top = 0;
+            for (std::size_t p = part_root.size(); p-- > 0;) {
+                if (part_end[p] > part_root[p]) { stack[top++] = part_root[p]; }
+            }
+            while (top > 0) {
+                const std::uint32_t index = stack[--top];
+                const TreeNode& node = nodes[index];
+                if (node.block != 255 && index >= own_root && index < own_end && ((may_meet >> node.block) & 1u) == 0) { continue; }
+                double t0 = 1e-4, t1 = best, ahead = 0.0;
+                bool miss = false;
+                for (int axis = 0; axis < 3 && !miss; ++axis) {
+                    double a = (double(node.low[axis]) - oo[axis]) * inv[axis], b = (double(node.high[axis]) - oo[axis]) * inv[axis];
+                    if (a > b) { std::swap(a, b); }
+                    t0 = std::max(t0, a);
+                    t1 = std::min(t1, b);
+                    miss = t0 > t1;
+                    ahead += std::max(nn[axis] * double(node.low[axis]), nn[axis] * double(node.high[axis]));
+                }
+                if (miss || (facing != nullptr && ahead < level)) { continue; }
+                if (node.count == 0) {
+                    stack[top++] = node.first;
+                    stack[top++] = index + 1;
+                    continue;
+                }
+                for (std::uint32_t k = node.first; k < node.first + node.count; ++k) {
+                    const float* q = &corners[std::size_t(k) * 9];
+                    const Vec3 p0{q[0], q[1], q[2]}, e1 = Vec3{q[3], q[4], q[5]} - p0, e2 = Vec3{q[6], q[7], q[8]} - p0;
+                    const Vec3 pv = cross(d, e2);
+                    const double det = dot(e1, pv);
+                    if (std::fabs(det) < 1e-14) { continue; }
+                    const Vec3 tv = o - p0;
+                    const double w1 = dot(tv, pv) / det;
+                    if (w1 < -1e-7 || w1 > 1.0 + 1e-7) { continue; }
+                    const Vec3 qv = cross(tv, e1);
+                    const double w2 = dot(d, qv) / det;
+                    if (w2 < -1e-7 || w1 + w2 > 1.0 + 1e-7) { continue; }
+                    const double t = dot(e2, qv) / det;
+                    if (!(t > 1e-4 && t < best)) { continue; }
+                    if (scene.cut && scene.removed(origin + dir * t)) { continue; }
+                    best = t;
+                    found = order[k];
+                    fw1 = w1;
+                    fw2 = w2;
+                }
+            }
+            if (found == 0xffffffffu) { return false; }
+            part = mesh.triangle_part[found];
+            if (mesh.parts[part].light.levels.empty()) { return false; }
+            triangle = found;
+            w[0] = float(1.0 - fw1 - fw2);
+            w[1] = float(fw1);
+            w[2] = float(fw2);
+            reach = best;
+            return true;
+        }
+    };
+    MirrorTree mirror_tree_;
     std::vector<Candidate> candidates_, mirror_candidates_;
     std::vector<std::vector<std::uint64_t>> band_cells_; // the lattice cells that may reach each band of rows
     std::vector<std::uint8_t> counts_, mirror_counts_;

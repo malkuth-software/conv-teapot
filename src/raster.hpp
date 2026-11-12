@@ -23,6 +23,7 @@
 // and a top-left fill rule, so triangles that share an edge neither overlap
 // nor leave a gap.
 #pragma once
+#include <atomic>
 #include "blend.hpp"
 #include "surface.hpp"
 #include <algorithm>
@@ -218,6 +219,12 @@ struct Mesh {
     int ambient = 0; // RenderOptions::ambient at the bake
     FloorEmitter floor;
     std::uint64_t version = 0;   // changes whenever positions change
+    // Which mesh this is: a new one (build_mesh) has a new number; refresh_mesh keeps it.
+    std::uint64_t identity = next_identity();
+    static std::uint64_t next_identity() {
+        static std::atomic<std::uint64_t> count{0};
+        return ++count;
+    }
     std::size_t evaluations = 0; // surface evaluations spent building it
     double ms_build = 0.0, ms_light = 0.0;
     std::size_t texels = 0;

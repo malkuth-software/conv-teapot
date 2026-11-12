@@ -170,6 +170,7 @@ int main(int argc, char** argv) {
     options.supersample = int(number("ss", 2));
     options.mesh_lines = number("lines", 0) != 0;
     options.live_reflection = number("live", 1) != 0;
+    options.mirror_traced = number("mirror", 1) != 0;
     options.ambient = int(number("ambient", 3));
     options.plain_inside = number("plaininside", 0) != 0;
     options.exact_shadows = number("exact", 1) != 0;
