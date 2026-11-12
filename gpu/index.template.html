@@ -212,13 +212,14 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
         const submit = performance.now() - start;
         smooth = smooth === 0 ? submit : 0.85 * smooth + 0.15 * submit;
       } catch (error) { stats.textContent = 'Drawing failed: ' + error.message; return; }
-      dirty = false;
+      // The light the body throws on itself is found over several frames after it comes to rest.
+      dirty = gpu.gathering;
       const check = gpu.check;
       stats.textContent = `${measured.toFixed(1)} ms/frame on the GPU at ${canvas.width}\u00d7${canvas.height}` +
         (running ? (onGpu() ? (physicsChoice.value === 'wrench' ? ` · wrench solver on the GPU: ${wrench.steps} frames, ${wrench.contacts} contacts, ${wrench.stepMs.toFixed(2)} ms with the read-back` : ` · simple step on the GPU: ${simple.steps} steps over ${simple.count} points, ${simple.stepMs.toFixed(2)} ms with the read-back`)
                             : ` · physics ${state[29].toFixed(2)} ms, ${state[28]} contacts`) : '') + `\n` +
         `${state[30]} nodes · ${gpu.vertexCount} grid points · ${gpu.triangleCount} triangles, each grid point and pixel evaluated from the lattice on the GPU\n` +
-        (gpu.roomMs ? `room light: ${gpu.options.directions} directions in ${gpu.roomMs.toFixed(0)} ms` + (gpu.thrownMs ? `, gathered in ${gpu.thrownMs.toFixed(0)} ms` : '') + ` · ` : '') +
+        (gpu.roomMs ? `room light: ${gpu.options.directions} directions in ${gpu.roomMs.toFixed(0)} ms` + (gpu.thrownMs ? `, gathered in ${gpu.thrownMs.toFixed(0)} ms` + (gpu.thrownFrames > 1 ? ` over ${gpu.thrownFrames} frames` : '') : '') + ` · ` : '') +
         (check ? `shaders against the CPU at ${check.points} points: largest distance ${check.worst.toExponential(2)}, largest angle between normals ${check.worstAngle.toFixed(4)}\u00b0`
                : 'not yet checked against the CPU') +
         (gpu.rowsPlaced ? `\nrows placed on the GPU: ` + gpu.rowsPlaced.map((p) => `${p.which === 0 ? 'body' : 'lid'} ${p.rows} rows in ${p.ms.toFixed(0)} ms, error ${p.error.toExponential(2)}` +

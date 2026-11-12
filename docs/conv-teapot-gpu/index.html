@@ -1483,7 +1483,7 @@ class TeapotGpu {
     if (!gl) { throw new Error('WebGL 2 is not available'); }
     if (!gl.getExtension('EXT_color_buffer_float')) { throw new Error('rendering to float textures (EXT_color_buffer_float) is not available'); }
     this.gl = gl;
-    this.options = { material: 0, gloss: 0, lighting: 1, shadows: 1, ground: 1, wire: 0, texture: 0, mapping: 0, perPixel: 1, shadowSize: 2048, polished: 0, trace: 1, filter: 2, placeRows: 1, roomLight: 2, directions: 256, gatherDirections: 48, gathers: 5, layers: 6 };
+    this.options = { material: 0, gloss: 0, lighting: 1, shadows: 1, ground: 1, wire: 0, texture: 0, mapping: 0, perPixel: 1, shadowSize: 2048, polished: 0, trace: 1, filter: 2, placeRows: 1, gatherPerFrame: 3, roomLight: 2, directions: 256, gatherDirections: 48, gathers: 5, layers: 6 };
     // The surface from the lattice at every vertex (used once, to evaluate them, and to check against the CPU);
     // the teapot from those evaluated vertices; the maps of what each point sees of the room.
     this.conv = this.program(VERTEX_GLSL, PROBE_FRAGMENT_GLSL);
@@ -1859,12 +1859,14 @@ class TeapotGpu {
   // for each direction, the body is peeled into layers along the direction,
   // each layer carrying the light of the side that faces away, and every
   // texel that has the body in front of it takes the layer it faces.
-  gatherThrown(state) {
+  // It is a sequence of steps, one direction of one gather each, so that it can be spread over frames
+  // while the picture keeps the light found before.
+  *gatherSteps(state) {
     const gl = this.gl, size = this.mapSize, o = this.options;
-    const started = performance.now();
     const surface = this.targets.mapSurface, open = this.targets.mapOpen;
     const direct = this.pair('mapDirect', size, gl.RGBA16F);
-    const a = this.pair('mapThrownA', size, gl.RGBA16F), b = this.pair('mapThrownB', size, gl.RGBA16F);
+    // Two maps to gather between, neither the one the picture is using.
+    const [a, b] = ['mapThrownA', 'mapThrownB', 'mapThrownC'].map((key) => this.pair(key, size, gl.RGBA16F)).filter((maps) => maps !== this.thrown);
     const layerSize = 256;
     if (!this.layerTexture) {
       this.layerTexture = gl.createTexture();
@@ -1918,7 +1920,6 @@ class TeapotGpu {
       gl.bindFramebuffer(gl.FRAMEBUFFER, to.framebuffer);
       gl.clearBufferfv(gl.COLOR, 0, [0, 0, 0, 0]);
       gl.clearBufferfv(gl.COLOR, 1, [0, 0, 0, 0]);
-      this.thrown = from;
       for (let k = 0; k < count; ++k) {
         const z = 1 - (2 * k + 1) / count, r = Math.sqrt(1 - z * z), angle = 2.399963229728653 * k + 0.7;
         const d = [r * Math.cos(angle), z, r * Math.sin(angle)];
@@ -1972,16 +1973,41 @@ class TeapotGpu {
         gl.blendFunc(gl.ONE, gl.ONE);
         gl.drawArrays(gl.TRIANGLES, 0, 6);
         gl.disable(gl.BLEND);
+        yield;
       }
       [from, to] = [to, from];
     }
-    this.thrown = from;
     this.smooth(from, to);
+    this.thrown = from;
+  }
+
+  // Goes on with the gather for the pose in `state`, starting it if `key` is new: `steps` steps of it now.
+  // Returns whether it has finished.
+  gatherThrown(state, key, steps) {
+    const gl = this.gl;
+    if (this.gatherFor !== key) {
+      this.gatherJob = this.gatherSteps(state.slice());
+      this.gatherFor = key;
+      this.gatherStarted = performance.now();
+      this.gatherFrames = 0;
+    }
+    let done = false;
+    for (let k = 0; k < steps && !done; ++k) { done = this.gatherJob.next().done; }
+    ++this.gatherFrames;
+    gl.disable(gl.BLEND);
     gl.enable(gl.DEPTH_TEST);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    const sync = new Uint8Array(4);
-    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, sync);
-    this.thrownMs = performance.now() - started;
+    if (done) {
+      if (this.gatherFrames === 1) {
+        const sync = new Uint8Array(4);
+        gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, sync);
+      }
+      this.thrownMs = performance.now() - this.gatherStarted;
+      this.thrownFrames = this.gatherFrames;
+      this.gatherJob = null;
+      this.gatherFor = '';
+    }
+    return done;
   }
 
   // What each point of the teapot sees of the room, in the teapot's own
@@ -2260,19 +2286,28 @@ class TeapotGpu {
     const view = this.view(state, width, height);
     const shadow = this.target('shadow', o.shadowSize, o.shadowSize, gl.R32F);
     // What each point sees of the room changes only with the geometry and the cut.
-    const roomKey = [this.parts.length, this.vertexCount, state[22], Math.sign(state[23] * state[2] + state[24] * state[5] + state[25] * state[8]), o.directions].join(',');
+    const roomKey = [this.parts.length, this.vertexCount, state[22], state[22] > 0.5 ? Math.sign(state[23] * state[2] + state[24] * state[5] + state[25] * state[8]) : 0, o.directions].join(',');
     if (o.roomLight && o.lighting && roomKey !== this.roomKey) {
       this.bakeRoom(state);
       this.roomKey = roomKey;
       this.thrownKey = '';
+      this.thrown = null;
+      this.gatherJob = null;
+      this.gatherFor = '';
     }
     // What the body throws on itself changes when the room or the sun turns
     // relative to it: found again when the teapot is at rest in a new attitude.
     const thrownKey = roomKey + '|' + Array.from(state.slice(0, 9), (x) => x.toFixed(5)).join(',') + '|' + o.shadows;
     if (o.roomLight > 1 && o.lighting && thrownKey !== this.thrownKey && state[27] < 0.5) {
-      this.gatherThrown(state);
-      this.thrownKey = thrownKey;
+      // All at once when there is nothing to show meanwhile; otherwise a few directions a frame.
+      const steps = this.thrown && o.gatherPerFrame > 0 ? o.gatherPerFrame : 1e9;
+      if (this.gatherThrown(state, thrownKey, steps)) { this.thrownKey = thrownKey; }
+    } else if (this.gatherJob) {
+      // The body moved again: what was being gathered is dropped.
+      this.gatherJob = null;
+      this.gatherFor = '';
     }
+    this.gathering = !!this.gatherJob;
     gl.disable(gl.BLEND);
     gl.disable(gl.CULL_FACE);
     gl.enable(gl.DEPTH_TEST);
@@ -2877,9 +2912,11 @@ class TeapotPhysics {
 //    rows live in arrays inside the shader (at most 96 contacts).
 //  - A fragment can write only its own texel. The body's new state is a few
 //    texels and each fragment that writes one runs the frame. The impulses
-//    the contact points retain are one pair of texels per hull vertex: each
-//    vertex in contact runs the same frame again and keeps its own impulse.
-//    The frame is deterministic, so they agree.
+//    the contact points retain are one pair of texels per hull vertex. The
+//    solve also writes the body's twist after each of its passes; a vertex's
+//    impulse after a pass depends only on its impulse before the pass and
+//    that twist, so each vertex in contact follows its own row through the
+//    passes and keeps the result, without solving again.
 //  - Numbers are 32-bit floats. The CPU stops Newton at a relative gradient
 //    of 1e-9, which a float cannot reach; here it stops at 1e-5, and the
 //    line search at 1e-5 of the starting slope.
@@ -2890,6 +2927,7 @@ precision highp float;
 precision highp int;
 precision highp sampler2D;
 uniform sampler2D uState;      // position; quaternion; velocity; spin; rolling impulse and whether it is held; quiet time, asleep
+uniform sampler2D uSolved;     // mode 1: the state this frame's solve wrote, with the twist after each of its passes
 uniform sampler2D uWarm;       // per hull vertex two texels: (normal impulse, tangent impulses, 0); (rebound owed, in contact, 0, 0)
 uniform sampler2D uVertices;   // hull vertices in the body's frame
 uniform int uCount, uMode;     // mode 0: the body's state; 1: the vertices' retained impulses
@@ -3187,10 +3225,50 @@ void main() {
 
   // Contacts: every hull vertex within the margin of the floor.
   float margin = min(kSpeculative + (length(V) + length(W) * uRadius) * h, 0.05);
-  int own = uMode == 1 ? texel / 2 : -1;
   if (uMode == 1) {
-    vec3 mine = position + R * vertexAt(own).xyz;
-    if (own >= uCount || !(mine.z < margin)) { outValue = vec4(0.0); return; }
+    // What this vertex retains. Its impulse after each pass is a function of its own
+    // impulse before the pass and the body's twist after it, so the vertex follows its
+    // own row through the passes from the twists the solve wrote; it does not solve again.
+    int own = texel / 2;
+    vec4 solved = texelFetch(uSolved, ivec2(8, 0), 0);   // passes run, the last vertex taken as a row
+    vec3 arm = R * vertexAt(own).xyz;
+    float separation = position.z + arm.z;
+    if (own >= uCount || !(separation < margin) || float(own) > solved.y) { outValue = vec4(0.0); return; }
+    vec4 warm = warmAt(own, 0), more = warmAt(own, 1);
+    bool matched = more.y > 0.5;
+    rowArm[0] = arm;
+    rowLambda[0] = matched ? vec3(warm.y, warm.z, warm.x) : vec3(0.0);
+    float pending = matched ? more.x : 0.0;
+    float trace = 0.0;
+    vec3 direction[3] = vec3[3](kT1, kT2, kN);
+    for (int d = 0; d < 3; ++d) {
+      vec3 a = cross(arm, direction[d]);
+      trace += 1.0 / uMass + dot(a, inverseInertia * a);
+    }
+    float localInverseMass = trace / 3.0;
+    rowR[0] = kRegularization / max(1.0 / localInverseMass, uMass);
+    float base = separation > 0.0 ? -separation / h : min(-separation / (h + kRelaxation), kPushMax);
+    float held = rowLambda[0].z / (kGravity * h);
+    if (held * rowR[0] > kRegularization) { rowR[0] = kRegularization / held; }
+    vec3 c = contactVelocity(arm, V, W);
+    float bounce = 0.0;
+    if (pending > 0.0) {
+      base = max(base, pending);
+    } else if (c.z < -kBounceFrom && separation + h * c.z < 0.0) {
+      if (separation > kLinearSlop) { bounce = -uRestitution * c.z; } else { base = max(base, -uRestitution * c.z); }
+    }
+    rowTarget[0] = base - uFrictionPair * length(c.xy);
+    rowGamma[0] = vec3(0.0);
+    int passes = int(solved.x);
+    for (int pass = 0; pass < passes; ++pass) {
+      vec3 v = texelFetch(uSolved, ivec2(9 + 2 * pass, 0), 0).xyz, w = texelFetch(uSolved, ivec2(10 + 2 * pass, 0), 0).xyz;
+      c = contactVelocity(arm, v, w);
+      evaluateContact(0, c);
+      rowLambda[0] = rowGamma[0];
+      rowTarget[0] = base - uFrictionPair * length(c.xy);
+    }
+    outValue = texel % 2 == 0 ? vec4(rowGamma[0].z, rowGamma[0].x, rowGamma[0].y, 0.0) : vec4(bounce, 1.0, 0.0, 0.0);
+    return;
   }
   rowCount = 0;
   float load = 0.0;
@@ -3257,8 +3335,13 @@ void main() {
 
   // The passes: each minimises the cost by Newton; its impulses become the retained field.
   float accuracy = kLoose;
+  vec3 passV[kMaxPasses], passW[kMaxPasses];
+  int passes = 0;
   for (int pass = 0; pass < kMaxPasses; ++pass) {
     newtonSolve(accuracy);
+    passV[pass] = V;
+    passW[pass] = W;
+    passes = pass + 1;
     float change = 0.0, magnitude = 0.0, shiftChange = 0.0;
     float pressed = 0.0;
     for (int k = 0; k < rowCount; ++k) {
@@ -3285,14 +3368,11 @@ void main() {
     accuracy = min(kLoose, max(kTight, 0.1 * relative));
   }
 
-  if (uMode == 1) {
-    // This vertex's retained impulses and the rebound it is owed.
-    int which = texel % 2;
-    outValue = vec4(0.0);
-    for (int k = 0; k < rowCount; ++k) {
-      if (rowVertex[k] != own) { continue; }
-      outValue = which == 0 ? vec4(rowGamma[k].z, rowGamma[k].x, rowGamma[k].y, 0.0) : vec4(rowBounce[k], 1.0, 0.0, 0.0);
-    }
+  if (texel >= 8) {
+    // For the vertices: how many passes ran and which vertex was the last row, then the twist after each pass.
+    int slot = texel - 9;
+    outValue = texel == 8 ? vec4(float(passes), rowCount == kRows ? float(rowVertex[kRows - 1]) : float(uCount), 0.0, 0.0)
+             : slot / 2 >= passes ? vec4(0.0) : slot % 2 == 0 ? vec4(passV[slot / 2], 0.0) : vec4(passW[slot / 2], 0.0);
     return;
   }
 
@@ -3371,7 +3451,7 @@ class WrenchPhysics {
       return { texture, framebuffer, width, height };
     };
     this.make = make;
-    this.states = [make(8, 1), make(8, 1)];
+    this.states = [make(24, 1), make(24, 1)];   // 8 texels of state, then what the solve leaves for the vertices
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this.state = new Float32Array(32);
     this.state[7] = 1;
@@ -3567,13 +3647,15 @@ class WrenchPhysics {
       gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.warm[0].texture); gl.uniform1i(u.uWarm, 1);
       // The body's new state, then what each contact point retains; both from the state before.
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.states[1].framebuffer);
-      gl.viewport(0, 0, 8, 1);
+      gl.viewport(0, 0, 24, 1);
       gl.uniform1i(u.uMode, 0);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, this.states[1].texture); gl.uniform1i(u.uSolved, 3);
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.warm[1].framebuffer);
       gl.viewport(0, 0, this.warm[1].width, this.warm[1].height);
       gl.uniform1i(u.uMode, 1);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, null);
       this.states.reverse();
       this.warm.reverse();
       this.accumulator -= this.h;
@@ -4197,13 +4279,14 @@ class RowPlanner {
         const submit = performance.now() - start;
         smooth = smooth === 0 ? submit : 0.85 * smooth + 0.15 * submit;
       } catch (error) { stats.textContent = 'Drawing failed: ' + error.message; return; }
-      dirty = false;
+      // The light the body throws on itself is found over several frames after it comes to rest.
+      dirty = gpu.gathering;
       const check = gpu.check;
       stats.textContent = `${measured.toFixed(1)} ms/frame on the GPU at ${canvas.width}\u00d7${canvas.height}` +
         (running ? (onGpu() ? (physicsChoice.value === 'wrench' ? ` · wrench solver on the GPU: ${wrench.steps} frames, ${wrench.contacts} contacts, ${wrench.stepMs.toFixed(2)} ms with the read-back` : ` · simple step on the GPU: ${simple.steps} steps over ${simple.count} points, ${simple.stepMs.toFixed(2)} ms with the read-back`)
                             : ` · physics ${state[29].toFixed(2)} ms, ${state[28]} contacts`) : '') + `\n` +
         `${state[30]} nodes · ${gpu.vertexCount} grid points · ${gpu.triangleCount} triangles, each grid point and pixel evaluated from the lattice on the GPU\n` +
-        (gpu.roomMs ? `room light: ${gpu.options.directions} directions in ${gpu.roomMs.toFixed(0)} ms` + (gpu.thrownMs ? `, gathered in ${gpu.thrownMs.toFixed(0)} ms` : '') + ` · ` : '') +
+        (gpu.roomMs ? `room light: ${gpu.options.directions} directions in ${gpu.roomMs.toFixed(0)} ms` + (gpu.thrownMs ? `, gathered in ${gpu.thrownMs.toFixed(0)} ms` + (gpu.thrownFrames > 1 ? ` over ${gpu.thrownFrames} frames` : '') : '') + ` · ` : '') +
         (check ? `shaders against the CPU at ${check.points} points: largest distance ${check.worst.toExponential(2)}, largest angle between normals ${check.worstAngle.toFixed(4)}\u00b0`
                : 'not yet checked against the CPU') +
         (gpu.rowsPlaced ? `\nrows placed on the GPU: ` + gpu.rowsPlaced.map((p) => `${p.which === 0 ? 'body' : 'lid'} ${p.rows} rows in ${p.ms.toFixed(0)} ms, error ${p.error.toExponential(2)}` +

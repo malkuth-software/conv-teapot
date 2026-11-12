@@ -17,9 +17,11 @@
 //    rows live in arrays inside the shader (at most 96 contacts).
 //  - A fragment can write only its own texel. The body's new state is a few
 //    texels and each fragment that writes one runs the frame. The impulses
-//    the contact points retain are one pair of texels per hull vertex: each
-//    vertex in contact runs the same frame again and keeps its own impulse.
-//    The frame is deterministic, so they agree.
+//    the contact points retain are one pair of texels per hull vertex. The
+//    solve also writes the body's twist after each of its passes; a vertex's
+//    impulse after a pass depends only on its impulse before the pass and
+//    that twist, so each vertex in contact follows its own row through the
+//    passes and keeps the result, without solving again.
 //  - Numbers are 32-bit floats. The CPU stops Newton at a relative gradient
 //    of 1e-9, which a float cannot reach; here it stops at 1e-5, and the
 //    line search at 1e-5 of the starting slope.
@@ -30,6 +32,7 @@ precision highp float;
 precision highp int;
 precision highp sampler2D;
 uniform sampler2D uState;      // position; quaternion; velocity; spin; rolling impulse and whether it is held; quiet time, asleep
+uniform sampler2D uSolved;     // mode 1: the state this frame's solve wrote, with the twist after each of its passes
 uniform sampler2D uWarm;       // per hull vertex two texels: (normal impulse, tangent impulses, 0); (rebound owed, in contact, 0, 0)
 uniform sampler2D uVertices;   // hull vertices in the body's frame
 uniform int uCount, uMode;     // mode 0: the body's state; 1: the vertices' retained impulses
@@ -327,10 +330,50 @@ void main() {
 
   // Contacts: every hull vertex within the margin of the floor.
   float margin = min(kSpeculative + (length(V) + length(W) * uRadius) * h, 0.05);
-  int own = uMode == 1 ? texel / 2 : -1;
   if (uMode == 1) {
-    vec3 mine = position + R * vertexAt(own).xyz;
-    if (own >= uCount || !(mine.z < margin)) { outValue = vec4(0.0); return; }
+    // What this vertex retains. Its impulse after each pass is a function of its own
+    // impulse before the pass and the body's twist after it, so the vertex follows its
+    // own row through the passes from the twists the solve wrote; it does not solve again.
+    int own = texel / 2;
+    vec4 solved = texelFetch(uSolved, ivec2(8, 0), 0);   // passes run, the last vertex taken as a row
+    vec3 arm = R * vertexAt(own).xyz;
+    float separation = position.z + arm.z;
+    if (own >= uCount || !(separation < margin) || float(own) > solved.y) { outValue = vec4(0.0); return; }
+    vec4 warm = warmAt(own, 0), more = warmAt(own, 1);
+    bool matched = more.y > 0.5;
+    rowArm[0] = arm;
+    rowLambda[0] = matched ? vec3(warm.y, warm.z, warm.x) : vec3(0.0);
+    float pending = matched ? more.x : 0.0;
+    float trace = 0.0;
+    vec3 direction[3] = vec3[3](kT1, kT2, kN);
+    for (int d = 0; d < 3; ++d) {
+      vec3 a = cross(arm, direction[d]);
+      trace += 1.0 / uMass + dot(a, inverseInertia * a);
+    }
+    float localInverseMass = trace / 3.0;
+    rowR[0] = kRegularization / max(1.0 / localInverseMass, uMass);
+    float base = separation > 0.0 ? -separation / h : min(-separation / (h + kRelaxation), kPushMax);
+    float held = rowLambda[0].z / (kGravity * h);
+    if (held * rowR[0] > kRegularization) { rowR[0] = kRegularization / held; }
+    vec3 c = contactVelocity(arm, V, W);
+    float bounce = 0.0;
+    if (pending > 0.0) {
+      base = max(base, pending);
+    } else if (c.z < -kBounceFrom && separation + h * c.z < 0.0) {
+      if (separation > kLinearSlop) { bounce = -uRestitution * c.z; } else { base = max(base, -uRestitution * c.z); }
+    }
+    rowTarget[0] = base - uFrictionPair * length(c.xy);
+    rowGamma[0] = vec3(0.0);
+    int passes = int(solved.x);
+    for (int pass = 0; pass < passes; ++pass) {
+      vec3 v = texelFetch(uSolved, ivec2(9 + 2 * pass, 0), 0).xyz, w = texelFetch(uSolved, ivec2(10 + 2 * pass, 0), 0).xyz;
+      c = contactVelocity(arm, v, w);
+      evaluateContact(0, c);
+      rowLambda[0] = rowGamma[0];
+      rowTarget[0] = base - uFrictionPair * length(c.xy);
+    }
+    outValue = texel % 2 == 0 ? vec4(rowGamma[0].z, rowGamma[0].x, rowGamma[0].y, 0.0) : vec4(bounce, 1.0, 0.0, 0.0);
+    return;
   }
   rowCount = 0;
   float load = 0.0;
@@ -397,8 +440,13 @@ void main() {
 
   // The passes: each minimises the cost by Newton; its impulses become the retained field.
   float accuracy = kLoose;
+  vec3 passV[kMaxPasses], passW[kMaxPasses];
+  int passes = 0;
   for (int pass = 0; pass < kMaxPasses; ++pass) {
     newtonSolve(accuracy);
+    passV[pass] = V;
+    passW[pass] = W;
+    passes = pass + 1;
     float change = 0.0, magnitude = 0.0, shiftChange = 0.0;
     float pressed = 0.0;
     for (int k = 0; k < rowCount; ++k) {
@@ -425,14 +473,11 @@ void main() {
     accuracy = min(kLoose, max(kTight, 0.1 * relative));
   }
 
-  if (uMode == 1) {
-    // This vertex's retained impulses and the rebound it is owed.
-    int which = texel % 2;
-    outValue = vec4(0.0);
-    for (int k = 0; k < rowCount; ++k) {
-      if (rowVertex[k] != own) { continue; }
-      outValue = which == 0 ? vec4(rowGamma[k].z, rowGamma[k].x, rowGamma[k].y, 0.0) : vec4(rowBounce[k], 1.0, 0.0, 0.0);
-    }
+  if (texel >= 8) {
+    // For the vertices: how many passes ran and which vertex was the last row, then the twist after each pass.
+    int slot = texel - 9;
+    outValue = texel == 8 ? vec4(float(passes), rowCount == kRows ? float(rowVertex[kRows - 1]) : float(uCount), 0.0, 0.0)
+             : slot / 2 >= passes ? vec4(0.0) : slot % 2 == 0 ? vec4(passV[slot / 2], 0.0) : vec4(passW[slot / 2], 0.0);
     return;
   }
 
@@ -511,7 +556,7 @@ class WrenchPhysics {
       return { texture, framebuffer, width, height };
     };
     this.make = make;
-    this.states = [make(8, 1), make(8, 1)];
+    this.states = [make(24, 1), make(24, 1)];   // 8 texels of state, then what the solve leaves for the vertices
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this.state = new Float32Array(32);
     this.state[7] = 1;
@@ -707,13 +752,15 @@ class WrenchPhysics {
       gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.warm[0].texture); gl.uniform1i(u.uWarm, 1);
       // The body's new state, then what each contact point retains; both from the state before.
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.states[1].framebuffer);
-      gl.viewport(0, 0, 8, 1);
+      gl.viewport(0, 0, 24, 1);
       gl.uniform1i(u.uMode, 0);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, this.states[1].texture); gl.uniform1i(u.uSolved, 3);
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.warm[1].framebuffer);
       gl.viewport(0, 0, this.warm[1].width, this.warm[1].height);
       gl.uniform1i(u.uMode, 1);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
+      gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, null);
       this.states.reverse();
       this.warm.reverse();
       this.accumulator -= this.h;

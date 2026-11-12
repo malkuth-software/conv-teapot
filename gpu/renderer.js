@@ -8,7 +8,7 @@ class TeapotGpu {
     if (!gl) { throw new Error('WebGL 2 is not available'); }
     if (!gl.getExtension('EXT_color_buffer_float')) { throw new Error('rendering to float textures (EXT_color_buffer_float) is not available'); }
     this.gl = gl;
-    this.options = { material: 0, gloss: 0, lighting: 1, shadows: 1, ground: 1, wire: 0, texture: 0, mapping: 0, perPixel: 1, shadowSize: 2048, polished: 0, trace: 1, filter: 2, placeRows: 1, roomLight: 2, directions: 256, gatherDirections: 48, gathers: 5, layers: 6 };
+    this.options = { material: 0, gloss: 0, lighting: 1, shadows: 1, ground: 1, wire: 0, texture: 0, mapping: 0, perPixel: 1, shadowSize: 2048, polished: 0, trace: 1, filter: 2, placeRows: 1, gatherPerFrame: 3, roomLight: 2, directions: 256, gatherDirections: 48, gathers: 5, layers: 6 };
     // The surface from the lattice at every vertex (used once, to evaluate them, and to check against the CPU);
     // the teapot from those evaluated vertices; the maps of what each point sees of the room.
     this.conv = this.program(VERTEX_GLSL, PROBE_FRAGMENT_GLSL);
@@ -384,12 +384,14 @@ class TeapotGpu {
   // for each direction, the body is peeled into layers along the direction,
   // each layer carrying the light of the side that faces away, and every
   // texel that has the body in front of it takes the layer it faces.
-  gatherThrown(state) {
+  // It is a sequence of steps, one direction of one gather each, so that it can be spread over frames
+  // while the picture keeps the light found before.
+  *gatherSteps(state) {
     const gl = this.gl, size = this.mapSize, o = this.options;
-    const started = performance.now();
     const surface = this.targets.mapSurface, open = this.targets.mapOpen;
     const direct = this.pair('mapDirect', size, gl.RGBA16F);
-    const a = this.pair('mapThrownA', size, gl.RGBA16F), b = this.pair('mapThrownB', size, gl.RGBA16F);
+    // Two maps to gather between, neither the one the picture is using.
+    const [a, b] = ['mapThrownA', 'mapThrownB', 'mapThrownC'].map((key) => this.pair(key, size, gl.RGBA16F)).filter((maps) => maps !== this.thrown);
     const layerSize = 256;
     if (!this.layerTexture) {
       this.layerTexture = gl.createTexture();
@@ -443,7 +445,6 @@ class TeapotGpu {
       gl.bindFramebuffer(gl.FRAMEBUFFER, to.framebuffer);
       gl.clearBufferfv(gl.COLOR, 0, [0, 0, 0, 0]);
       gl.clearBufferfv(gl.COLOR, 1, [0, 0, 0, 0]);
-      this.thrown = from;
       for (let k = 0; k < count; ++k) {
         const z = 1 - (2 * k + 1) / count, r = Math.sqrt(1 - z * z), angle = 2.399963229728653 * k + 0.7;
         const d = [r * Math.cos(angle), z, r * Math.sin(angle)];
@@ -497,16 +498,41 @@ class TeapotGpu {
         gl.blendFunc(gl.ONE, gl.ONE);
         gl.drawArrays(gl.TRIANGLES, 0, 6);
         gl.disable(gl.BLEND);
+        yield;
       }
       [from, to] = [to, from];
     }
-    this.thrown = from;
     this.smooth(from, to);
+    this.thrown = from;
+  }
+
+  // Goes on with the gather for the pose in `state`, starting it if `key` is new: `steps` steps of it now.
+  // Returns whether it has finished.
+  gatherThrown(state, key, steps) {
+    const gl = this.gl;
+    if (this.gatherFor !== key) {
+      this.gatherJob = this.gatherSteps(state.slice());
+      this.gatherFor = key;
+      this.gatherStarted = performance.now();
+      this.gatherFrames = 0;
+    }
+    let done = false;
+    for (let k = 0; k < steps && !done; ++k) { done = this.gatherJob.next().done; }
+    ++this.gatherFrames;
+    gl.disable(gl.BLEND);
     gl.enable(gl.DEPTH_TEST);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    const sync = new Uint8Array(4);
-    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, sync);
-    this.thrownMs = performance.now() - started;
+    if (done) {
+      if (this.gatherFrames === 1) {
+        const sync = new Uint8Array(4);
+        gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, sync);
+      }
+      this.thrownMs = performance.now() - this.gatherStarted;
+      this.thrownFrames = this.gatherFrames;
+      this.gatherJob = null;
+      this.gatherFor = '';
+    }
+    return done;
   }
 
   // What each point of the teapot sees of the room, in the teapot's own
@@ -785,19 +811,28 @@ class TeapotGpu {
     const view = this.view(state, width, height);
     const shadow = this.target('shadow', o.shadowSize, o.shadowSize, gl.R32F);
     // What each point sees of the room changes only with the geometry and the cut.
-    const roomKey = [this.parts.length, this.vertexCount, state[22], Math.sign(state[23] * state[2] + state[24] * state[5] + state[25] * state[8]), o.directions].join(',');
+    const roomKey = [this.parts.length, this.vertexCount, state[22], state[22] > 0.5 ? Math.sign(state[23] * state[2] + state[24] * state[5] + state[25] * state[8]) : 0, o.directions].join(',');
     if (o.roomLight && o.lighting && roomKey !== this.roomKey) {
       this.bakeRoom(state);
       this.roomKey = roomKey;
       this.thrownKey = '';
+      this.thrown = null;
+      this.gatherJob = null;
+      this.gatherFor = '';
     }
     // What the body throws on itself changes when the room or the sun turns
     // relative to it: found again when the teapot is at rest in a new attitude.
     const thrownKey = roomKey + '|' + Array.from(state.slice(0, 9), (x) => x.toFixed(5)).join(',') + '|' + o.shadows;
     if (o.roomLight > 1 && o.lighting && thrownKey !== this.thrownKey && state[27] < 0.5) {
-      this.gatherThrown(state);
-      this.thrownKey = thrownKey;
+      // All at once when there is nothing to show meanwhile; otherwise a few directions a frame.
+      const steps = this.thrown && o.gatherPerFrame > 0 ? o.gatherPerFrame : 1e9;
+      if (this.gatherThrown(state, thrownKey, steps)) { this.thrownKey = thrownKey; }
+    } else if (this.gatherJob) {
+      // The body moved again: what was being gathered is dropped.
+      this.gatherJob = null;
+      this.gatherFor = '';
     }
+    this.gathering = !!this.gatherJob;
     gl.disable(gl.BLEND);
     gl.disable(gl.CULL_FACE);
     gl.enable(gl.DEPTH_TEST);

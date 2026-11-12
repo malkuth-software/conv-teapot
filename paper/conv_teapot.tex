@@ -1704,9 +1704,11 @@ system is $6\times6$, since there is one body, and is solved by
 elimination; the line search is the CPU's. A fragment can write only its
 own texel, so the body's new state, a few texels, is written by
 fragments that each run the frame, and the impulses the contact points
-retain are a pair of texels per hull vertex, each vertex in contact
-running the same frame again and keeping its own. The frame is
-deterministic, so they agree. Numbers are 32-bit floats, and Newton
+retain are a pair of texels per hull vertex. A vertex's impulse after a
+pass depends only on its impulse before the pass and the body's twist
+after it, so the solve also writes the twist after each pass and each
+vertex in contact follows its own row through the passes from those
+twists, without solving again. Numbers are 32-bit floats, and Newton
 stops at a relative gradient of $10^{-5}$ where the CPU stops at
 $10^{-9}$.
 
