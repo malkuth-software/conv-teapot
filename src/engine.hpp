@@ -60,7 +60,9 @@ public:
         options.circular = geometry == Geometry::conv_round;
         options.closure = geometry == Geometry::conv_seamless ? Closure::paper : Closure::cubic;
         teapot_ = make_teapot(options);
+        sim.move_nodes = false; // the lattice stays at rest; the pose carries the motion
         sim.build(teapot_);
+        pose_now_ = Rigid{};
         running = false;
         mesh = Mesh{};
     }
@@ -105,7 +107,7 @@ public:
         if (running) {
             const double start = detail::now_ms();
             // Shown at half speed: at teapot scale a drop is over in half a second.
-            if (sim.step((dt > 1.0 / 30.0 ? 1.0 / 30.0 : dt) * time_scale) > 0) { ++pose_; }
+            if (sim.step((dt > 1.0 / 30.0 ? 1.0 / 30.0 : dt) * time_scale) > 0) { moved(); }
             ms_sim = detail::now_ms() - start;
             // The engine puts a settled body to sleep; stop drawing then.
             if (sim.asleep() && !sim.grabbing()) { running = false; }
@@ -131,7 +133,7 @@ public:
         orbiting_ = true;
         const Hit* hit = hit_at(x, y);
         if (!force_orbit && hit != nullptr) {
-            const Vec3 point = teapot_.parts[scene_parts_[hit->part]]->conv.position(hit->u, hit->v);
+            const Vec3 point = pose_now_.point(teapot_.parts[scene_parts_[hit->part]]->conv.position(hit->u, hit->v));
             grab_depth_ = hit->t;
             sim.grab(point);
             running = true;
@@ -162,18 +164,18 @@ public:
         const Hit* hit = hit_at(x, y);
         if (hit == nullptr) { return; }
         const detail::View view(camera(), frame.width, frame.height);
-        const Vec3 point = teapot_.parts[scene_parts_[hit->part]]->conv.position(hit->u, hit->v);
+        const Vec3 point = pose_now_.point(teapot_.parts[scene_parts_[hit->part]]->conv.position(hit->u, hit->v));
         sim.poke(point, normalize(view.ray(x, y)));
         running = true;
     }
     void drop() {
         sim.reset(6.0, 1.2);
-        ++pose_;
+        moved();
         running = true;
     }
     void reset() {
         sim.reset();
-        ++pose_;
+        moved();
         running = false;
     }
 
@@ -182,15 +184,18 @@ private:
     Scene build_scene() {
         Scene scene;
         scene_parts_.clear();
+        posed_.assign(teapot_.parts.size(), PosedSurface{});
         for (std::size_t index = 0; index < teapot_.parts.size(); ++index) {
             const auto& part = teapot_.parts[index];
             const bool shown = part->group == "handle" ? show_handle : part->group == "spout" ? show_spout : part->group == "lid" ? show_lid : show_body;
             if (!shown || (part->interior && !show_interior)) { continue; }
             RenderPart render_part;
-            const bool deformed = sim.moved();
-            render_part.surface = geometry == Geometry::bezier && !deformed && !part->sampled ? static_cast<const Surface*>(&part->bezier)
-                                  : geometry == Geometry::control_mesh ? static_cast<const Surface*>(&part->linear)
-                                                                       : static_cast<const Surface*>(&part->conv);
+            // The surface at rest, carried by the body's pose.
+            posed_[index].base = geometry == Geometry::bezier && !part->sampled ? static_cast<const Surface*>(&part->bezier)
+                                 : geometry == Geometry::control_mesh ? static_cast<const Surface*>(&part->linear)
+                                                                      : static_cast<const Surface*>(&part->conv);
+            posed_[index].pose = &pose_now_;
+            render_part.surface = &posed_[index];
             render_part.orientation = part->orientation;
             render_part.per_u = part->per_u;
             render_part.per_v = part->per_v;
@@ -231,6 +236,12 @@ private:
         mesh_pose_ = pose_;
     }
 
+    // The body moved: take its pose.
+    void moved() {
+        pose_now_ = sim.pose();
+        ++pose_;
+    }
+
     const Hit* hit_at(double x, double y) const {
         const int ix = int(x), iy = int(y);
         if (ix < 0 || iy < 0 || ix >= frame.width || iy >= frame.height) { return nullptr; }
@@ -242,6 +253,8 @@ private:
     std::vector<std::size_t> scene_parts_; // scene part -> teapot part
     std::vector<std::unique_ptr<Texture>> textures_;
     std::uint64_t mesh_signature_ = 0, mesh_pose_ = 0, pose_ = 0;
+    Rigid pose_now_;
+    std::vector<PosedSurface> posed_; // one per teapot part
     double last_x_ = 0.0, last_y_ = 0.0, grab_depth_ = 0.0;
     bool orbiting_ = false;
 };

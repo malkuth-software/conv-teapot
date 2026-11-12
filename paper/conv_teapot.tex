@@ -1315,8 +1315,41 @@ each along the handle and spout; for the 2026 version, one hull per
 group of exterior lattices. We hand them to the rigid-body engine of a rock-stacking game,
 whose wrench-transport solver resolves contact, friction and rolling
 resistance in one solve per frame. One model unit is taken as 7\,cm. The
-engine returns a pose; the pose is applied to the rest nodes and the
-surface is recompiled through them, which takes 0.17\,ms. Dropped from 42\,cm at a tilt of 1.2\,rad, the teapot lands on its
+engine returns a pose. The lattice stays at rest and the pose is applied
+to the surface: every evaluated point and derivative is turned and
+shifted. An earlier version applied the pose to the nodes and built CONV
+through the moved nodes. That is a different surface. Admission and the
+bubble act on each coordinate separately, so they do not commute with a
+rotation, and a monotone coordinate of the lattice at rest need not be
+monotone after a turn. Table~\ref{tab:rotation} measures the difference
+for a turn about one axis: none at $90^\circ$, where the coordinates are
+only exchanged, and otherwise up to $1.3\times10^{-2}$ in position and
+$62^\circ$ in the normal for the 1976 lattice. The moved-node surface
+shows thin creases under grazing light that the lattice at rest does not
+have. The same holds for any rigid motion of a CONV surface whose
+admission is not inactive in every frame.
+
+\begin{table}[H]
+\caption{CONV through turned nodes against the turned CONV surface}
+\label{tab:rotation}
+\centering
+\scriptsize
+\begin{tabular}{l|c|cc|cc}
+\hline
+ & & \multicolumn{2}{c|}{Distance} & \multicolumn{2}{c}{Normal (deg)}\\
+Version & Turn & max & rms & max & rms\\
+\hline
+1976, exact & $30^\circ$ & $1.3\times10^{-2}$ & $1.0\times10^{-3}$ & 62 & 1.91\\
+1976, exact & $60^\circ$ & $1.2\times10^{-2}$ & $8.4\times10^{-4}$ & 62 & 1.90\\
+1976, exact & $90^\circ$ & $1.3\times10^{-15}$ & $1.3\times10^{-16}$ & 0 & 0\\
+2026, unified & $30^\circ$ & $1.2\times10^{-3}$ & $3.3\times10^{-5}$ & 26 & 0.54\\
+2026, unified & $60^\circ$ & $1.0\times10^{-3}$ & $2.7\times10^{-5}$ & 23 & 0.40\\
+2026, unified & $90^\circ$ & $1.3\times10^{-15}$ & $1.1\times10^{-16}$ & 0 & 0\\
+\hline
+\end{tabular}
+\end{table}
+
+Dropped from 42\,cm at a tilt of 1.2\,rad, the teapot lands on its
 spout, rocks back over its base and is asleep within 1.5\,s
 (Fig.~\ref{fig:drop}). The body is treated as solid porcelain. A real teapot is a shell;
 simulating one would use the interior, which these versions lack.
@@ -1332,7 +1365,7 @@ below the hand; it is not carried level by its centre of mass.
 \centering
 \includegraphics[width=0.92\textwidth]{figures/fig_drop.png}
 \caption{A drop, at 0.30, 0.42, 0.60 and 1.60\,s. The surface is
-rebuilt through the moved nodes at every frame.}
+drawn from its lattice at rest, carried by the body's pose.}
 \label{fig:drop}
 \end{figure*}
 
@@ -1364,7 +1397,8 @@ A CONV lattice with seams reproduces the 1976 Utah Teapot exactly from
 560 points that lie on it. The lattice can be made
 round by moving nodes onto circles, traced without a mesh, textured in
 its own parameters, and dropped on a floor by handing its nodes to a
-physics engine. Later versions enter as samples, with no knowledge of how
+physics engine as collision hulls and applying the resulting pose to the
+surface. Later versions enter as samples, with no knowledge of how
 they were constructed: the 2026 teapot, interior included, is 66 small
 lattices. Across their seams those lattices do not carry curvature
 continuity. Whole sheets reduce the curvature jump from 0.16 to 0.003: the body with its interior is one

@@ -108,6 +108,12 @@ engine of PlaySuite's rock-stacking game (wrench-transport solver).
   3% and makes every lattice cell independent. They
   take a second to build. The engine keeps the tree.
 
+- **Rigid motion is applied to the surface, not to the nodes.** CONV through
+  rotated nodes is not the rotated CONV surface, because admission works
+  coordinate by coordinate (`tools/rotation_study.cpp`: up to 1.3e-2 in
+  position and 62 degrees in the normal on the 1976 lattice). The engine keeps
+  the lattice at rest and carries the pose (`PosedSurface`).
+
 One 960 x 600 frame of the unified teapot, all threads / one thread: per-ray
 150 / 410 ms, transport 91 / 261, seeded 37 / 125, mesh shaded per pixel
 15 / 45, mesh with baked light and emitters 11 / 36.

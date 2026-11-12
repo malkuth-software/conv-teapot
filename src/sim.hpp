@@ -6,8 +6,10 @@
 // zc_phys). The collision shape is a set of convex hulls taken straight from
 // the CONV lattice: every node lies on the surface, so the hull of a group
 // of nodes is a tight convex piece of the teapot, with no separate collision
-// model to author. After each step the body's pose is applied to the rest
-// nodes and the CONV surface is recompiled through them.
+// model to author. The body's motion is reported as a rigid pose, which a
+// renderer applies to the surface at rest (PosedSurface). With move_nodes
+// set the pose is instead applied to the nodes and CONV is recompiled
+// through them, which is not the same surface (tools/rotation_study.cpp).
 //
 // The engine works in metres with z up; the model is in teapot units with
 // y up. One model unit is taken as 7 cm, which makes the body 28 cm across.
@@ -26,6 +28,10 @@ namespace tconv {
 class TeapotSim {
 public:
     static constexpr double metres = 0.07; // one model unit
+    // Move the lattice nodes with the body and rebuild CONV through them.
+    // Off, the lattice stays at rest and pose() carries the motion, which
+    // is what a renderer should use (see PosedSurface).
+    bool move_nodes = true;
 
     void build(Teapot& teapot) {
         teapot_ = &teapot;
@@ -259,7 +265,23 @@ private:
         world_->add_velocity(body_, impulse * (1.0 / shape_.mass), spin(zc::phys::cross(r, impulse)));
     }
 
+public:
+    // The body's motion from its rest pose, in model coordinates.
+    Rigid pose() const {
+        const zc::phys::Pose now = world_->state(body_).pose;
+        const auto moved = [&](Vec3 rest) { return to_model(now.p + zc::phys::rotate(now.q, to_physics(rest) - shape_.com_offset)); };
+        Rigid out;
+        out.b = moved({0, 0, 0});
+        const Vec3 x = moved({1, 0, 0}) - out.b, y = moved({0, 1, 0}) - out.b, z = moved({0, 0, 1}) - out.b;
+        out.a[0] = x.x; out.a[1] = y.x; out.a[2] = z.x;
+        out.a[3] = x.y; out.a[4] = y.y; out.a[5] = z.y;
+        out.a[6] = x.z; out.a[7] = y.z; out.a[8] = z.z;
+        return out;
+    }
+
+private:
     void write_back() {
+        if (!move_nodes) { return; }
         const zc::phys::Pose pose = world_->state(body_).pose;
         std::size_t index = 0;
         for (auto& part : teapot_->parts) {

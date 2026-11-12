@@ -1081,10 +1081,26 @@ private:
             double lit = 1.0;
             if (options.shadows && n_l > 0.0) {
                 const double lu = length(solve.point.du), lv = length(solve.point.dv);
-                lit = depth == 0 && lu > 1e-9 && lv > 1e-9
-                          ? shadow_lit(scene, options, primary, solve.point.p + normal * 0.02, 0.035, solve.t / primary.focal, solve.point.du * (1.0 / lu),
-                                       solve.point.dv * (1.0 / lv), part_index, solve.u, solve.v, work)
-                          : shadow_.lit(solve.point.p + normal * 0.02, 0.035);
+                // Where the light only grazes the surface a traced light ray
+                // meets it at a glancing angle and its answer is unreliable,
+                // so the traced edge is used in proportion to how squarely
+                // the surface faces the light, and the shadow map's own
+                // smooth answer takes over toward the terminator.
+                // The shadow map is drawn from flat pieces, which stray from the
+                // surface by more along the light the more the light grazes
+                // it: the depth allowance grows with the tangent of that angle.
+                const double bias = 0.02 + 0.02 * std::fmin(12.0, std::sqrt(std::fmax(0.0, 1.0 - n_l * n_l)) / n_l);
+                const double coarse = shadow_.lit(solve.point.p + normal * 0.02, bias);
+                const double trust = detail::smoothstep(0.2, 0.5, n_l);
+                lit = coarse;
+                if (depth == 0 && trust > 0.0 && lu > 1e-9 && lv > 1e-9) {
+                    const double traced = shadow_lit(scene, options, primary, solve.point.p + normal * 0.02, bias, solve.t / primary.focal,
+                                                     solve.point.du * (1.0 / lu), solve.point.dv * (1.0 / lv), part_index, solve.u, solve.v, work);
+                    lit = coarse + (traced - coarse) * trust;
+#ifdef TCONV_SHADOW_DEBUG
+                    if (std::fabs(traced - coarse) > 0.5) { std::fprintf(stderr, "part %d u %.3f v %.3f n_l %.3f coarse %.2f traced %.2f\n", int(part_index), solve.u, solve.v, n_l, coarse, traced); }
+#endif
+                }
             }
             const double diffuse = std::fmax(0.0, n_l) * lit;
             const double up = 0.5 * (normal.y + 1.0);
@@ -1328,19 +1344,13 @@ public:
         for (std::size_t k = 0; k < mesh.parts.size() && k < scene.parts.size(); ++k) {
             MeshPart& part = mesh.parts[k];
             const Surface& surface = *scene.parts[k].surface;
-            // The outward side: at the vertex furthest along x the normal points along x.
-            double facing = 1.0;
-            if (scene.parts[k].two_sided && part.vertex_count > 0) {
-                std::size_t far = part.first_vertex;
-                for (std::size_t index = part.first_vertex; index < part.first_vertex + part.vertex_count; ++index) {
-                    if (mesh.vertices[index].p.x > mesh.vertices[far].p.x) { far = index; }
-                }
-                facing = mesh.vertices[far].n.x * scene.parts[k].orientation < 0.0 ? -1.0 : 1.0;
-            }
-            LightMap::Level level;
+            // Both sides of every part are baked, each as it is seen from its
+            // own side: which side a pixel shows is known only when it is drawn.
+            LightMap::Level level, back;
             level.width = std::min(2048, std::max(32, int(part.world_around / texel + 15.0) / 16 * 16));
             level.height = std::min(2048, std::max(16, int(part.world_along / texel + 0.5)));
             level.texel.resize(std::size_t(level.width) * std::size_t(level.height));
+            back = level;
             const double cu = double(surface.cells_u()), cv = double(surface.cells_v());
             parallel_rows(level.height, options.threads, [&](int begin, int end, int) {
                 Work work;
@@ -1353,24 +1363,32 @@ public:
                         solve.point = surface.eval(solve.u, solve.v);
                         solve.grad_u = cu / double(level.width);
                         solve.grad_v = cv / double(level.height);
-                        Vec3 dir = solve.point.p - view.eye;
-                        solve.t = dot(dir, view.forward);
-                        const Vec3 normal = normalize(cross(solve.point.du, solve.point.dv)) * (scene.parts[k].orientation * facing);
-                        const double towards = dot(normal, dir);
-                        if (towards > 0.0) { dir = dir - normal * (2.0 * towards); }
-                        double lit = 1.0;
-                        const Vec3 colour = shade_surface(scene, bake, view, dir, solve, std::uint16_t(k), 0, work, &lit);
-                        level.texel[std::size_t(y) * std::size_t(level.width) + std::size_t(x)] =
-                            std::uint32_t(to_byte(colour.x)) | std::uint32_t(to_byte(colour.y)) << 8 | std::uint32_t(to_byte(colour.z)) << 16 |
-                            std::uint32_t(lit * 255.0 + 0.5) << 24;
+                        const Vec3 towards_point = solve.point.p - view.eye;
+                        solve.t = dot(towards_point, view.forward);
+                        const Vec3 raw = normalize(cross(solve.point.du, solve.point.dv));
+                        for (int side = 0; side < 2; ++side) {
+                            // This side seen from the camera, or, when it faces
+                            // away, from the camera's mirror image in the surface.
+                            const Vec3 facing = raw * (side == 0 ? 1.0 : -1.0);
+                            Vec3 dir = towards_point;
+                            const double away = dot(facing, dir);
+                            if (away > 0.0) { dir = dir - facing * (2.0 * away); }
+                            double lit = 1.0;
+                            const Vec3 colour = shade_surface(scene, bake, view, dir, solve, std::uint16_t(k), 0, work, &lit);
+                            (side == 0 ? level : back).texel[std::size_t(y) * std::size_t(level.width) + std::size_t(x)] =
+                                std::uint32_t(to_byte(colour.x)) | std::uint32_t(to_byte(colour.y)) << 8 | std::uint32_t(to_byte(colour.z)) << 16 |
+                                std::uint32_t(lit * 255.0 + 0.5) << 24;
+                        }
                     }
                 }
             });
-            mesh.texels += level.texel.size();
-            part.light.wrap = surface.periodic_u();
-            part.light.levels.clear();
-            part.light.levels.push_back(std::move(level));
-            part.light.build_levels();
+            mesh.texels += 2 * level.texel.size();
+            for (LightMap* map : {&part.light, &part.light_back}) {
+                map->wrap = surface.periodic_u();
+                map->levels.clear();
+                map->levels.push_back(std::move(map == &part.light ? level : back));
+                map->build_levels();
+            }
         }
         // The floor emitter: the shadow on the floor, over the square it can reach.
         mesh.floor = FloorEmitter{};
@@ -1479,7 +1497,9 @@ private:
         }
         if (options.method == Method::raster && options.baked_light && mesh.lit && !mesh.parts[part].light.levels.empty()) {
             float rgb[4];
-            mesh.parts[part].light.sample(w[0] * a.s + w[1] * b.s + w[2] * c.s, w[0] * a.t + w[1] * b.t + w[2] * c.t, triangle_lod_[sample.triangle], rgb);
+            // The side the eye is on.
+            const Vec3 raw_normal = a.n * double(w[0]) + b.n * double(w[1]) + c.n * double(w[2]);
+            (dot(raw_normal, dir) > 0.0 ? mesh.parts[part].light_back : mesh.parts[part].light).sample(w[0] * a.s + w[1] * b.s + w[2] * c.s, w[0] * a.t + w[1] * b.t + w[2] * c.t, triangle_lod_[sample.triangle], rgb);
             // Stored display-encoded (gamma 2): back to linear.
             colour = {double(rgb[0] * rgb[0]) / 65025.0, double(rgb[1] * rgb[1]) / 65025.0, double(rgb[2] * rgb[2]) / 65025.0};
             if (mesh.lit_diffuse_only) {

@@ -27,6 +27,7 @@ int main(int argc, char** argv) {
     const auto get = [&](const char* key, const char* fallback) { return args.count(key) != 0 ? args[key] : std::string(fallback); };
     const auto number = [&](const char* key, double fallback) { return args.count(key) != 0 ? std::atof(args[key].c_str()) : fallback; };
 
+    Rigid pose; // the teapot's motion from rest, applied to its surfaces
     TeapotOptions teapot_options;
     teapot_options.per_u = teapot_options.per_v = std::size_t(number("per", 4));
     teapot_options.seams = number("seams", 1) != 0;
@@ -47,6 +48,7 @@ int main(int argc, char** argv) {
     if (args.count("drop") != 0) {
         // Simulate a drop for the given number of seconds before rendering.
         TeapotSim sim;
+        sim.move_nodes = number("movenodes", 0) != 0;
         sim.build(teapot);
         sim.reset(number("lift", 3.0), number("tilt", 0.45));
         const int steps = int(number("drop", 1.0) * 120.0);
@@ -54,6 +56,7 @@ int main(int argc, char** argv) {
         const zc::phys::SolveStats stats = sim.stats();
         std::printf("drop: %d steps, %zu hulls, mass %.3f kg, kinetic %.3e J, asleep %d, contacts %zu, newton iterations %lld\n", steps, sim.hulls(),
                     sim.mass(), sim.kinetic(), sim.asleep() ? 1 : 0, sim.contacts(), static_cast<long long>(stats.newton_iterations));
+        if (!sim.move_nodes) { pose = sim.pose(); }
     }
 
     if (args.count("tip") != 0) {
@@ -73,25 +76,33 @@ int main(int argc, char** argv) {
         sim.release();
         for (int k = 0; k < 1200; ++k) { sim.step(1.0 / 120.0); }
         std::printf("tip: asleep %d\n", sim.asleep() ? 1 : 0);
+        if (!sim.move_nodes) { pose = sim.pose(); }
     }
     if (args.count("roll") != 0) {
-        // Lay the teapot over: turn every node about the z axis and rest the lowest on the floor.
+        // Lay the teapot over: a turn about the z axis, the lowest node resting on the floor.
+        // movenodes=1 turns the lattice nodes themselves and rebuilds CONV through them instead.
         const double a = number("roll", 90.0) * M_PI / 180.0;
+        Rigid turn;
+        turn.a[0] = std::cos(a); turn.a[1] = -std::sin(a);
+        turn.a[3] = std::sin(a); turn.a[4] = std::cos(a);
+        turn.b = Vec3{0, 0, 0} - turn.direction({0.0, 1.5, 0.0});
         double low = 1e30;
         for (auto& part : teapot.parts) {
-            for (Vec3& node : part->conv.lattice.nodes) {
-                const double x = node.x, y = node.y - 1.5;
-                node = {x * std::cos(a) - y * std::sin(a), x * std::sin(a) + y * std::cos(a), node.z};
-                low = std::min(low, node.y);
-            }
+            for (const Vec3& node : part->conv.lattice.nodes) { low = std::min(low, turn.point(node).y); }
         }
-        for (auto& part : teapot.parts) {
-            for (Vec3& node : part->conv.lattice.nodes) { node.y -= low; }
-            part->conv.compile();
+        turn.b.y -= low;
+        if (number("movenodes", 0) != 0) {
+            for (auto& part : teapot.parts) {
+                for (Vec3& node : part->conv.lattice.nodes) { node = turn.point(node); }
+                part->conv.compile();
+            }
+        } else {
+            pose = turn;
         }
     }
     const auto textures = make_textures();
     Scene scene;
+    std::vector<PosedSurface> posed(teapot.parts.size());
     const std::string geometry = get("geometry", "conv");
     std::vector<long> scene_index(teapot.parts.size(), -1);
     for (std::size_t part_index = 0; part_index < teapot.parts.size(); ++part_index) {
@@ -101,6 +112,11 @@ int main(int argc, char** argv) {
         render_part.surface = geometry == "bezier" && !part->sampled ? static_cast<const Surface*>(&part->bezier)
                               : geometry == "linear" ? static_cast<const Surface*>(&part->linear)
                                                      : static_cast<const Surface*>(&part->conv);
+        if (!pose.identity()) {
+            posed[part_index].base = render_part.surface;
+            posed[part_index].pose = &pose;
+            render_part.surface = &posed[part_index];
+        }
         render_part.orientation = part->orientation;
         render_part.per_u = part->per_u;
         render_part.per_v = part->per_v;
@@ -144,7 +160,7 @@ int main(int argc, char** argv) {
     Camera camera;
     const double azimuth = number("azimuth", 68.0) * M_PI / 180.0, elevation = number("elevation", 22.0) * M_PI / 180.0;
     const double distance = number("distance", 11.0);
-    camera.target = {0.15, number("lookat", 1.35), 0.0};
+    camera.target = {number("lookx", 0.15), number("lookat", 1.35), 0.0};
     camera.eye = camera.target + Vec3{std::cos(elevation) * std::cos(azimuth), std::sin(elevation), std::cos(elevation) * std::sin(azimuth)} * distance;
     camera.fov_y = number("fov", 34.0) * M_PI / 180.0;
 
@@ -254,6 +270,16 @@ int main(int argc, char** argv) {
         std::printf("  verify: reprojection residual of %zu hits: max %.4f px, mean %.5f px\n", count, worst, sum / double(std::max<std::size_t>(1, count)));
         std::printf("  against a 16x-lattice independent reference: agree %zu, hit only here %zu, hit only in reference %zu, deeper here %zu, nearer here %zu\n",
                     both - deeper - nearer, only_frame, only_reference, deeper, nearer);
+    }
+    if (args.count("probe") != 0) {
+        // The hits down a short column of pixels: probe=X,Y.
+        int px = 0, py = 0;
+        std::sscanf(args["probe"].c_str(), "%d,%d", &px, &py);
+        for (int y = py - 8; y <= py + 8; ++y) {
+            const Hit& hit = frame.hits[std::size_t(y) * std::size_t(width) + std::size_t(px)];
+            const std::uint8_t* c = &frame.rgba[(std::size_t(y) * std::size_t(width) + std::size_t(px)) * 4];
+            std::printf("  pixel %d,%d: part %d u %.4f v %.4f depth %.5f colour %d %d %d\n", px, y, int(hit.part), double(hit.u), double(hit.v), double(hit.t), c[0], c[1], c[2]);
+        }
     }
     const std::string out = get("out", "");
     if (!out.empty() && !write_png(out, width, height, frame.rgba.data())) { std::fputs("cannot write output\n", stderr); return 1; }

@@ -16,6 +16,7 @@ $CXX $FLAGS tools/unified_study.cpp -o out/unified_study
 $CXX $FLAGS tools/budget.cpp -o out/budget
 $CXX $FLAGS tools/mesh_study.cpp -o out/mesh_study
 $CXX $FLAGS tools/curvature_budget.cpp -o out/curvature_budget
+$CXX $FLAGS tools/rotation_study.cpp -o out/rotation_study
 $CXX $FLAGS tests/line_check.cpp -o out/line_check
 $CXX $FLAGS tests/grab_check.cpp out/zc_phys.a -o out/grab_check
 echo built

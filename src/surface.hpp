@@ -43,6 +43,39 @@ public:
     virtual Vec3 position(double u, double v) const { return eval(u, v).p; }
 };
 
+// A rigid motion: p -> A p + b, A a rotation.
+struct Rigid {
+    double a[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    Vec3 b;
+    Vec3 direction(Vec3 d) const { return {a[0] * d.x + a[1] * d.y + a[2] * d.z, a[3] * d.x + a[4] * d.y + a[5] * d.z, a[6] * d.x + a[7] * d.y + a[8] * d.z}; }
+    Vec3 point(Vec3 p) const { return direction(p) + b; }
+    bool identity() const {
+        return a[0] == 1 && a[4] == 1 && a[8] == 1 && a[1] == 0 && a[2] == 0 && a[3] == 0 && a[5] == 0 && a[6] == 0 && a[7] == 0 && b.x == 0 && b.y == 0 && b.z == 0;
+    }
+};
+
+// A surface carried by a rigid motion. A body that moves rigidly is drawn
+// this way, from its lattice at rest. Moving the nodes instead and building
+// CONV through them is not the same surface: admission and the bubble act
+// on each coordinate separately, so they do not commute with a rotation, and
+// a turned lattice shows small creases that the lattice at rest does not.
+class PosedSurface final : public Surface {
+public:
+    const Surface* base = nullptr;
+    const Rigid* pose = nullptr;
+    std::size_t cells_u() const override { return base->cells_u(); }
+    std::size_t cells_v() const override { return base->cells_v(); }
+    bool periodic_u() const override { return base->periodic_u(); }
+    SurfacePoint eval(double u, double v) const override {
+        SurfacePoint point = base->eval(u, v);
+        point.p = pose->point(point.p);
+        point.du = pose->direction(point.du);
+        point.dv = pose->direction(point.dv);
+        return point;
+    }
+    Vec3 position(double u, double v) const override { return pose->point(base->position(u, v)); }
+};
+
 // Splits a coordinate into a cell and a local parameter in [0,1].
 inline void locate(double x, std::size_t cells, bool periodic, std::size_t& cell, double& t) {
     if (periodic) {

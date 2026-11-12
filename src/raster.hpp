@@ -131,7 +131,7 @@ struct MeshPart {
     std::size_t first_triangle = 0, triangle_count = 0;
     std::vector<float> arc;                 // light map t at every node row
     double world_around = 0, world_along = 0; // sizes in model units, for the light map's resolution
-    LightMap light;
+    LightMap light, light_back;             // the side the normal points to, and the other
     double t_of(double v) const {
         const double x = v < 0.0 ? 0.0 : v > double(arc.size() - 1) ? double(arc.size() - 1) : v;
         const std::size_t k = std::min(arc.size() - 2, std::size_t(x));
