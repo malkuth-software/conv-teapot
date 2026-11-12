@@ -22,7 +22,9 @@ geometry:
   original Bézier patches to 2e-15.
 - A *continuous bubble limiter*. The standard limiter is discontinuous in the
   data and can crack a surface; the symmetric one is continuous and keeps the
-  variation bound.
+  variation bound. On the teapot itself the bubble moves the surface
+  by less than half a pixel, so the demo has no switch for it; it matters on
+  rough or deformed lattices.
 
 **Versions** (`src/teapot.hpp`), following the official Utah Teapot page:
 
