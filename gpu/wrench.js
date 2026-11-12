@@ -452,12 +452,53 @@ void main() {
 }
 `.replace(/uFrictionPair/g, 'sqrt(uFriction * 0.9)');
 
+// The body's mass, centre of mass and inertia, integrated on the GPU over the
+// faces of its convex hulls: each triangle with the origin is a tetrahedron,
+// and the volume, first moments and second moments of the solid are sums over
+// the tetrahedra (the divergence theorem). The shader goes over all the
+// triangles and writes five texels: mass and centre of mass; then the
+// inertia about the centre of mass, by rows.
+const MASS_GLSL = `#version 300 es
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+uniform sampler2D uTriangles;   // three texels a triangle
+uniform int uCount;
+uniform float uDensity;
+out vec4 outValue;
+void main() {
+  float volume = 0.0;
+  vec3 first = vec3(0.0);
+  mat3 second = mat3(0.0);
+  for (int t = 0; t < uCount; ++t) {
+    int i = 3 * t;
+    vec3 a = texelFetch(uTriangles, ivec2(i & 2047, i >> 11), 0).xyz;
+    vec3 b = texelFetch(uTriangles, ivec2((i + 1) & 2047, (i + 1) >> 11), 0).xyz;
+    vec3 c = texelFetch(uTriangles, ivec2((i + 2) & 2047, (i + 2) >> 11), 0).xyz;
+    float six = dot(a, cross(b, c));   // six times the tetrahedron's signed volume
+    vec3 sum = a + b + c;
+    volume += six / 6.0;
+    first += sum * (six / 24.0);
+    second += (outerProduct(a, a) + outerProduct(b, b) + outerProduct(c, c) + outerProduct(sum, sum)) * (six / 120.0);
+  }
+  vec3 centre = first / volume;
+  float mass = uDensity * volume;
+  // Inertia about the origin from the second moments, then moved to the centre of mass.
+  mat3 about = uDensity * (mat3(second[0][0] + second[1][1] + second[2][2]) - second);
+  mat3 inertia = about - mass * (mat3(dot(centre, centre)) - outerProduct(centre, centre));
+  int texel = int(gl_FragCoord.x);
+  outValue = texel == 0 ? vec4(mass, centre) : texel == 1 ? vec4(volume, 0.0, 0.0, 0.0)
+           : vec4(inertia[0][texel - 2], inertia[1][texel - 2], inertia[2][texel - 2], 0.0);
+}
+`;
+
 // The solver's body on the GPU: its state, the hull vertices, and what the contacts retain.
 class WrenchPhysics {
   constructor(gpu) {
     this.gpu = gpu;
     const gl = gpu.gl;
     this.program = gpu.program(ROOM_VERTEX_GLSL, WRENCH_GLSL);
+    this.massProgram = gpu.program(ROOM_VERTEX_GLSL, MASS_GLSL);
     const make = (width, height) => {
       const texture = gl.createTexture();
       gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -488,7 +529,9 @@ class WrenchPhysics {
   setBody(engine) {
     const gl = this.gpu.gl;
     const pointer = engine._tp_solver_body();
-    const head = new Float64Array(engine.HEAPF64.buffer, pointer, 19);
+    // Copies: the engine reuses the memory these are read from.
+    const head = new Float64Array(engine.HEAPF64.buffer, pointer, 19).slice();
+    const vertices = new Float64Array(engine.HEAPF64.buffer, pointer + 19 * 8, head[18] * 4).slice();
     this.mass = head[0];
     this.radius = head[1];
     this.com = [head[2], head[3], head[4]];
@@ -499,12 +542,46 @@ class WrenchPhysics {
                  (a[5] * a[6] - a[3] * a[8]) / det, (a[0] * a[8] - a[2] * a[6]) / det, (a[2] * a[3] - a[0] * a[5]) / det,
                  (a[3] * a[7] - a[4] * a[6]) / det, (a[1] * a[6] - a[0] * a[7]) / det, (a[0] * a[4] - a[1] * a[3]) / det];
     this.inverseInertia = new Float32Array([inv[0], inv[3], inv[6], inv[1], inv[4], inv[7], inv[2], inv[5], inv[8]]);
+    // The same three found on the GPU, by integrating over the hulls' faces; these are the ones used.
+    const engineValues = { mass: this.mass, com: this.com.slice(), inertia: a.slice() };
+    const facePointer = engine._tp_hull_triangles();
+    const triangles = new Float64Array(engine.HEAPF64.buffer, facePointer, 1)[0];
+    const corners = new Float64Array(engine.HEAPF64.buffer, facePointer + 8, triangles * 9);
+    const texels = new Float32Array(triangles * 12);
+    for (let k = 0; k < triangles * 3; ++k) { texels.set([corners[k * 3], corners[k * 3 + 1], corners[k * 3 + 2], 0], k * 4); }
+    this.gpu.floatTexture('hullTriangles', texels, 4);
+    const target = this.make(5, 1);
+    gl.viewport(0, 0, 5, 1);
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.BLEND);
+    gl.useProgram(this.massProgram.program);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.gpu.textures.hullTriangles); gl.uniform1i(this.massProgram.uniforms.uTriangles, 0);
+    gl.uniform1i(this.massProgram.uniforms.uCount, triangles);
+    gl.uniform1f(this.massProgram.uniforms.uDensity, 2400);
+    gl.bindVertexArray(this.gpu.emptyVao);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    const found = new Float32Array(20);
+    gl.readPixels(0, 0, 5, 1, gl.RGBA, gl.FLOAT, found);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.enable(gl.DEPTH_TEST);
+    const g = [found[8], found[9], found[10], found[12], found[13], found[14], found[16], found[17], found[18]];   // by rows
+    this.massCheck = { mass: Math.abs(found[0] - engineValues.mass) / engineValues.mass,
+                       centre: Math.hypot(found[1] - engineValues.com[0], found[2] - engineValues.com[1], found[3] - engineValues.com[2]),
+                       inertia: Math.max(...g.map((x, k) => Math.abs(x - engineValues.inertia[k]))) / Math.max(...engineValues.inertia.map(Math.abs)), triangles };
+    this.mass = found[0];
+    this.com = [found[1], found[2], found[3]];
+    for (let k = 0; k < 9; ++k) { a[k] = g[k]; }
+    this.inertia = new Float32Array([a[0], a[3], a[6], a[1], a[4], a[7], a[2], a[5], a[8]]);
+    const det2 = a[0] * (a[4] * a[8] - a[5] * a[7]) - a[1] * (a[3] * a[8] - a[5] * a[6]) + a[2] * (a[3] * a[7] - a[4] * a[6]);
+    const inv2 = [(a[4] * a[8] - a[5] * a[7]) / det2, (a[2] * a[7] - a[1] * a[8]) / det2, (a[1] * a[5] - a[2] * a[4]) / det2,
+                  (a[5] * a[6] - a[3] * a[8]) / det2, (a[0] * a[8] - a[2] * a[6]) / det2, (a[2] * a[3] - a[0] * a[5]) / det2,
+                  (a[3] * a[7] - a[4] * a[6]) / det2, (a[1] * a[6] - a[0] * a[7]) / det2, (a[0] * a[4] - a[1] * a[3]) / det2];
+    this.inverseInertia = new Float32Array([inv2[0], inv2[3], inv2[6], inv2[1], inv2[4], inv2[7], inv2[2], inv2[5], inv2[8]]);
     this.friction = head[14];
     this.restitution = head[15];
     this.rolling = head[16];
     this.h = head[17];
     this.count = head[18];
-    const vertices = new Float64Array(engine.HEAPF64.buffer, pointer + 19 * 8, this.count * 4);
     this.gpu.floatTexture('wrenchVertices', Float32Array.from(vertices), 4);
     const rows = Math.max(1, Math.ceil(this.count * 2 / 2048));
     this.warm = [this.make(2048, rows), this.make(2048, rows)];

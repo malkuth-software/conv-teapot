@@ -308,6 +308,26 @@ EMSCRIPTEN_KEEPALIVE const double* tp_solver_body() {
     }
     return body.data();
 }
+// The faces of the engine's convex hulls as triangles, in the frame the hulls
+// were given in (metres, z up), for integrating the body's mass, centre of
+// mass and inertia elsewhere: the number of triangles, then nine numbers each.
+EMSCRIPTEN_KEEPALIVE const double* tp_hull_triangles() {
+    const zc::phys::Shape& shape = engine->sim.shape();
+    body.assign(1, 0.0);
+    for (const zc::phys::HullData& hull : shape.hulls) {
+        for (std::size_t f = 0; f + 1 < hull.face_first.size(); ++f) {
+            const std::int32_t first = hull.face_first[f], last = hull.face_first[f + 1];
+            for (std::int32_t k = first + 1; k + 1 < last; ++k) {
+                for (std::int32_t corner : {hull.face_loop[std::size_t(first)], hull.face_loop[std::size_t(k)], hull.face_loop[std::size_t(k + 1)]}) {
+                    const zc::phys::Vec3 p = hull.vertices[std::size_t(corner)] + shape.com_offset;
+                    body.insert(body.end(), {p.x, p.y, p.z});
+                }
+                body[0] += 1.0;
+            }
+        }
+    }
+    return body.data();
+}
 // The pose from that simulation: rotation by rows, then translation.
 EMSCRIPTEN_KEEPALIVE void tp_pose(double a0, double a1, double a2, double a3, double a4, double a5, double a6, double a7, double a8, double x, double y, double z) {
     tconv::Rigid pose;
