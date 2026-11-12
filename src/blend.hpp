@@ -165,10 +165,32 @@ inline JoinResult make_join(const Surface& body, const BodyBranch& branch, bool 
             const Vec3 b = tube.position(u, crossing[k] + direction * on_tube_distance / tube_speed);
             result.blend.at(k, std::size_t(j)) = a * (1.0 - beta(tau)) + b * beta(tau);
         }
-        // Trims stop a little inside the band so that no gap shows at its edges.
-        const double keep = 0.985 * width;
+        // Trims stop inside the band so that no gap shows at its edges. The
+        // band begins tangent to the surface it leaves, so the overlap is two
+        // coincident sheets.
+        const double keep = 0.93 * width;
         result.tube_trim.cut[k] = crossing[k] + direction * keep / tube_speed;
         result.body_trim.loop.push_back({body_u[k] + keep * out_u / speed_u, body_v[k] + keep * out_v / speed_v});
+    }
+    // The cut on the body is a smooth closed curve through those points, not
+    // the polygon with straight sides between them: where the body's rows
+    // are dense a straight side in (u, v) bows out past the band's edge and
+    // leaves a sliver of the body cut away with nothing over it.
+    {
+        const std::vector<std::array<double, 2>> corner = result.body_trim.loop;
+        const std::size_t n = corner.size();
+        result.body_trim.loop.clear();
+        for (std::size_t k = 0; k < n; ++k) {
+            const auto &p0 = corner[(k + n - 1) % n], &p1 = corner[k], &p2 = corner[(k + 1) % n], &p3 = corner[(k + 2) % n];
+            for (int step = 0; step < 8; ++step) {
+                const double t = step / 8.0, t2 = t * t, t3 = t2 * t;
+                std::array<double, 2> q{};
+                for (std::size_t c = 0; c < 2; ++c) {
+                    q[c] = 0.5 * (p0[c] * (-t3 + 2 * t2 - t) + p1[c] * (3 * t3 - 5 * t2 + 2) + p2[c] * (-3 * t3 + 4 * t2 + t) + p3[c] * (t3 - t2));
+                }
+                result.body_trim.loop.push_back(q);
+            }
+        }
     }
     result.ok = true;
     return result;

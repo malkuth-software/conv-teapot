@@ -410,6 +410,7 @@ Metric metric_of(const NodeForms& f, double tolerance, double angle, double long
 struct MetricOptions {
     double tolerance = 1e-2, angle_degrees = 20.0, longest = 1.0;
     bool nucleate = true; // seeds by farthest point in the metric; otherwise a jittered regular pick
+    bool bounded = false;    // a seed's cell may not leave the lattice cells it belongs to: those round its node, or the one it was put in
     bool from_nodes = false; // seeds are the lattice's own nodes: CONV's rows already crowd where the shape is hard
     int epochs = 8;       // e-means epochs; 0: seeds are used where they were placed
     double density = 1.0; // multiplies the vertex count the metric asks for
@@ -491,6 +492,9 @@ Mesh metric_mesh(const std::vector<const ConvSurface*>& surfaces, const MetricOp
             Metric m;
             long row;     // pinned to this sample row, or -1
             long stretch; // for a free seed
+            // The box of samples its cell may reach (bounded cells): centre and half-width round u, a range of rows.
+            double box_u = 0, box_half = 1e30;
+            long box_low = -1000000000, box_high = 1000000000;
         };
         std::vector<Seed> seeds;
         std::vector<std::uint32_t> label(std::size_t(nu * nv), 0);
@@ -523,6 +527,12 @@ Mesh metric_mesh(const std::vector<const ConvSurface*>& surfaces, const MetricOp
                 const double want = along.back() * double(k) / double(count);
                 const long i = std::min(nu - 1, long(std::upper_bound(along.begin(), along.end(), want) - along.begin()) - 1);
                 seeds.push_back({double(std::max(0L, i)), double(row), metric[std::size_t(row * nu + std::max(0L, i))], row, -1});
+                if (options.bounded) {
+                    seeds.back().box_u = seeds.back().u;
+                    seeds.back().box_half = double(nu); // a row seed reaches along its row; the rows beside it bound it
+                    seeds.back().box_low = row - per;
+                    seeds.back().box_high = row + per;
+                }
             }
             // Row samples belong to the nearest row seed along the row.
             for (long i = 0; i < nu; ++i) {
@@ -568,6 +578,7 @@ Mesh metric_mesh(const std::vector<const ConvSurface*>& surfaces, const MetricOp
                 heap.pop_back();
                 if (d > reach[std::size_t(sample)]) { continue; }
                 const long i = sample % nu, j = sample / nu;
+                const Seed& owner = seeds[label[std::size_t(sample)]];
                 const Metric& m = metric[std::size_t(sample)];
                 for (long dj = -1; dj <= 1; ++dj) {
                     const long jj = j + dj;
@@ -575,6 +586,11 @@ Mesh metric_mesh(const std::vector<const ConvSurface*>& surfaces, const MetricOp
                     for (long di = -1; di <= 1; ++di) {
                         if (di == 0 && dj == 0) { continue; }
                         const long other = jj * nu + ((i + di) % nu + nu) % nu;
+                        if (options.bounded) {
+                            double du = double(other % nu) - owner.box_u;
+                            du -= double(nu) * std::round(du / double(nu));
+                            if (std::fabs(du) > owner.box_half || jj < owner.box_low || jj > owner.box_high) { continue; }
+                        }
                         const Metric& o = metric[std::size_t(other)];
                         const double a = 0.5 * (m.a + o.a), b = 0.5 * (m.b + o.b), c = 0.5 * (m.c + o.c);
                         const double step = std::sqrt(std::max(0.0, a * di * di + 2.0 * b * di * dj + c * dj * dj)) / per;
@@ -601,14 +617,32 @@ Mesh metric_mesh(const std::vector<const ConvSurface*>& surfaces, const MetricOp
         grow();
         const std::size_t first_free = seeds.size();
         std::vector<long> seed_sample(seeds.size(), -1);
-        const auto plant = [&](long sample) {
+        std::size_t unreached_report = 0;
+        // `at_node`: the seed is a lattice node and may reach the cells round
+        // it; otherwise it was put inside a cell and stays in that cell.
+        const auto plant = [&](long sample, bool at_node = false) {
             seeds.push_back({double(sample % nu), double(sample / nu), metric[std::size_t(sample)], -1, stretch[std::size_t(sample)]});
             seed_sample.push_back(sample);
+            if (options.bounded) {
+                Seed& seed = seeds.back();
+                const long i = sample % nu, j = sample / nu;
+                if (at_node) {
+                    seed.box_u = double(i);
+                    seed.box_half = double(per);
+                    seed.box_low = j - per;
+                    seed.box_high = j + per;
+                } else {
+                    seed.box_u = double((i / per) * per) + 0.5 * per;
+                    seed.box_half = 0.5 * per;
+                    seed.box_low = (std::min(j, nv - 2) / per) * per;
+                    seed.box_high = seed.box_low + per;
+                }
+            }
         };
         if (options.from_nodes) {
             for (long j = 1; j < cv; ++j) {
                 if (pinned_row[std::size_t(j * per)] != 0) { continue; }
-                for (long i = 0; i < cu; ++i) { plant(j * per * nu + i * per); }
+                for (long i = 0; i < cu; ++i) { plant(j * per * nu + i * per, true); }
             }
         } else if (options.nucleate) {
             // Nucleation: each new seed goes where the surface is furthest, in
@@ -769,6 +803,10 @@ Mesh metric_mesh(const std::vector<const ConvSurface*>& surfaces, const MetricOp
             }
             return out;
         };
+        for (const long sample : free_samples) {
+            if (reach[std::size_t(sample)] > 1e29) { ++unreached_report; }
+        }
+        if (unreached_report > 0) { std::fprintf(stderr, "part %zu: %zu samples no seed may reach\n", part_index, unreached_report); }
         Built built = build();
         // Check and refine. The metric is second order: it cannot see a chord
         // that leaves a line of zero curvature sideways (the top of a lip, a
@@ -988,6 +1026,11 @@ int main(int argc, char** argv) {
             o.from_nodes = true;
             return o;
         };
+        const auto bounded = [&](double tolerance, double angle, int refine) {
+            MetricOptions o = nodes(tolerance, angle, 0, refine);
+            o.bounded = true;
+            return o;
+        };
         const std::vector<Case> cases{
             {"metric 2e-2 20deg, no check", with(2e-2, 20, 1, true, 8, 0)},
             {"metric 2e-2 20deg, checked", with(2e-2, 20, 1, true, 8, 8)},
@@ -1000,6 +1043,10 @@ int main(int argc, char** argv) {
             {"  lattice nodes, checked", nodes(2e-2, 20, 0, 8)},
             {"  lattice nodes + emeans, checked", nodes(2e-2, 20, 8, 8)},
             {"  nodes, checked, 1e-2 20deg", nodes(1e-2, 20, 0, 8)},
+            {"  nodes bounded, no check", bounded(2e-2, 20, 0)},
+            {"  nodes bounded, checked 2e-2 20deg", bounded(2e-2, 20, 8)},
+            {"  nodes bounded, checked 1e-2 20deg", bounded(1e-2, 20, 8)},
+            {"  nodes bounded, checked 5e-3 10deg", bounded(5e-3, 10, 8)},
             {"  nodes, checked, 5e-3 10deg", nodes(5e-3, 10, 0, 8)},
             {"metric 4e-2 30deg, checked", with(4e-2, 30, 1, true, 8, 8)},
             {"metric 1e-2 20deg, checked", with(1e-2, 20, 1, true, 8, 8)},

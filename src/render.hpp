@@ -1016,17 +1016,26 @@ private:
         return base * light * (1.0 - fade) + Vec3{0.80, 0.84, 0.90} * fade;
     }
 
+    // How much a shadow dims what a glossy surface mirrors. A shadow is only
+    // looked up on surface that faces the light, so its dimming fades to
+    // nothing toward the terminator; a step there would outline every
+    // shadowed strip that happens to face the light.
+    static double mirror_dim(double lit, double n_l) { return 1.0 - 0.5 * (1.0 - lit) * detail::smoothstep(0.0, 0.3, n_l); }
+
     Vec3 shade_surface(const Scene& scene, const RenderOptions& options, const detail::View& primary, Vec3 dir, const detail::Solve& solve,
                        std::uint16_t part_index, int depth, Work& work, double* lit_out = nullptr) const {
         const RenderPart& part = scene.parts[part_index];
         const Surface& surface = *part.surface;
         Vec3 normal = cross(solve.point.du, solve.point.dv);
         if (length(normal) < 1e-9) {
-            // A pole: take the normal a little way along v.
-            const double cv = double(surface.cells_v());
+            // A pole: one normal for every u, the mean a little way along v all the way round.
+            const double cv = double(surface.cells_v()), cu = double(surface.cells_u());
             const double v = solve.v < 0.5 * cv ? solve.v + 0.05 : solve.v - 0.05;
-            const SurfacePoint near = surface.eval(solve.u, v);
-            normal = cross(near.du, near.dv);
+            normal = {};
+            for (int k = 0; k < 8; ++k) {
+                const SurfacePoint near = surface.eval(cu * k / 8.0, v);
+                normal = normal + normalize(cross(near.du, near.dv));
+            }
         }
         normal = normalize(normal) * part.orientation;
         const Vec3 incoming = normalize(dir);
@@ -1095,7 +1104,7 @@ private:
                                                    : sky(scene, origin, reflected);
                     const Vec3 tint = chrome ? Vec3{0.95, 0.96, 0.98} : Vec3{1, 1, 1};
                     const Vec3 under = chrome ? Vec3{0, 0, 0} : colour;
-                    colour = under * (1.0 - fresnel) + Vec3{mirror.x * tint.x, mirror.y * tint.y, mirror.z * tint.z} * (fresnel * (lit * 0.5 + 0.5));
+                    colour = under * (1.0 - fresnel) + Vec3{mirror.x * tint.x, mirror.y * tint.y, mirror.z * tint.z} * (fresnel * mirror_dim(lit, n_l));
                 } else {
                     const Vec3 half = normalize(scene.light + to_eye);
                     const double specular = std::pow(std::fmax(0.0, dot(normal, half)), 90.0) * lit;
@@ -1501,7 +1510,7 @@ private:
                     }
                     const Vec3 tint = chrome ? Vec3{0.95, 0.96, 0.98} : Vec3{1, 1, 1};
                     const Vec3 under = chrome ? Vec3{0, 0, 0} : colour;
-                    colour = under * (1.0 - fresnel) + Vec3{mirror.x * tint.x, mirror.y * tint.y, mirror.z * tint.z} * (fresnel * (lit * 0.5 + 0.5));
+                    colour = under * (1.0 - fresnel) + Vec3{mirror.x * tint.x, mirror.y * tint.y, mirror.z * tint.z} * (fresnel * mirror_dim(lit, dot(normal, scene.light)));
                 } else {
                     const Vec3 half = normalize(scene.light + to_eye);
                     const double specular = std::pow(std::fmax(0.0, dot(normal, half)), 90.0) * lit;

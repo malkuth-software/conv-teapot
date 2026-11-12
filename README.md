@@ -103,7 +103,9 @@ engine of PlaySuite's rock-stacking game (wrench-transport solver).
   random, nucleated, or at the lattice nodes; cells by shortest path; e-means
   relaxation; then a check against the surface) need about 40% fewer vertices
   than the tree when coarse and none fewer by 14 000. Seeding at the lattice
-  nodes is the most even and gives the best normals at the fine setting. They
+  nodes is the most even and gives the best normals at the fine setting;
+  bounding each cell by the lattice cells round its node changes the count by
+  3% and makes every lattice cell independent. They
   take a second to build. The engine keeps the tree.
 
 One 960 x 600 frame of the unified teapot, all threads / one thread: per-ray

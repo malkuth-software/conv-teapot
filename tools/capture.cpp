@@ -56,6 +56,40 @@ int main(int argc, char** argv) {
                     sim.mass(), sim.kinetic(), sim.asleep() ? 1 : 0, sim.contacts(), static_cast<long long>(stats.newton_iterations));
     }
 
+    if (args.count("tip") != 0) {
+        // Tip the teapot over by its handle, as a drag in the demo does, and let it settle.
+        TeapotSim sim;
+        sim.build(teapot);
+        Vec3 held = teapot.parts[2]->conv.lattice.nodes[0];
+        for (const Vec3& node : teapot.parts[2]->conv.lattice.nodes) {
+            if (node.x < held.x) { held = node; }
+        }
+        sim.grab(held);
+        for (int k = 0; k < 300; ++k) {
+            const double t = std::min(1.0, k / 180.0);
+            sim.drag(held + Vec3{2.5 * t, 4.0 * t, 1.0 * t});
+            sim.step(1.0 / 120.0);
+        }
+        sim.release();
+        for (int k = 0; k < 1200; ++k) { sim.step(1.0 / 120.0); }
+        std::printf("tip: asleep %d\n", sim.asleep() ? 1 : 0);
+    }
+    if (args.count("roll") != 0) {
+        // Lay the teapot over: turn every node about the z axis and rest the lowest on the floor.
+        const double a = number("roll", 90.0) * M_PI / 180.0;
+        double low = 1e30;
+        for (auto& part : teapot.parts) {
+            for (Vec3& node : part->conv.lattice.nodes) {
+                const double x = node.x, y = node.y - 1.5;
+                node = {x * std::cos(a) - y * std::sin(a), x * std::sin(a) + y * std::cos(a), node.z};
+                low = std::min(low, node.y);
+            }
+        }
+        for (auto& part : teapot.parts) {
+            for (Vec3& node : part->conv.lattice.nodes) { node.y -= low; }
+            part->conv.compile();
+        }
+    }
     const auto textures = make_textures();
     Scene scene;
     const std::string geometry = get("geometry", "conv");

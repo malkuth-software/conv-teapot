@@ -76,8 +76,8 @@ interior. Fish improved the interior. Yuksel's 2026 version adds chamfers,
 a lighter interior, texture layouts and curvature continuity for smooth
 reflections \cite{utahpage,yuksel2026}.
 
-This paper asks what the teapot looks like in a different kind of
-representation: one whose every control value is a point of the surface.
+This paper puts the teapot in a representation whose every control
+value is a point of the surface.
 CONV \cite{convpaper} interpolates samples on a regular lattice by a
 piecewise quintic whose derivative cannot change sign more often than the
 samples do. It was built for images. Used for positions, it gives a surface
@@ -90,7 +90,7 @@ The contributions are these.
 the difference stencils along a node row or column. With cubic-exact
 end stencils, a seamed lattice reproduces any piecewise bicubic surface
 whose patch joints lie on seams, wherever admission leaves the proposal
-alone. For the teapot it is alone everywhere.
+unchanged. For the teapot that is everywhere.
 \item \emph{A continuous bubble limiter} (Section~\ref{sec:bubble}). We
 show that the standard limiter jumps, give a symmetric replacement, and
 prove that it keeps the variation bound.
@@ -452,7 +452,7 @@ proportions.}
 
 The patch decomposition of the previous subsection is inherited from the
 source, and its seams are where curvature continuity is lost
-(Section~\ref{sec:qualities}). Neither is needed. A lattice closed around
+(Section~\ref{sec:qualities}). A sheet does not need them. A lattice closed around
 and open along, with a pole at each end, is a sphere, and that is a bowl
 with its inside: the body's profile runs from the outer bottom centre up
 the outside, over the rim, down the inside, to the inner bottom centre.
@@ -509,8 +509,8 @@ spacing that makes every cell err alike is $h\propto g^{-1/4}$, the
 equidistribution rule of de~Boor~\cite{deboor1973}. That $h$ is handed
 to the projective grading above, the rows are replaced, and the step is
 repeated eight times with the estimate averaged geometrically between
-rounds; the plan with the smallest error is kept. Nothing but the CONV
-line and the source is consulted.
+rounds; the plan with the smallest error is kept. The only inputs are
+the CONV line and the source.
 
 With 16 nodes around, the body's largest distance from its profile falls
 from $5.8\times10^{-3}$ to $1.0\times10^{-3}$ at 64 rows and from
@@ -623,13 +623,12 @@ transport and 56\,ms per ray without edge samples.
 \section{How Many Nodes}
 \label{sec:budget}
 
-Is a CONV lattice an economical description? Against the form the teapot
-was born in, no better than equal: the 1976 patches have about 300
-control points, a seamed lattice of 324 nodes is within
-$2.9\times10^{-5}$ of them, and exact reproduction takes 560. But that
-target is native to B\'ezier patches. The fair question gives every
-method the same points on a surface that is native to none and asks what
-surface each makes of them. We use three targets: an analytic surface of
+This section compares node counts. Against the 1976 B\'ezier patches a
+CONV lattice is about equal: the patches have about 300 control points,
+a seamed lattice of 324 nodes is within $2.9\times10^{-5}$ of them, and
+exact reproduction takes 560. That target is native to B\'ezier
+patches. The comparison below gives every method the same points on a
+surface that is native to none of them. We use three targets: an analytic surface of
 revolution with a trigonometric profile, half a torus, and the 2026 body
 with its interior, rows placed as above; and five methods: the nodes
 joined bilinearly; the Catmull--Rom bicubic~\cite{catmullrom1974}; the
@@ -689,8 +688,8 @@ by the three tight bends and not by the method. CONV is the only one of
 the five whose normal is not exactly continuous where its limiter acts:
 at the coarsest sizes it shows kinks of a few degrees, which vanish as
 the lattice resolves the shape (none above $0.03^\circ$ on the torus at
-272 nodes). So the claim we can support is equality with the best
-classical interpolant at local cost, not superiority in count.
+272 nodes). The result is equality with the $C^2$ interpolating spline
+at local cost. CONV does not need fewer nodes than it.
 
 \begin{figure*}[t]
 \centering
@@ -705,9 +704,8 @@ base of the spout. Bottom: the handle without joins and with them.}
 \section{Against the Later Teapots}
 \label{sec:qualities}
 
-Each later version fixed a named defect. We take them in turn and say
-what a node lattice does about each. Table~\ref{tab:qualities} is the
-summary; the measurements follow.
+Each later version fixed a named defect. Table~\ref{tab:qualities}
+lists what a node lattice does about each; the measurements follow.
 
 \begin{table}[H]
 \caption{Defects addressed by later versions, and by a CONV lattice}
@@ -786,8 +784,7 @@ the upper and lower body meet. Right: the 2026 lattice from samples.}
 \label{fig:reflect}
 \end{figure}
 
-The picture is kinder than the numbers, and the numbers are the result.
-At every joint between two exterior lattices we compared the two
+The figure does not show what the measurements show. At every joint between two exterior lattices we compared the two
 surfaces' normals and the curvature of the curve that crosses the joint
 (Table~\ref{tab:joints}). The sampled 2026 lattices keep the normal to
 $0.11^\circ$ on average and $0.83^\circ$ at worst. They do not keep the
@@ -829,7 +826,7 @@ $2.1\times10^{-3}$ at worst and $6.6\times10^{-4}$ rms on the exterior
 fourth-order ends, so their error should be near a sixteenth of these
 figures; that is an expectation, not a measurement.
 
-For the 1976 data alone the picture is as follows. Around the body
+For the 1976 data alone: around the body
 and lid, the round style has no seams, and one-sided finite differences
 find no curvature jump across node lines (relative jump below
 $2\times10^{-8}$). Along the profile, the exact and round styles copy the
@@ -848,9 +845,7 @@ admission acts and leaves tangent turns of up to $13^\circ$ at node
 rows, and the cap crease is rounded to $47^\circ$ where it should be
 $90^\circ$. Doubling the nodes brings the deviation to about
 $2\times10^{-2}$. A CONV lattice is smooth where its data are resolved
-and it is honest about where they are not; it does not manufacture
-curvature continuity at a feature it cannot see. The seamed styles are
-the ones we recommend.
+and is not where they are not. We recommend the seamed styles.
 
 \subsection{What is not addressed}
 
@@ -869,8 +864,8 @@ across edges, the direction of triangulation. A node lattice has one node
 where patches meet, and Section~\ref{sec:transport} renders the surface
 itself. When a mesh is wanted for speed, Section~\ref{sec:baked} makes
 one from the lattice, with one vertex where pieces meet and two only
-along a crease. At a pole the solver's damped step and a normal taken a short
-distance along $v$ are the whole treatment.
+along a crease. A pole is handled by the solver's damped step and by a normal averaged
+around the pole a short distance along $v$.
 
 \section{Rays by Transport}
 \label{sec:transport}
@@ -899,7 +894,7 @@ true surface by Newton's method with the dual-number derivatives, to
 0.01 pixel. It stops at the first converged hit that is nearer than the
 next candidate's bound.
 \end{enumerate}
-No ray searches anything. The triangles are predictors only; every hit,
+No ray performs a search. The triangles are predictors only; every hit,
 normal and texture coordinate comes from the surface.
 
 Two refinements carry most of the gain. A prediction whose first residual
@@ -1085,8 +1080,8 @@ Clusters, 12000 & 11984 & $3.7\times10^{-2}$ & $1.8\times10^{-3}$ & 117 & 6.58\\
 
 Of the first four layouts (Table~\ref{tab:layouts}; the full sweep is in
 \texttt{results/mesh\_study.txt}; the layouts from the metric are the
-subsection after next) three things can be said. First, distance alone
-is the wrong criterion. A bend of radius 0.03 fits inside a tolerance of
+subsection after next) there are three results. First, distance alone
+is an insufficient criterion. A bend of radius 0.03 fits inside a tolerance of
 0.01 as a single flat piece turning $60^\circ$, and the shading across it
 is then wrong however the normals are interpolated: the tree by distance
 alone has a worst normal error of $75^\circ$, and a $20^\circ$ limit on
@@ -1168,7 +1163,7 @@ curve's own curvature. And where one principal curvature vanishes, on
 top of the lip or on a nearly flat disc, the metric calls an edge along
 that direction free, but a straight chord leaves the line of zero
 curvature sideways, into surface that bends sharply. That is a
-third-order effect and only the error itself sees it. So every triangle
+third-order effect, absent from the metric. So every triangle
 is tried against the surface at its middle and the middles of its edges,
 and one that fails gets a seed where it fails worst.
 
@@ -1179,15 +1174,20 @@ also remain out of tolerance because the refinement did not converge.
 To pass the check at the coarse setting nucleated seeds needed 5354
 vertices, random ones 6174 and lattice nodes 6550; moving averages
 brought the random start to 5626 and did nothing for the other two. The
-lattice nodes are the most even start: they end with no triangle far
+lattice nodes give the most uniform result: no triangle is far
 out of tolerance at either setting, and at the fine one they give a
 worst normal error of $5.4^\circ$ from 12\,464 vertices, which the tree
 does not reach with 29\,498. Their distance is the weaker side, and the
-traced picture is still slightly closer to the tree's. All of these
+traced picture is still slightly closer to the tree's. Restricting each
+cell to the lattice cells round its node, and an inserted seed to the
+lattice cell it lies in, changes the count by 3\% and the errors not at
+all: the metric cells of node seeds already coincide with the lattice
+cells. The restriction makes each lattice cell independent of the
+others, so it can be meshed alone. All of these
 cost about a second and a million evaluations to build, against 30\,ms
-and 50\,000. The gain is real and far smaller than the limit promised,
-because a teapot is mostly creases, poles and lines of zero curvature.
-The engine keeps the tree.
+and 50\,000. The gain is well below the asymptotic limit. Creases,
+poles and lines of zero curvature, where the limit's assumptions fail,
+cover much of the teapot. The engine uses the tree.
 
 \subsection{Rasterizer}
 
@@ -1230,9 +1230,10 @@ exact shadow edges described below. The drawn floor and the
 emitter are separate things that agree. The result follows the camera
 at the cost of a few arithmetic operations per pixel: 11\,ms for a
 $960\times600$ chrome frame against 141\,ms traced (34 against 483 on
-one thread). What
-it lacks is the teapot reflected in itself: the knob on the lid, the
-handle in the body. Those need a ray.
+one thread). The
+emitters do not include the teapot itself, so the knob is not
+reflected in the lid nor the handle in the body. Those reflections
+require tracing.
 
 \subsection{The mesh as a seed}
 
@@ -1317,9 +1318,8 @@ resistance in one solve per frame. One model unit is taken as 7\,cm. The
 engine returns a pose; the pose is applied to the rest nodes and the
 surface is recompiled through them, which takes 0.17\,ms. Dropped from 42\,cm at a tilt of 1.2\,rad, the teapot lands on its
 spout, rocks back over its base and is asleep within 1.5\,s
-(Fig.~\ref{fig:drop}). The body is treated as solid porcelain, which is
-not how a teapot is made; a shell would need the interior that this model
-lacks.
+(Fig.~\ref{fig:drop}). The body is treated as solid porcelain. A real teapot is a shell;
+simulating one would use the interior, which these versions lack.
 
 Taking hold of the teapot is a pin at the point that was picked: a
 critically damped spring of 8\,Hz between that point of the body and the
@@ -1355,19 +1355,19 @@ the diffuse light of one pose, and the emitters that answer its mirror
 directions do not include the teapot itself. The vertex-count limits quoted are asymptotic and assume
 elliptic points; their constants are derived here for a paraboloid. The
 node-count comparison covers surfaces that suit a
-lattice; it says nothing about shapes of arbitrary topology, where
-subdivision surfaces are at home.
+lattice; it does not cover shapes of arbitrary topology, which
+subdivision surfaces handle.
 
 \section{Conclusion}
 
-Put on a CONV lattice with seams, the Utah Teapot is the same surface it
-was in 1976, held by 560 points that lie on it. The lattice can be made
+A CONV lattice with seams reproduces the 1976 Utah Teapot exactly from
+560 points that lie on it. The lattice can be made
 round by moving nodes onto circles, traced without a mesh, textured in
 its own parameters, and dropped on a floor by handing its nodes to a
 physics engine. Later versions enter as samples, with no knowledge of how
 they were constructed: the 2026 teapot, interior included, is 66 small
 lattices. Across their seams those lattices do not carry curvature
-continuity. Whole sheets do far better: the body with its interior is one
+continuity. Whole sheets reduce the curvature jump from 0.16 to 0.003: the body with its interior is one
 lattice, the lid another, with rows placed by a projective warp, and the
 handle and spout meet the body in joins that are blends of the two
 surfaces. With rows placed by CONV's own error the whole teapot is 3104
@@ -1375,10 +1375,9 @@ nodes, and on targets native to no method a CONV lattice needs as few
 nodes as the globally solved $C^2$ spline while reading only the nodes
 around a cell. When speed matters more than exactness the lattice bakes
 to a mesh whose vertices its own error places, lit by a texture the ray
-tracer paints, at a tenth of the cost of tracing. What remains unfinished
-is stated above: a residue of curvature
-jump where rows are coarse, a rough interior join, and joins that are
-ours and not the chamfers Yuksel designed.
+tracer paints, at a tenth of the cost of tracing. Unfinished: a residue
+of curvature jump where rows are coarse, a rough interior join, and
+joins that differ from the chamfers Yuksel designed.
 
 \section*{Attribution}
 

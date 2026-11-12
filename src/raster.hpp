@@ -196,10 +196,18 @@ inline SurfacePoint mesh_point(const Surface& surface, double u, double v) {
     SurfacePoint point = surface.eval(u, v);
     Vec3 normal = cross(point.du, point.dv);
     if (length(normal) < 1e-9) {
-        // A pole: take the normal a little way along v.
-        const double cv = double(surface.cells_v());
-        const SurfacePoint near = surface.eval(u, v < 0.5 * cv ? v + 0.05 : v - 0.05);
-        normal = cross(near.du, near.dv);
+        // A pole: every u is the same point there, so there is one normal,
+        // the mean of the normals a little way along v all the way round.
+        // Taking it at this u alone gives the coincident vertices of a pole
+        // normals that differ slightly, which shows when a sharp edge of
+        // light crosses the pole.
+        const double cv = double(surface.cells_v()), cu = double(surface.cells_u());
+        const double inward = v < 0.5 * cv ? v + 0.05 : v - 0.05;
+        normal = {};
+        for (int k = 0; k < 8; ++k) {
+            const SurfacePoint near = surface.eval(cu * k / 8.0, inward);
+            normal = normal + normalize(cross(near.du, near.dv));
+        }
     }
     point.du = normalize(normal); // du carries the unit normal from here on
     return point;
