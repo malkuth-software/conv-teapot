@@ -75,3 +75,9 @@ conv independent 640x400 nodes=5346 lattice=19074 candidates=0 solves=160254 eva
 == same, edge samples off
   median of 9: total 38.55 ms (lattice+shadow 14.96, predict/bvh 9.24, solve+shade 14.10); solves/hit 1.196 evaluations/hit 1.648
   median of 9: total 55.76 ms (lattice+shadow 14.71, predict/bvh 3.78, solve+shade 36.98); solves/hit 2.328 evaluations/hit 2.623
+== 2026 unified sheets (5392 nodes, 8 lattices), 640x400, all threads, k=2, median of 9
+  median of 9: total 50.58 ms (lattice+shadow 9.57, predict/bvh 9.77, solve+shade 31.45); solves/hit 2.468 evaluations/hit 4.986
+  median of 9: total 61.71 ms (lattice+shadow 9.77, predict/bvh 4.16, solve+shade 47.53); solves/hit 3.324 evaluations/hit 4.124
+== same, edge samples off
+  median of 9: total 31.39 ms (lattice+shadow 9.51, predict/bvh 9.79, solve+shade 11.85); solves/hit 1.275 evaluations/hit 1.784
+  median of 9: total 41.45 ms (lattice+shadow 9.54, predict/bvh 4.15, solve+shade 27.79); solves/hit 2.401 evaluations/hit 2.636

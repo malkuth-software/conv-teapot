@@ -97,11 +97,21 @@ public:
             scene.parts.push_back(render_part);
             scene_parts_.push_back(index);
         }
+        for (const TeapotJoin& join : teapot_.joins) {
+            long body = -1, tube = -1;
+            for (std::size_t k = 0; k < scene_parts_.size(); ++k) {
+                if (scene_parts_[k] == join.body_part) { body = long(k); }
+                if (scene_parts_[k] == join.tube_part) { tube = long(k); }
+            }
+            if (body < 0 || tube < 0) { continue; }
+            scene.parts[std::size_t(body)].trims.push_back(&join.body_trim);
+            scene.parts[std::size_t(tube)].trims.push_back(&join.tube_trim);
+        }
         for (const auto& texture : textures_) { scene.textures.push_back(texture.get()); }
         // Sampled versions carry twice the nodes per patch: halve the lattice
         // samples per node interval so the transported lattice stays the same.
         RenderOptions options = render;
-        if (version == Version::v2026 && per >= 8) { options.subdivision = std::max(1, render.subdivision / 2); }
+        if ((version == Version::v2026 && per >= 8) || version == Version::v2026_unified) { options.subdivision = std::max(1, render.subdivision / 2); }
         renderer.render(scene, camera(), options, frame);
         return frame.rgba.data();
     }

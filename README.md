@@ -34,6 +34,13 @@ geometry:
   reconstruction does not keep its curvature continuity across patch joints
   (normals agree to 0.11° on average).
 
+- 2026 as unified sheets (`src/unified.hpp`, `src/blend.hpp`): the body with
+  its interior is one lattice, the lid another, the handle and spout are
+  tubes, with rows placed by a piecewise projective warp. The handle and
+  spout meet the body in blended joins, which are this project's own and not
+  the 2026 chamfers. Along the profile the mean relative curvature jump is
+  0.007, against 0.16 for the per-patch version.
+
 Handle, spout, lid, body and interior can be switched off, as on that page.
 
 **Styles** for the 1975–1987 data: exact (the 1976 teapot to rounding), round
@@ -71,6 +78,7 @@ out/capture out=lines.png version=2026 per=8 material=2        # reflection line
 out/capture verify=1                                   # check a frame against the surface and a fine reference
 out/study        # deviation from the Bézier teapot; surface continuity
 out/qualities    # roundness, joint continuity, creases
+out/unified_study  # the unified sheets and their joins
 out/line_check   # the line kernel against the stx_conv reference model
 ```
 
@@ -90,7 +98,7 @@ silhouette. Timings were taken on one shared machine.
 The Utah Teapot was created by Martin Newell at the University of Utah and
 scaled by Jim Blinn; the 1987 bottom is Frank Crow's and the 2026 version is
 Cem Yuksel's. `data/teapot_bezier.txt` is the original Bézier data from the
-Utah Model Repository. `data/utah_teapot_samples.json` holds points sampled
+Utah Model Repository. `data/utah_teapot_samples.json` and `data/utah_teapot_dense.json` hold points sampled
 with the mesh generator of the official page
 (https://graphics.cs.utah.edu/teapot/): the 2026 surfaces and the 1987
 bottom, at eight intervals per patch, symmetric copies stored once. The

@@ -60,7 +60,8 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
         <legend>Version</legend>
         <label class="row">Teapot
           <select data-key="20" id="version">
-            <option value="3">2026 – Cem Yuksel</option>
+            <option value="4">2026 – unified sheets</option>
+            <option value="3">2026 – Cem Yuksel, per patch</option>
             <option value="2">1987 – Frank Crow</option>
             <option value="1" selected>1976 – Jim Blinn</option>
             <option value="0">1975 – Martin Newell</option>
@@ -180,6 +181,7 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
     control.addEventListener(control.type === 'range' ? 'input' : 'change', send);
   }
   const notes = {
+    4: '2026 as four sheets: the body with its interior, the lid with its underside, the handle, and the spout with its channel, each one lattice; the handle and spout are blended into the body.',
     3: '2026: 66 patches of the official model as 9 × 9 on-surface samples each, including its interior. Trimming and chamfers are not included, so the handle and spout still pass through the wall.',
     2: '1987: the 1976 teapot raised by 0.15, with Crow\u2019s round bottom taken as surface samples.',
     1: '1976: the 28 original patches, reproduced exactly by a seamed lattice.',

@@ -13,6 +13,7 @@
 // two-pass depth order. An independent per-ray renderer (a BVH over the same
 // lattice cells) is kept as the comparison.
 #pragma once
+#include "blend.hpp"
 #include "surface.hpp"
 #include <algorithm>
 #include <atomic>
@@ -36,6 +37,7 @@ struct RenderPart {
     double orientation = 1.0;
     std::size_t per_u = 1, per_v = 1; // node intervals per source patch (for patch outlines)
     bool two_sided = false;           // no outward side is known: never shade as an inside
+    std::vector<const Trim*> trims;   // regions of this surface that are not shown
 };
 
 enum class Method : unsigned char { transport, independent };
@@ -785,7 +787,7 @@ private:
                     ++solves;
                     const bool ok = detail::solve_ray(*scene.parts[quad.part].surface, view, dir, tolerance, one_step, 3.0 * lattice.step + 0.5, attempt);
                     evaluations += std::size_t(attempt.evaluations);
-                    if (ok && attempt.t < best_t) {
+                    if (ok && attempt.t < best_t && !hidden(scene.parts[quad.part], attempt.u, attempt.v)) {
                         best_t = attempt.t;
                         best = attempt;
                         best_part = quad.part;
@@ -889,13 +891,13 @@ private:
             const Texture& texture = *scene.textures[std::size_t(options.texture - 1)];
             double tx, ty;
             if (options.mapping == TextureMap::patch) {
-                tx = -solve.u / double(part.per_u);
-                ty = solve.v / double(part.per_v);
+                tx = -solve.u / double(std::max<std::size_t>(1, part.per_u));
+                ty = solve.v / double(std::max<std::size_t>(1, part.per_v));
                 ty = ty - std::floor(ty);
             } else {
                 // Around the part (three times for the round parts), reading
                 // left to right from outside; along it from top to bottom.
-                tx = 0.70 - solve.u / double(surface.cells_u()) * (surface.cells_u() >= 3 * part.per_u ? 3.0 : 1.0);
+                tx = 0.70 - solve.u / double(surface.cells_u()) * (surface.cells_u() >= 16 ? 3.0 : 1.0);
                 ty = solve.v / double(surface.cells_v());
             }
             base = texture.sample(tx, ty, options.filter);
@@ -951,13 +953,20 @@ private:
                 return 1.0 - detail::smoothstep(half_width - 0.5, half_width + 0.5, distance);
             };
             const double node = std::fmax(line(solve.u, 1.0, solve.grad_u, 0.55), line(solve.v, 1.0, solve.grad_v, 0.55));
-            const double patch = std::fmax(line(solve.u, double(part.per_u), solve.grad_u, 1.1), line(solve.v, double(part.per_v), solve.grad_v, 1.1));
+            const double patch = part.per_u == 0 ? 0.0 : std::fmax(line(solve.u, double(part.per_u), solve.grad_u, 1.1), line(solve.v, double(part.per_v), solve.grad_v, 1.1));
             const Vec3 node_ink = inside ? Vec3{0.45, 0.50, 0.58} : Vec3{0.16, 0.30, 0.52};
             const Vec3 patch_ink{0.08, 0.09, 0.12};
             colour = colour * (1.0 - 0.75 * node) + node_ink * (0.75 * node);
             colour = colour * (1.0 - patch) + patch_ink * patch;
         }
         return colour;
+    }
+
+    static bool hidden(const RenderPart& part, double u, double v) {
+        for (const Trim* trim : part.trims) {
+            if (trim->hides(u, v)) { return true; }
+        }
+        return false;
     }
 
     // Nearest hit among a pixel's transported predictions.
@@ -973,6 +982,7 @@ private:
             ++work.solves;
             const bool ok = detail::solve_ray(*scene.parts[list[k].part].surface, view, dir, options.tolerance_px, options.one_step_px, reach, attempt);
             work.evaluations += std::size_t(attempt.evaluations);
+            if (ok && hidden(scene.parts[list[k].part], attempt.u, attempt.v)) { continue; }
             if (ok && (!found || attempt.t < best.t)) {
                 best = attempt;
                 best_part = list[k].part;

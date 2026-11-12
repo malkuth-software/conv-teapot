@@ -33,7 +33,10 @@ int main(int argc, char** argv) {
     teapot_options.bottom_cap = number("cap", 1) != 0;
     teapot_options.circular = number("round", 0) != 0;
     const std::string version = get("version", "1976");
-    teapot_options.version = version == "1975" ? Version::v1975 : version == "1987" ? Version::v1987 : version == "2026" ? Version::v2026 : Version::v1976;
+    teapot_options.version = version == "1975" ? Version::v1975 : version == "1987" ? Version::v1987 : version == "2026" ? Version::v2026 : version == "2026u" ? Version::v2026_unified : Version::v1976;
+    teapot_options.sheet_rows = std::size_t(number("rows", 96));
+    teapot_options.sheet_around = std::size_t(number("around", 24));
+    teapot_options.joins = number("joins", 1) != 0;
     teapot_options.blinn_scale = number("blinn", version == "1975" ? 0 : 1) != 0;
     const std::string hide = get("hide", "");
     teapot_options.smooth = number("smooth", 0) != 0;
@@ -56,7 +59,9 @@ int main(int argc, char** argv) {
     const auto textures = make_textures();
     Scene scene;
     const std::string geometry = get("geometry", "conv");
-    for (const auto& part : teapot.parts) {
+    std::vector<long> scene_index(teapot.parts.size(), -1);
+    for (std::size_t part_index = 0; part_index < teapot.parts.size(); ++part_index) {
+        const auto& part = teapot.parts[part_index];
         if (hide.find(part->group) != std::string::npos || (part->interior && hide.find("interior") != std::string::npos)) { continue; }
         RenderPart render_part;
         render_part.surface = geometry == "bezier" && !part->sampled ? static_cast<const Surface*>(&part->bezier)
@@ -66,7 +71,13 @@ int main(int argc, char** argv) {
         render_part.per_u = part->per_u;
         render_part.per_v = part->per_v;
         render_part.two_sided = part->sampled;
+        scene_index[part_index] = long(scene.parts.size());
         scene.parts.push_back(render_part);
+    }
+    for (const TeapotJoin& join : teapot.joins) {
+        if (scene_index[join.body_part] < 0 || scene_index[join.tube_part] < 0) { continue; }
+        scene.parts[std::size_t(scene_index[join.body_part])].trims.push_back(&join.body_trim);
+        scene.parts[std::size_t(scene_index[join.tube_part])].trims.push_back(&join.tube_trim);
     }
     for (const auto& texture : textures) { scene.textures.push_back(texture.get()); }
 

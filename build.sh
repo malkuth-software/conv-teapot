@@ -12,5 +12,6 @@ fi
 $CXX $FLAGS tools/capture.cpp out/zc_phys.a -o out/capture
 $CXX $FLAGS tools/study.cpp -o out/study
 $CXX $FLAGS tools/qualities.cpp -o out/qualities
+$CXX $FLAGS tools/unified_study.cpp -o out/unified_study
 $CXX $FLAGS tests/line_check.cpp -o out/line_check
 echo built

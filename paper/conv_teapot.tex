@@ -39,10 +39,15 @@ knots, only points on a surface, so later versions enter the same way: the
 2026 Utah Teapot is rebuilt from 9 by 9 samples of each of its surfaces,
 interior included. We then measure against the defects that the later
 teapots were made to fix. A node lattice makes the body 233 times rounder
-with the same node count, renders without a mesh, and carries the 2026
-shape with normals matched to $0.11^\circ$ on average across joints. It
-does not reproduce that model's curvature continuity, its trimming or its
-chamfers. We report those as they are.
+with the same node count and renders without a mesh. Taken patch by
+patch, the 2026 shape keeps its normals to $0.11^\circ$ across joints
+but not its curvature continuity. Taken as whole sheets it does better:
+the body with its interior is \emph{one} lattice, the lid another, with
+rows placed by a piecewise projective warp, and the mean relative
+curvature jump along the profile falls from 0.16 to 0.007. The handle and
+spout are joined to the body by blends that interpolate between the two
+surfaces. These joins are ours, not the 2026 model's chamfers, and we
+report where they are rough.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -117,10 +122,14 @@ than the samples do. Overshoot next to a crease or a step is excluded by
 construction, not by tuning.
 \item \emph{Dependence on the data.} Continuous and piecewise affine in the
 nodes (Theorem~\ref{thm:symmetric}).
-\item \emph{What it lacks.} Samples are taken as uniformly spaced in the
-parameter. Coordinates are limited separately, so where the limiter acts
-the surface is not rotation invariant. It is not a subdivision or a
-convex-hull scheme.
+\item \emph{Spacing.} Nodes need not be evenly spaced on the surface. A
+sheet is a flat lattice warped onto the shape, and its rows may be placed
+by a projective warp (Section~\ref{sec:unified}); the interpolation is in
+the lattice index.
+\item \emph{What it lacks.} Coordinates are limited separately, so where
+the limiter acts the surface is not rotation invariant. One lattice has
+the topology of a disc, a tube or a sphere; a handle needs a join. It is
+not a subdivision or a convex-hull scheme.
 \end{itemize}
 
 \section{CONV Lines}
@@ -430,6 +439,163 @@ proportions.}
 \label{fig:versions}
 \end{figure*}
 
+\section{One Sheet per Part, and Joins}
+\label{sec:unified}
+
+The patch decomposition of the previous subsection is inherited from the
+source, and its seams are where curvature continuity is lost
+(Section~\ref{sec:qualities}). Neither is needed. A lattice closed around
+and open along, with a pole at each end, is a sphere, and that is a bowl
+with its inside: the body's profile runs from the outer bottom centre up
+the outside, over the rim, down the inside, to the inner bottom centre.
+Revolved on true circles it is one sheet. The lid, from the apex of its
+knob around its edge and back along its underside, is another. The handle
+is a tube; the spout is a tube that runs out along the outside, around
+the lip and back down its channel. Four sheets replace 66 patches.
+
+\subsection{Projective row placement}
+
+The rim and the foot turn within a few hundredths of a unit; the wall
+barely turns at all. CONV interpolates in the row index, so what matters
+is that the profile be a smooth function of that index, not that rows be
+evenly spaced. We place rows by a piecewise projective warp. Stations
+$s_0<\cdots<s_m$ are laid along the profile's arc length, and each is given
+a wanted spacing $h_k$, proportional to the local radius of curvature
+within limits and bounded in its rate of change. Between stations
+$\sqrt h$ is linear. Writing $p=\sqrt h$, a span of length $d$ then holds
+\begin{equation}
+ n=\int\frac{ds}{h}=\frac{d}{p_0\,p_1}
+ \label{eq:rowsinspan}
+\end{equation}
+rows, and the arc length that holds $c$ rows from the span's start is
+\begin{equation}
+ x(c)=\frac{c\,p_0^2}{1-c\,p_0\,(p_1-p_0)/d},
+ \label{eq:moebius}
+\end{equation}
+a M\"obius function of $c$. A projective map of a uniform grid is exactly
+a spacing whose square root is linear, so each span is one projective
+warp and adjacent spans agree in spacing where they meet. One global
+scale is found by bisection on the row count. A row is placed on each
+true crease, which is detected from the one-sided tangents of the source
+curve and receives a seam. The 2026 body has one such crease, of
+$115^\circ$ at the rim, and the lid one of $90^\circ$ at its edge;
+everything else is seamless.
+
+The source for this is denser than before: 49 points per patch edge along
+the two meridians, and $17\times17$ points per patch of the tubes. The
+earlier $9\times9$ reconstruction had tangent kinks of up to $1.5^\circ$
+at its own joints, which a sheet fitted to it would inherit.
+
+\subsection{Measurements}
+
+Table~\ref{tab:unified} gives, for the body and lid sheets, the distance
+of the sheet's meridian from the source profile and the continuity along
+it at every row that is not a crease, by one-sided finite differences.
+
+\begin{table}[H]
+\caption{Unified sheets of the 2026 teapot}
+\label{tab:unified}
+\centering
+\scriptsize
+\setlength{\tabcolsep}{2.6pt}
+\begin{tabular}{l|c|cc|cc}
+\hline
+ & & \multicolumn{2}{c|}{Distance} & Tangent & Curv. jump\\
+Sheet & Lattice & max & rms & turn max & mean rel.\\
+\hline
+Body & $24\times97$ & $2.6\times10^{-3}$ & $2.8\times10^{-4}$ & $0.23^\circ$ & 0.007\\
+Lid & $24\times49$ & $1.1\times10^{-2}$ & $1.3\times10^{-3}$ & $0.009^\circ$ & 0.002\\
+\hline
+\end{tabular}
+\end{table}
+
+Against the per-patch lattices of Table~\ref{tab:joints}, the mean relative
+curvature jump falls from 0.16 to 0.007 on the body and 0.002 on the lid,
+with fewer nodes for those two parts (3504 against 4536). It is not zero.
+The residue sits where rows are still coarse for the feature, chiefly at
+the foot of the body, and it shrinks as rows are added: with 64 rows in
+place of 96 the body's worst tangent turn is $0.58^\circ$. The row count
+is a real parameter, and too few rows near a crease fail badly: a lid
+sheet of 32 rows has a turn of $17^\circ$ at one row.
+
+\subsection{Joins as interpolants}
+
+Where a tube passes through the body the two surfaces meet along a
+closed curve $\Gamma$. The join is a third surface that interpolates
+between them. For a point $\Gamma_k$ of the curve and $\tau\in[0,1]$
+across a band of width $w$,
+\begin{equation}
+ C(k,\tau)=\bigl(1-\beta(\tau)\bigr)A_k\bigl(w(1-\tau)\bigr)
+ +\beta(\tau)\,B_k(w\tau),
+ \label{eq:join}
+\end{equation}
+where $A_k(d)$ is the point of the body at distance $d$ from $\Gamma_k$,
+away from the tube, $B_k(d)$ the point of the tube at distance $d$ from
+$\Gamma_k$, away from the body, and
+$\beta(\tau)=\tau^3(10-15\tau+6\tau^2)$. At $\tau=0$ the join is the
+body and at $\tau=1$ it is the tube; since $\beta'$ and $\beta''$ vanish
+at both ends, the curve $\tau\mapsto C(k,\tau)$ leaves the body and
+arrives on the tube with their tangent and curvature. On $\Gamma$ the two
+surfaces are in unison, so the convex combination is taken between points
+that approach each other. The buried part of the tube and the covered
+part of the body are trimmed in their parameter domains, by a cut around
+the tube and a polygon on the body, and the join itself is sampled as a
+small lattice, 16 by 9 nodes, like any other part. The intersection curve
+is found by bisection along each column of the tube against the body's
+radius at that height, which the body's being a surface of revolution
+makes a one-dimensional search.
+
+Four joins result: the two ends of the handle, the base of the spout,
+and the spout's channel where it opens into the interior. Where a tube's
+end only touches the body, as at the lower end of the handle, the join
+starts at the end of the tube. Table~\ref{tab:joinedges} measures the
+band's edge on the body against the body itself. Each join turns the
+normal through about $90^\circ$ across its band, which is the crease it
+replaces.
+
+\begin{table}[H]
+\caption{Joins: the band's edge against the body}
+\label{tab:joinedges}
+\centering
+\scriptsize
+\begin{tabular}{l|cc}
+\hline
+Join & Gap max & Normal mismatch max\\
+\hline
+Handle, upper & $3.7\times10^{-4}$ & $1.6^\circ$\\
+Handle, lower & $1.4\times10^{-4}$ & $4.2^\circ$\\
+Spout base & $4.6\times10^{-4}$ & $1.3^\circ$\\
+Spout channel, interior & $4.2\times10^{-4}$ & $17.1^\circ$\\
+\hline
+\end{tabular}
+\end{table}
+
+The exterior joins agree with the body to a few degrees; the mismatch
+comes from sampling \eqref{eq:join} at only sixteen columns around. The
+interior join is rough and we would not present it as finished.
+Fig.~\ref{fig:unified} shows reflection lines running from the body
+through the join onto the spout without a break.
+
+These joins are not the chamfers of the 2026 model. Their widths (0.11,
+0.14 and 0.07) were chosen by eye, and their shape near the handle and
+spout differs from the official one. What they show is that a join needs
+no new kind of surface: it is the same blend between two continuous
+surfaces that CONV already uses between its two factor orders.
+
+The unified teapot has 5392 nodes in eight lattices, against 5346 in 66.
+A $640\times400$ frame of it takes 31.4\,ms by transport and 41.5\,ms
+per ray without edge samples.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.86\textwidth]{figures/fig_unified.png}
+\caption{The 2026 teapot as four sheets with blended joins. Top: the body
+sheet with the lid removed, its rows gathering at the rim and the foot and
+continuing down the interior; reflection lines crossing the join at the
+base of the spout. Bottom: the handle without joins and with them.}
+\label{fig:unified}
+\end{figure*}
+
 \section{Against the Later Teapots}
 \label{sec:qualities}
 
@@ -449,8 +615,8 @@ Defect of the 1976 patches & Fixed in & CONV lattice\\
 Body not round & 1992 & Improved: 233 times rounder at the same node count\\
 Kinked knob tip & mesh options & Improved: the kink is removed\\
 No bottom & 1987 & Flat cap with an exact crease; Crow's round bottom from samples\\
-Curvature jumps at patch joints & 2026 & Shape carried from samples; continuity itself not reproduced, see below\\
-Handle and spout pierce the body & 1992, 2026 & Not addressed\\
+Curvature jumps at patch joints & 2026 & Per patch: not reproduced. Unified sheets: mean relative jump 0.007\\
+Handle and spout pierce the body & 1992, 2026 & Blended joins of our own (Section~\ref{sec:unified}), not the 2026 chamfers\\
 No interior & 1992--2026 & The 2026 interior, from samples\\
 Gap around the lid & 1992 & Not addressed\\
 Mesh cracks, duplicate vertices, pole triangles & mesh options & Not applicable: no mesh is made\\
@@ -527,8 +693,8 @@ about its curvature at their common edge. Our 2026 teapot therefore has
 the shape of Yuksel's, to the accuracy below, and approximately its
 normals, but it is not itself curvature continuous. Lattices that run
 across the smooth joints without a seam would be, where the limiter is
-inactive; they need samples whose spacing is compatible across the joint,
-which the generator's meshes do not promise. We leave that open.
+inactive. Section~\ref{sec:unified} builds them, with rows placed by a
+projective warp, and the mean relative jump falls to 0.007.
 
 \begin{table}[H]
 \caption{Across the joints of exterior lattices, 9 by 9 nodes each}
@@ -582,12 +748,12 @@ the ones we recommend.
 
 \subsection{What is not addressed}
 
-The handle and spout still pass through the body in every version here; a
-lattice has no notion of trimming, and the trimmed and chamfered surfaces
-of the 1992 to 2026 models are not grids of samples. From outside the
-difference is confined to the joins, where the 2026 chamfers make the
-normal continuous and ours do not. In the 1975 to 1987 versions the lid
-still floats 0.1 above the rim.
+In the per-patch versions the handle and spout pass through the body. The
+trimmed and chamfered surfaces of the 1992 to 2026 models are not grids
+of samples, and we do not reproduce them; the unified version replaces
+them with joins of its own (Section~\ref{sec:unified}). The 1992 and 2006
+versions are not included. In the 1975 to 1987 versions the lid still
+floats 0.1 above the rim.
 
 \subsection{No mesh}
 
@@ -789,12 +955,13 @@ round by moving nodes onto circles, traced without a mesh, textured in
 its own parameters, and dropped on a floor by handing its nodes to a
 physics engine. Later versions enter as samples, with no knowledge of how
 they were constructed: the 2026 teapot, interior included, is 66 small
-lattices. What the lattices do not carry across their seams is curvature
-continuity, and they do not carry trimming or chamfers at all. Those are
-the places where the later teapots, and Yuksel's in particular, did work
-that this representation does not replace. A seamless lattice over
-compatibly spaced samples of a $G^2$ surface is the experiment we would
-do next.
+lattices. Across their seams those lattices do not carry curvature
+continuity. Whole sheets do far better: the body with its interior is one
+lattice, the lid another, with rows placed by a projective warp, and the
+handle and spout meet the body in joins that are blends of the two
+surfaces. What remains unfinished is stated above: a residue of curvature
+jump where rows are coarse, a rough interior join, and joins that are
+ours and not the chamfers Yuksel designed.
 
 \section*{Attribution}
 

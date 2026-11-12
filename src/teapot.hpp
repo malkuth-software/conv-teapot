@@ -12,6 +12,8 @@
 // `per_u` by `per_v` intervals of nodes.
 #pragma once
 #include "surface.hpp"
+#include "blend.hpp"
+#include "unified.hpp"
 #include <array>
 #include <memory>
 #include <string>
@@ -36,10 +38,13 @@ inline const std::array<std::array<Vec3, 16>, 28>& teapot_patches() {
 // The versions of the Utah Teapot offered here. 1975 to 1987 are built from
 // the original Bezier data; 2026 is built from points sampled on the surface
 // of the official 2026 model (without its trimming and chamfers).
-enum class Version : int { v1975 = 0, v1976 = 1, v1987 = 2, v2026 = 3 };
+// v2026_unified: the 2026 shape as whole sheets (body with its interior, lid
+// with its underside) instead of one lattice per source patch.
+enum class Version : int { v1975 = 0, v1976 = 1, v1987 = 2, v2026 = 3, v2026_unified = 4 };
 
 namespace utah {
 #include "utah_samples.inc"
+#include "utah_dense.inc"
 }
 
 struct TeapotOptions {
@@ -60,6 +65,10 @@ struct TeapotOptions {
     // row spacing between them. It trades fidelity at tight features for
     // continuity across the patch joints; see tools/qualities.cpp.
     bool smooth = false;
+    // Unified version: blend the handle and spout into the body.
+    bool joins = true;
+    // Unified sheets: rows along the profile and nodes around.
+    std::size_t sheet_rows = 96, sheet_around = 24;
 };
 
 struct TeapotPart {
@@ -117,8 +126,16 @@ struct TeapotPart {
     double arc_step_ = 1.0;
 };
 
+// A blended join: which parts it trims, and the group it belongs to.
+struct TeapotJoin {
+    std::string group;            // handle or spout
+    std::size_t body_part = 0, tube_part = 0;
+    Trim body_trim, tube_trim;
+};
+
 struct Teapot {
     std::vector<std::unique_ptr<TeapotPart>> parts;
+    std::vector<TeapotJoin> joins;
     std::size_t node_count() const {
         std::size_t total = 0;
         for (const auto& part : parts) { total += part->conv.lattice.nodes.size(); }
@@ -312,6 +329,104 @@ inline std::unique_ptr<TeapotPart> make_part(const char* name, std::size_t first
 inline Teapot make_teapot(const TeapotOptions& options) {
     Teapot teapot;
     const double y_scale = options.blinn_scale ? 1.0 : 4.0 / 3.0;
+    if (options.version == Version::v2026_unified) {
+        // Body and lid: one sheet each, from the meridian of the sampled patches.
+        for (const char* group : {"body", "lid"}) {
+            const bool is_body = std::string(group) == "body";
+            const int run_count = is_body ? utah::dense_body_runs : utah::dense_lid_runs;
+            std::vector<ProfileCurve::Run> runs;
+            for (int r = 0; r < run_count; ++r) {
+                ProfileCurve::Run run;
+                for (int k = 0; k < utah::dense_profile_points; ++k) {
+                    const float* p = is_body ? utah::dense_body_profile[r][k] : utah::dense_lid_profile[r][k];
+                    run.x.push_back(double(p[0]));
+                    run.y.push_back(double(p[1]) * y_scale);
+                }
+                runs.push_back(run);
+            }
+            const ProfileCurve profile = chain_runs(runs);
+            const std::size_t rows = std::string(group) == "body" ? options.sheet_rows : options.sheet_rows / 2;
+            const SheetPlan plan = plan_rows(profile, rows, profile.length / 3000.0, profile.length / 30.0);
+            auto part = std::make_unique<TeapotPart>();
+            part->name = group;
+            part->group = group;
+            part->sampled = true;
+            part->hull = std::string(group) == "body" ? 0 : 1;
+            revolve_sheet(profile, plan, options.sheet_around, part->conv.lattice);
+            part->per_u = part->per_v = 0; // no patch outlines inside a sheet
+            part->row_param.assign(plan.row_arc.begin(), plan.row_arc.end());
+            part->conv.bubble = options.bubble;
+            part->conv.compile();
+            part->linear.lattice = &part->conv.lattice;
+            teapot.parts.push_back(std::move(part));
+        }
+        // Handle and spout: one tube sheet each, the spout with its interior.
+        for (const char* group : {"handle", "spout"}) {
+            const bool is_handle = std::string(group) == "handle";
+            const int count = is_handle ? utah::dense_handle_patches : utah::dense_spout_patches;
+            std::vector<const float (*)[3]> patches;
+            for (int k = 0; k < count; ++k) { patches.push_back(is_handle ? utah::dense_handle_points[k] : utah::dense_spout_points[k]); }
+            auto part = std::make_unique<TeapotPart>();
+            part->name = group;
+            part->group = group;
+            part->sampled = true;
+            part->hull = is_handle ? 2 : 3;
+            tube_sheet(patches.data(), count, utah::dense_tube_points, is_handle ? options.sheet_rows / 3 : options.sheet_rows / 2,
+                       std::max<std::size_t>(8, options.sheet_around * 2 / 3), part->conv.lattice, part->row_param);
+            for (Vec3& node : part->conv.lattice.nodes) { node.y *= y_scale; }
+            part->per_u = part->per_v = 0;
+            part->conv.bubble = options.bubble;
+            part->conv.compile();
+            part->linear.lattice = &part->conv.lattice;
+            teapot.parts.push_back(std::move(part));
+        }
+        if (options.joins) {
+            const Surface& body = teapot.parts[0]->conv;
+            const Lattice& body_lattice = teapot.parts[0]->conv.lattice;
+            // The body's height rises along its rows to the top of the rim and falls after it.
+            std::size_t top = 0;
+            for (std::size_t v = 0; v < body_lattice.nv; ++v) {
+                if (body_lattice.at(0, v).y > body_lattice.at(0, top).y) { top = v; }
+            }
+            BodyBranch exterior{&body, 0.0, double(top), true};
+            BodyBranch interior{&body, double(top), double(body_lattice.nv - 1), false};
+            const std::size_t part_count = teapot.parts.size();
+            for (std::size_t index = 2; index < part_count; ++index) {
+                const std::string group = teapot.parts[index]->group;
+                const Surface& tube = teapot.parts[index]->conv;
+                // The wider end of the spout is its exterior base; the other end is the channel into the cavity.
+                const auto ring_size = [&](double w) { return length(tube.position(0.0, w) - tube.position(0.5 * double(tube.cells_u()), w)); };
+                const bool first_is_wider = ring_size(0.0) >= ring_size(double(tube.cells_v()));
+                for (int end = 0; end < 2; ++end) {
+                    const bool at_first = end == 0;
+                    const bool exterior_end = group == "handle" || (at_first == first_is_wider);
+                    const double width = (group == "handle" ? 0.11 : exterior_end ? 0.14 : 0.07) * y_scale;
+                    JoinResult made = make_join(body, exterior_end ? exterior : interior, exterior_end, tube, at_first, width, body_lattice.nu);
+                    if (!made.ok) { continue; }
+                    auto part = std::make_unique<TeapotPart>();
+                    part->name = group + "_join";
+                    part->group = group;
+                    part->sampled = true;
+                    part->hull = -1;
+                    part->conv.lattice = made.blend;
+                    part->per_u = part->per_v = 0;
+                    part->row_param.assign(part->conv.lattice.nv, 0.0);
+                    part->conv.bubble = options.bubble;
+                    part->conv.compile();
+                    part->linear.lattice = &part->conv.lattice;
+                    teapot.parts.push_back(std::move(part));
+                    TeapotJoin join;
+                    join.group = group;
+                    join.body_part = 0;
+                    join.tube_part = index;
+                    join.body_trim = made.body_trim;
+                    join.tube_trim = made.tube_trim;
+                    teapot.joins.push_back(join);
+                }
+            }
+        }
+        return teapot;
+    }
     if (options.version == Version::v2026) {
         // Collision hulls: one each for the body, the lid, the handle and the
         // spout. (A hull per half-tube patch is too thin for the hull builder.)

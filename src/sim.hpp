@@ -15,6 +15,7 @@
 #include "teapot.hpp"
 #include "../third_party/zc_phys/physics.hpp"
 #include <cmath>
+#include <cstdint>
 #include <exception>
 #include <memory>
 #include <vector>
@@ -74,6 +75,27 @@ public:
                     }
                 }
                 if (!seen) { distinct.push_back(p); }
+            }
+            // A hull needs only a few hundred points of a sheet; the hull
+            // builder's time grows steeply with the count.
+            const std::size_t limit = 320;
+            if (distinct.size() > limit) {
+                std::vector<zc::phys::Vec3> fewer;
+                for (std::size_t k = 0; k < limit; ++k) { fewer.push_back(distinct[k * distinct.size() / limit]); }
+                distinct.swap(fewer);
+            }
+            // Rings of a revolved sheet are exactly coplanar, which the hull
+            // builder does not handle; move each collision point by about a
+            // micron, deterministically. The rendered surface is untouched.
+            std::uint32_t state = 12345u;
+            for (zc::phys::Vec3& p : distinct) {
+                const auto next = [&] {
+                    state = state * 1664525u + 1013904223u;
+                    return (double(state >> 8) / 16777216.0 - 0.5) * 2e-6;
+                };
+                p.x += next();
+                p.y += next();
+                p.z += next();
             }
             hull.points = std::move(distinct);
         }
