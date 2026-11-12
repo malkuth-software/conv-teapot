@@ -49,56 +49,63 @@ public:
         for (const auto& part : teapot.parts) {
             const Lattice& lattice = part->conv.lattice;
             if (part->hull == -1) { continue; }
-            if (part->hull >= 0) {
-                // Sampled patches: the nodes of every part of a group form one hull.
-                if (groups.size() <= std::size_t(part->hull)) { groups.resize(std::size_t(part->hull) + 1); }
-                for (const Vec3& node : lattice.nodes) { groups[std::size_t(part->hull)].points.push_back(to_physics(node)); }
-                continue;
-            }
-            // The body is one hull; the other parts are cut along their length
-            // into short convex pieces.
             const bool round = part->name == "body" || part->name == "lid";
-            // A round part's hull is taken from points of its surface, 24 to a
-            // ring, each moved out from the axis so that the hull's flat sides
-            // touch the ring instead of cutting inside it. A hull through the
-            // nodes themselves lies inside the surface by the ring's sagitta
-            // (3% of the radius at 12 nodes), and a teapot resting on such a
-            // side has its wall that far below the floor.
-            const std::size_t around = round ? 24 : lattice.nu;
-            const double out = round ? 1.0 / std::cos(3.141592653589793 / double(around)) : 1.0;
-            const auto ring = [&](zc::phys::HullDesc& hull, std::size_t v) {
+            // A hull through the nodes of a ring lies inside the surface by the
+            // ring's sagitta (3% of the radius at 12 nodes), and a teapot resting
+            // on such a side has its wall that far below the floor. A hull is
+            // taken instead from points of the surface, at least 16 to a ring
+            // (20 on the round parts), each moved out from the ring's centre
+            // (the axis, for a round part) so that the hull's flat sides touch
+            // the ring instead of cutting inside it.
+            const bool closed = lattice.wrap_u && part->conv.on == nullptr;
+            const std::size_t around = round ? 20 : closed ? std::max<std::size_t>(16, lattice.nu) : lattice.nu;
+            const double out = closed ? 1.0 / std::cos(3.141592653589793 / double(around)) : 1.0;
+            const auto ring = [&](zc::phys::HullDesc& hull, double v) {
+                std::vector<Vec3> points;
+                Vec3 centre{};
                 for (std::size_t k = 0; k < around; ++k) {
-                    Vec3 p = round ? part->conv.position(double(lattice.nu) * double(k) / double(around), double(v)) : lattice.at(k, v);
-                    p.x *= out;
-                    p.z *= out;
+                    points.push_back(closed ? part->conv.position(double(lattice.nu) * double(k) / double(around), v) : lattice.at(k, std::size_t(v + 0.5)));
+                    centre = centre + points.back() * (1.0 / double(around));
+                }
+                if (round) { centre = Vec3{0.0, 0.0, 0.0}; }
+                for (Vec3 p : points) {
+                    if (round) {
+                        p.x *= out;
+                        p.z *= out;
+                    } else {
+                        p = centre + (p - centre) * out;
+                    }
                     hull.points.push_back(to_physics(p));
                 }
             };
-            if (part->name == "body") {
+            if (round) {
                 // One hull. Only rows on the convex outline of the profile can
-                // touch it; of those, the 13 that leave the least of the
+                // touch it; of those, the 16 that leave the least of the
                 // outline outside the polygon through them.
-                std::vector<double> r(lattice.nv), y(lattice.nv);
-                for (std::size_t v = 0; v < lattice.nv; ++v) {
-                    r[v] = std::hypot(lattice.at(0, v).x, lattice.at(0, v).z);
-                    y[v] = lattice.at(0, v).y;
+                // The profile is taken at the rows and at three places between each pair.
+                const std::size_t places = (lattice.nv - 1) * 4 + 1;
+                std::vector<double> r(places), y(places);
+                for (std::size_t v = 0; v < places; ++v) {
+                    const Vec3 p = part->conv.position(0.0, double(v) / 4.0);
+                    r[v] = std::hypot(p.x, p.z);
+                    y[v] = p.y;
                 }
                 std::vector<std::size_t> outline;
-                for (std::size_t v = 0; v < lattice.nv; ++v) {
-                    // On the outline: no other row, nor the axis, lies outside the tangent there.
-                    bool on = true;
-                    for (int k = 0; k < 64 && on; ++k) {
+                for (std::size_t v = 0; v < places; ++v) {
+                    // On the outline: for some outward direction no other row lies farther out.
+                    bool on = false;
+                    for (int k = 0; k < 64 && !on; ++k) {
                         const double angle = 3.141592653589793 * (k + 0.5) / 64.0 - 1.5707963267948966; // outward directions with r >= 0
                         const double c = std::cos(angle), d = std::sin(angle);
                         double most = -1e30;
-                        for (std::size_t w = 0; w < lattice.nv; ++w) { most = std::max(most, r[w] * c + y[w] * d); }
-                        on = r[v] * c + y[v] * d < most - 1e-9;
+                        for (std::size_t w = 0; w < places; ++w) { most = std::max(most, r[w] * c + y[w] * d); }
+                        on = r[v] * c + y[v] * d >= most - 1e-9;
                     }
-                    if (!on) { outline.push_back(v); }
+                    if (on) { outline.push_back(v); }
                 }
-                if (outline.size() < 2) { outline = {0, lattice.nv - 1}; }
+                if (outline.size() < 2) { outline = {0, places - 1}; }
                 std::vector<std::size_t> kept{outline.front(), outline.back()};
-                while (kept.size() < 13 && kept.size() < outline.size()) {
+                while (kept.size() < 16 && kept.size() < outline.size()) {
                     double worst = -1.0;
                     std::size_t add = outline.front();
                     for (std::size_t v : outline) {
@@ -118,15 +125,26 @@ public:
                     std::sort(kept.begin(), kept.end());
                 }
                 zc::phys::HullDesc hull;
-                for (std::size_t v : kept) { ring(hull, v); }
+                for (std::size_t v : kept) { ring(hull, double(v) / 4.0); }
                 desc.hulls.push_back(std::move(hull));
                 continue;
             }
+            if (part->hull >= 0) {
+                // The rings of every part of a group form one hull.
+                if (groups.size() <= std::size_t(part->hull)) { groups.resize(std::size_t(part->hull) + 1); }
+                for (std::size_t v = 0; v < lattice.nv; ++v) { ring(groups[std::size_t(part->hull)], double(v)); }
+                continue;
+            }
+            // The other parts are cut along their length into short convex pieces.
             const std::size_t stride = part->name == "lid" ? part->per_v : std::max<std::size_t>(1, part->per_v / 2);
             for (std::size_t first = 0; first + 1 < lattice.nv; first += stride) {
                 zc::phys::HullDesc hull;
                 const std::size_t last = std::min(lattice.nv - 1, first + stride);
-                for (std::size_t v = first; v <= last; ++v) { ring(hull, v); }
+                for (std::size_t v = first; v <= last; ++v) {
+                    ring(hull, double(v));
+                    // A bent tube strays from the chord between two rows: a ring between them as well.
+                    if (closed && v < last) { ring(hull, double(v) + 0.5); }
+                }
                 desc.hulls.push_back(std::move(hull));
             }
         }

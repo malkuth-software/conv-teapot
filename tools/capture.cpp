@@ -125,6 +125,7 @@ int main(int argc, char** argv) {
         render_part.per_v = part->per_v;
         render_part.two_sided = part->sampled;
         render_part.interior_from = part->interior ? 0.0 : part->interior_from;
+        render_part.solid = teapot_options.version == Version::v2026_unified; // the unified sheets close a solid: wall, interior and joins
         scene_index[part_index] = long(scene.parts.size());
         scene.parts.push_back(render_part);
     }
@@ -146,15 +147,20 @@ int main(int argc, char** argv) {
     scene.pose = pose;
     if (args.count("tip") != 0 || args.count("drop") != 0) {
         // How far the surface itself is from the floor where the body rests.
-        double low = 1e30;
         for (const auto& part : teapot.parts) {
+            double low = 1e30, at_v = 0.0;
             for (int j = 0; j <= 200; ++j) {
                 for (int i = 0; i < 96; ++i) {
-                    low = std::min(low, pose.point(part->conv.position(double(part->conv.cells_u()) * i / 96.0, double(part->conv.cells_v()) * j / 200.0)).y);
+                    const double v = double(part->conv.cells_v()) * j / 200.0;
+                    const double y = pose.point(part->conv.position(double(part->conv.cells_u()) * i / 96.0, v)).y;
+                    if (y < low) {
+                        low = y;
+                        at_v = v;
+                    }
                 }
             }
+            if (low < 0.05) { std::printf("lowest point of %s: y = %.4f at row %.1f of %zu\n", part->name.c_str(), low, at_v, part->conv.cells_v()); }
         }
-        std::printf("lowest point of the surface: y = %.4f\n", low);
     }
     scene.stamp = number("cache", 1) != 0 ? 1 : 0; // the scene does not change between repeats
     scene.open_top = hide.find("lid") != std::string::npos;
@@ -164,7 +170,7 @@ int main(int argc, char** argv) {
     options.supersample = int(number("ss", 2));
     options.mesh_lines = number("lines", 0) != 0;
     options.live_reflection = number("live", 1) != 0;
-    options.ambient = int(number("ambient", 0));
+    options.ambient = int(number("ambient", 3));
     options.plain_inside = number("plaininside", 0) != 0;
     options.exact_shadows = number("exact", 1) != 0;
     options.wire = Wire(int(number("wire", 0)));

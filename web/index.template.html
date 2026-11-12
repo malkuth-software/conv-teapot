@@ -138,8 +138,8 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
         <label class="check"><input type="checkbox" data-key="38"> match edge normals</label>
         <label class="row">Triangulation
           <select data-key="39"><option value="0">shorter diagonal</option><option value="1">one direction</option><option value="2">flipped</option><option value="3">symmetric</option></select></label>
-        <label class="row">Room light (experimental)
-          <select data-key="41"><option value="0">by the normal alone</option><option value="1">through what each point sees</option><option value="2">and one bounced value for the cavity</option><option value="3">and light gathered from the pot itself</option></select></label>
+        <label class="row">Room light
+          <select data-key="41"><option value="3" selected>through what each point sees, plus light gathered from the pot</option><option value="1">through what each point sees</option><option value="2">through what each point sees, plus one value for the cavity</option><option value="0">by the normal alone</option></select></label>
         <label class="check"><input type="checkbox" data-key="42"> no pattern inside (interior, lid underside, channel)</label>
         <label class="row">Download
           <select id="objUp"><option value="0">y-up</option><option value="1">z-up</option></select></label>

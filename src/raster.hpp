@@ -194,6 +194,10 @@ struct Mesh {
     std::vector<std::uint32_t> triangles;      // three vertex indices each
     std::vector<std::uint16_t> triangle_part;
     std::vector<std::uint8_t> triangle_trimmed; // crosses the edge of a trim: tested per sample
+    // Vertices of a band between two parts. Where a band and the part it
+    // lies on are both drawn, the band is: its vertices are projected a
+    // little nearer the eye.
+    std::vector<std::uint8_t> vertex_over;
     std::vector<MeshPart> parts;
     bool lit = false;            // the light maps hold a bake
     // The bake holds only what belongs to the body: its colour, and in alpha
@@ -369,6 +373,27 @@ struct MeshBuilder {
         uniform_rects(cuts_u, cuts_v);
     }
 
+    // Does the edge of a band (the boundary of a trim, where the band's own edge lies) pass through or by this piece?
+    bool near_seam(const Rect& r) const {
+        const double u0 = double(r.u0) / double(mesh_resolution), u1 = double(r.u1) / double(mesh_resolution);
+        const double v0 = double(r.v0) / double(mesh_resolution), v1 = double(r.v1) / double(mesh_resolution);
+        const double mu = 0.5 * (u1 - u0), mv = 0.5 * (v1 - v0);
+        for (const Trim* trim : trims) {
+            const std::vector<double>& cut = trim->cut_exact.empty() ? trim->cut : trim->cut_exact;
+            if (!cut.empty()) {
+                const auto [low, high] = std::minmax_element(cut.begin(), cut.end());
+                if (v0 - mv <= *high && v1 + mv >= *low) { return true; }
+                continue;
+            }
+            const auto& loop = trim->loop_exact.empty() ? trim->loop : trim->loop_exact;
+            const double shift = trim->period_u > 0.0 ? trim->period_u * std::round((0.5 * (u0 + u1) - trim->centre_u) / trim->period_u) : 0.0;
+            for (const auto& q : loop) {
+                if (q[0] + shift >= u0 - mu && q[0] + shift <= u1 + mu && q[1] >= v0 - mv && q[1] <= v1 + mv) { return true; }
+            }
+        }
+        return false;
+    }
+
     void split(Rect r) {
         const long mu = (r.u0 + r.u1) / 2, mv = (r.v0 + r.v1) / 2;
         const bool can_u = (r.u1 - r.u0) % 2 == 0 && r.u1 - r.u0 >= 30, can_v = (r.v1 - r.v0) % 2 == 0 && r.v1 - r.v0 >= 30;
@@ -381,14 +406,18 @@ struct MeshBuilder {
             err_v = std::max(length(point(r.u0, mv).p - (p00 + p01) * 0.5), length(point(r.u1, mv).p - (p10 + p11) * 0.5));
         }
         if (can_u && can_v) { err_c = length(point(mu, mv).p - (p00 + p10 + p01 + p11) * 0.25); }
-        bool cut_u = err_u > options.tolerance, cut_v = err_v > options.tolerance;
+        // Where a band's edge runs across this part the two meshes are seen side
+        // by side on what is one surface: the part is meshed finer there.
+        const bool seam = near_seam(r);
+        const double tolerance = seam ? options.tolerance / 8.0 : options.tolerance;
+        bool cut_u = err_u > tolerance, cut_v = err_v > tolerance;
         if (options.angle > 0.0) {
-            const double limit = std::cos(options.angle * 3.14159265358979 / 180.0);
+            const double limit = std::cos(options.angle * (seam ? 0.5 : 1.0) * 3.14159265358979 / 180.0);
             const Vec3 n00 = point(r.u0, r.v0).du, n10 = point(r.u1, r.v0).du, n01 = point(r.u0, r.v1).du, n11 = point(r.u1, r.v1).du;
             if (can_u && (dot(n00, n10) < limit || dot(n01, n11) < limit)) { cut_u = true; }
             if (can_v && (dot(n00, n01) < limit || dot(n10, n11) < limit)) { cut_v = true; }
         }
-        if (!cut_u && !cut_v && err_c > options.tolerance) { cut_u = cut_v = true; }
+        if (!cut_u && !cut_v && err_c > tolerance) { cut_u = cut_v = true; }
         if (cut_u && cut_v) {
             split({r.u0, r.v0, mu, mv});
             split({mu, r.v0, r.u1, mv});
@@ -596,12 +625,72 @@ struct MeshBuilder {
 } // namespace detail
 
 // Bake surfaces to one mesh. `trims[k]` are the trims of surface k.
+namespace detail {
+
+// One line for a band and the part it lies on. Along each of its two edges
+// a band is on another part's surface, but the two meshes have their own
+// vertices there, and flat pieces of different sizes do not agree on where
+// that surface is or which way it faces. Every vertex on a band's edge is
+// given the position and normal that the other part's mesh has at the same
+// place: the point of that part's triangle, and its interpolated normal.
+// The band's edge is then a line drawn on the other mesh.
+inline void stitch(Mesh& mesh, const std::vector<const Surface*>& surfaces) {
+    mesh.vertex_over.assign(mesh.vertices.size(), 0);
+    for (std::size_t k = 0; k < mesh.parts.size() && k < surfaces.size(); ++k) {
+        const Surface* other = nullptr;
+        double ou = 0, ov = 0;
+        if (!surfaces[k]->edge_on(false, 0.0, other, ou, ov)) { continue; }
+        const MeshPart& band = mesh.parts[k];
+        const double rows = double(surfaces[k]->cells_v()), around = double(surfaces[k]->cells_u());
+        for (std::size_t index = band.first_vertex; index < band.first_vertex + band.vertex_count; ++index) {
+            MeshVertex& vertex = mesh.vertices[index];
+            mesh.vertex_over[index] = 1;
+            const bool first = double(vertex.v) < 1e-6, last = double(vertex.v) > rows - 1e-6;
+            if (!first && !last) { continue; }
+            const double u = double(vertex.u) >= around ? double(vertex.u) - around : double(vertex.u);
+            if (!surfaces[k]->edge_on(last, u, other, ou, ov)) { continue; }
+            std::size_t target = surfaces.size();
+            for (std::size_t m = 0; m < surfaces.size(); ++m) {
+                if (m != k && surfaces[m]->underlying() == other->underlying()) { target = m; }
+            }
+            if (target >= mesh.parts.size()) { continue; }
+            const MeshPart& part = mesh.parts[target];
+            const double period = surfaces[target]->periodic_u() ? double(surfaces[target]->cells_u()) : 0.0;
+            if (period > 0.0) { ou -= period * std::floor(ou / period); }
+            bool found = false;
+            for (std::size_t t = part.first_triangle; t < part.first_triangle + part.triangle_count && !found; ++t) {
+                const MeshVertex &a = mesh.vertices[mesh.triangles[t * 3]], &b = mesh.vertices[mesh.triangles[t * 3 + 1]], &c = mesh.vertices[mesh.triangles[t * 3 + 2]];
+                const double v_low = std::min({a.v, b.v, c.v}), v_high = std::max({a.v, b.v, c.v});
+                if (ov < v_low - 1e-6 || ov > v_high + 1e-6) { continue; }
+                // The mesh's u is not wrapped: a triangle on the closing column reaches u = period.
+                for (int turn = 0; turn < (period > 0.0 ? 2 : 1) && !found; ++turn) {
+                    const double x = ou + turn * period;
+                    const double det = (double(b.u) - double(a.u)) * (double(c.v) - double(a.v)) - (double(c.u) - double(a.u)) * (double(b.v) - double(a.v));
+                    if (std::fabs(det) < 1e-14) { continue; }
+                    const double wb = ((x - double(a.u)) * (double(c.v) - double(a.v)) - (double(c.u) - double(a.u)) * (ov - double(a.v))) / det;
+                    const double wc = ((double(b.u) - double(a.u)) * (ov - double(a.v)) - (x - double(a.u)) * (double(b.v) - double(a.v))) / det;
+                    const double wa = 1.0 - wb - wc;
+                    if (wa < -1e-6 || wb < -1e-6 || wc < -1e-6) { continue; }
+                    Vec3 normal = normalize(a.n * wa + b.n * wb + c.n * wc);
+                    if (dot(normal, vertex.n) < 0.0) { normal = normal * -1.0; }
+                    vertex.p = a.p * wa + b.p * wb + c.p * wc;
+                    vertex.n = normal;
+                    found = true;
+                }
+            }
+        }
+    }
+}
+
+} // namespace detail
+
 inline Mesh build_mesh(const std::vector<const Surface*>& surfaces, const std::vector<std::vector<const Trim*>>& trims, const MeshOptions& options) {
     Mesh mesh;
     for (std::size_t k = 0; k < surfaces.size(); ++k) {
         detail::MeshBuilder builder{*surfaces[k], trims[k], options, mesh, 0, 0, {}, {}, {}, {}, {}, {}};
         builder.run(std::uint16_t(k));
     }
+    detail::stitch(mesh, surfaces);
     mesh.version = 1;
     return mesh;
 }
@@ -620,6 +709,7 @@ inline void refresh_mesh(Mesh& mesh, const std::vector<const Surface*>& surfaces
             vertex.n = vertex.side == 0.0f ? point.du : detail::mesh_point(*surfaces[k], u, double(vertex.v) + double(vertex.side) * 1e-4).du;
         }
     }
+    detail::stitch(mesh, surfaces);
     mesh.lit = mesh.lit && mesh.lit_diffuse_only; // a bake of the body's own colour and lit fraction goes with it
     ++mesh.version;
 }
@@ -707,7 +797,7 @@ void rasterize(const Mesh& mesh, Project project, Hidden hidden, Rows rows, Visi
         y = y < -30000.0 ? -30000.0 : y > 30000.0 ? 30000.0 : y;
         vis.sx[k] = float(x);
         vis.sy[k] = float(y);
-        vis.iz[k] = float(1.0 / z);
+        vis.iz[k] = float(1.0 / z) * (k < mesh.vertex_over.size() && mesh.vertex_over[k] != 0 ? 1.0015f : 1.0f);
         fx[k] = std::int32_t(std::lrint(x * 256.0));
         fy[k] = std::int32_t(std::lrint(y * 256.0));
     }

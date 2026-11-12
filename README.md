@@ -149,6 +149,15 @@ engine of PlaySuite's rock-stacking game (wrench-transport solver).
   faces the cavity.
 - **Quick frames off** now means a moving frame is drawn exactly as a resting
   one.
+- **One line where a join meets a part (baked mesh).** A part is meshed finer
+  where a band's edge crosses it, the band's edge vertices take the position
+  and normal of the other part's mesh at the same place, and the band is
+  drawn where the two overlap.
+- **Collision hulls for every version** are taken from rings of surface
+  points moved out so the hull's sides touch the ring; the floor hides the
+  surface only where it is more than 0.012 below the floor.
+- **Room light bake is 2.5 times faster** (1.3 s in the browser with the
+  gathered light, from 3.3 s) and is now the baked renderer's default.
 - **Arrow keys** fly the camera; Page Up and Page Down raise and lower it,
   Shift slows it, Home returns it.
 - **Collision hulls enclose round parts.** A hull through 12 nodes of a ring

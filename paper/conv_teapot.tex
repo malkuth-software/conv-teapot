@@ -1263,6 +1263,22 @@ follows once per pixel, or once per sample where a pixel's samples show
 different parts or depths. The techniques are those of the software
 rasterizer in PlaySuite's fish tank; the code is our own.
 
+\subsection{One line where a join meets a part}
+
+Along each of its edges a join's band lies on another part's surface,
+but the two meshes have their own vertices there. Flat pieces of
+different sizes do not agree on where that surface is or which way it
+faces, and from some angles the edge showed as a line. Three things
+remove it. A part is meshed to an eighth of the tolerance and half the
+angle wherever a band's edge crosses it. Every vertex on a band's edge
+takes the position and the normal that the other part's mesh has at the
+same parameters, the point of that part's triangle and its interpolated
+normal, so the band's edge is a line drawn on the other mesh. And where
+the band and the part are both drawn, in the strip the trim leaves
+under the band, the band is drawn: its vertices are projected 0.15\%
+nearer the eye. The mesh of the unified teapot goes from 13\,663 to
+16\,431 vertices.
+
 \subsection{Light painted by the ray tracer}
 
 Each part has a light map in its own chart: around the part one way,
@@ -1321,10 +1337,9 @@ way: the inside of the teapot received the whole sky, darkened by a
 constant; under the knob, in the gap around the lid and down the spout's
 channel nothing darkened at all. A second bake, optional and at four
 times the texel size, stores for every texel and side the fraction of
-its cosine-weighted hemisphere that 64 rays find open past the body, and
-the mean open direction in the body's frame. Sixteen rays are cast first
-and the rest only if those differ. The set is turned by a different
-angle at each texel and the map is smoothed, so the resolution of 1/64
+its cosine-weighted hemisphere that 32 rays find open past the body, and
+the mean open direction in the body's frame. The set is turned by a different
+angle at each texel and the map is smoothed, so the resolution of 1/32
 shows neither as bands nor as grain. The room's light at a pixel is then
 the open fraction times the room's light from the mean open direction as
 the pose turns it. This holds for any motion of the body.
@@ -1344,9 +1359,16 @@ albedo $\rho=0.9$; $E-E_0$ is stored and added at each pixel. The
 interior then has the level a white cavity in sun should have, and the
 channel and the knob's underside receive what their surroundings throw
 on them. The gather is part of the pass that finds the lit fraction
-again and that pass still takes about 190\,ms. The bake is where the
-cost is: on one thread 0.37\,s without the open fraction, 1.3\,s with
-it and 2.5\,s with the transfer (0.7, 1.9 and 3.3\,s in the browser).
+again and that pass still takes about 190\,ms. The bake is where the cost is, and three things brought it
+down. Of 32 directions a quarter are tried first and the rest only if
+those differ. Every second texel of every second row is done first, and
+a texel between four that see the whole room is taken to see it too, as
+is, on a closed solid, a texel between four that see nothing (the side
+of a sheet that is inside the material). And a part whose one side is
+found by trial to be wholly inside the material has nothing baked for
+that side. In the browser the bake takes 0.7\,s without the open
+fraction, 1.1\,s with it and 1.3\,s with the transfer (0.7, 1.9 and
+3.3\,s before), and the baked renderer now uses the transfer by default.
 A frame at rest costs 43, 46 and 48\,ms. While the body turns the
 gathered light is not refreshed; it turns with the body until the body
 rests. The option to leave the surface's pattern off whatever faces the
@@ -1516,14 +1538,18 @@ can be taken from the lattice with no separate model: the convex hull of
 a group of nodes is a convex piece of the teapot. For the 1975 to 1987
 versions we use eleven hulls, one for the body, two for the lid, and four
 each along the handle and spout; for the 2026 version, one hull per
-group of exterior lattices. The hull of a round part is not taken
-through its nodes: with 12 nodes to a ring that hull lies inside the
-surface by 3\% of the radius, and a teapot resting on its side showed
-the floor through its inner wall. The hull is
-taken from 24 points of each ring, moved out from the axis so that its
-flat sides touch the ring, and from the 13 rows of the profile's convex
-outline that leave the least of it outside. The resting surface is then
-within 0.002 of the floor. We hand the hulls to the rigid-body engine of a rock-stacking game,
+group of exterior lattices. A hull is not taken through the nodes of a ring: with 12 nodes to a
+ring that hull lies inside the surface by 3\% of the radius, and a teapot
+resting on its side showed the floor through its wall. Each ring gives
+the hull at least 16 points of the surface (20 on the body and lid),
+moved out from the ring's centre so that the hull's flat sides touch the
+ring; a round part gives the 16 rings of its profile's convex outline,
+sampled between rows as well, that leave the least of the outline
+outside. Dropped at tilts from upright to upside down, the resting
+surface is then within 0.007 of the floor in the unified version and
+0.001 in the 1976 version, where it had been 0.015 and 0.018 into it.
+The renderers let the floor hide the surface only where the surface is
+more than 0.012 below it. We hand the hulls to the rigid-body engine of a rock-stacking game,
 whose wrench-transport solver resolves contact, friction and rolling
 resistance in one solve per frame. One model unit is taken as 7\,cm. The
 engine returns a pose. The lattice stays at rest and the pose is applied

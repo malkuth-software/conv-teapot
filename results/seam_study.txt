@@ -1,21 +1,21 @@
 Nodes and vertices by part (tree layout, tolerance 1e-2, 20 degrees)
 part         lattice  nodes hidden     area  nodes/A  vertices triangles vertices/A  near trim
-body           12x73    876     15    71.54     12.2      6834     13006       95.5        202
+body           12x73    876     15    71.27     12.3      8242     14874      115.7        854
 lid            12x55    660      0    12.52     52.7      3300      6216      263.5          0
-handle         16x25    400     32     3.26    122.7       759      1410      232.8        104
-spout          16x37    592     61     5.79    102.3      1719      3112      297.0        226
-handle_join     16x3     96      0     0.23    421.3       229       400     1004.9          0
-handle_join     16x3     96      0     0.29    334.5       258       458      898.9          0
-spout_join      16x3     96      0     0.76    126.2       305       530      400.9          0
-spout_join      16x3     96      0     0.23    413.6       243       420     1047.0          0
-all                    2912    108    94.62     30.8     13647     25552      144.2
+handle         16x25    400     32     3.01    132.7      1315      2142      436.3        372
+spout          16x37    592     61     5.56    106.4      2539      4006      456.3        684
+handle_join     16x3     96      0     0.23    421.2       229       400     1004.7          0
+handle_join     16x3     96      0     0.29    334.5       258       458      899.0          0
+spout_join      16x3     96      0     0.76    126.2       305       530      401.1          0
+spout_join      16x3     96      0     0.23    414.0       243       420     1048.1          0
+all                    2912    108    93.88     31.0     16431     29046      175.0
 
 Rows and vertices within 0.10 of a crease or an end of a sheet
 sheet     creases    rows    near  length near    rows near  vertices near smallest h/median
-body            1      73       8           5%          11%            13%          0.212
+body            1      73       8           5%          11%            11%          0.212
 lid             1      55      10          12%          18%            26%          0.334
-handle          0      25       2           6%           8%             7%          0.548
-spout           0      37       2           6%           5%             5%          0.074
+handle          0      25       2           6%           8%            10%          0.548
+spout           0      37       2           6%           5%            10%          0.074
 
 Joins against how they are stored (reference: two sides of 65 rows)
 stored      rows  nodes | join             distance     normal   at edges

@@ -41,6 +41,7 @@ struct RenderPart {
     double orientation = 1.0;
     std::size_t per_u = 1, per_v = 1; // node intervals per source patch (for patch outlines)
     bool two_sided = false;           // no outward side is known: never shade as an inside
+    bool solid = false;               // part of a closed solid: its inward side is inside the material and never seen
     std::vector<const Trim*> trims;   // regions of this surface that are not shown
     // Rows that face the teapot's cavity: v >= interior_from, or, when it is
     // negative, v <= -interior_from - 1. A point there sees the floor and the
@@ -100,7 +101,7 @@ struct RenderOptions {
     //    unblocked light.
     // 3: as 1, and the blocked fraction is lit by the texels it lands on,
     //    gathered through a baked transfer.
-    int ambient = 0;
+    int ambient = 3;
     // The surface's pattern is not painted on what faces the cavity.
     bool plain_inside = false;
     bool diffuse_only = false; // set by the bake: shade_surface stops before the view-dependent terms
@@ -1150,7 +1151,7 @@ private:
         }
         double ground_t = -1.0;
         if (options.ground && unit.y < -1e-9 && origin.y > scene.ground_y) { ground_t = (scene.ground_y - origin.y) / unit.y; }
-        if (hit && !(ground_t > 0.0 && ground_t < solve.t)) {
+        if (hit && !(ground_t > 0.0 && ground_t < solve.t - sink(unit))) {
             work.no_floor();
             return shade_surface(scene, options, primary, unit, solve, part, 1, work);
         }
@@ -1321,12 +1322,56 @@ private:
         return coarse + (traced - coarse) * trust;
     }
 
+    // A body at rest sits a little into the floor: its collision shape is not
+    // its surface, and the solver allows a contact some depth. The floor hides
+    // the surface only where the surface is more than 0.012 below it; `sink` is
+    // that depth as a distance along a ray.
+    static double sink(Vec3 dir) { return 0.012 / std::fmax(1e-6, std::fabs(dir.y)); }
+
     // The room's diffuse light on a surface whose normal is n, nothing in the way.
     static Vec3 ambient_of(Vec3 n) {
         const double up = 0.5 * (n.y + 1.0);
         return Vec3{0.30, 0.28, 0.26} * (1.0 - up) + Vec3{0.46, 0.50, 0.56} * up;
     }
 
+    // For every part of a closed solid, the side that is inside the material
+    // (0: the side its normal points to, 1: the other, -1: neither or not
+    // known). Found by trying: from a spread of points on the part, every
+    // direction from that side meets the body at once. That side is never
+    // seen and nothing is baked for it.
+    std::vector<int> inward_;
+    void find_inward(const Scene& scene) {
+        inward_.assign(scene.parts.size(), -1);
+        bool any = false;
+        for (const RenderPart& part : scene.parts) { any = any || part.solid; }
+        if (!any) { return; }
+        need_bvh(scene, true);
+        for (std::size_t k = 0; k < scene.parts.size(); ++k) {
+            if (!scene.parts[k].solid) { continue; }
+            const Surface& surface = *scene.parts[k].surface;
+            int open[2] = {0, 0}, tried = 0;
+            for (int j = 0; j < 12; ++j) {
+                for (int i = 0; i < 8; ++i) {
+                    const SurfacePoint point = surface.eval(double(surface.cells_u()) * (i + 0.37) / 8.0, double(surface.cells_v()) * (j + 0.5) / 12.0);
+                    Vec3 raw = cross(point.du, point.dv);
+                    if (length(raw) < 1e-12 || length(point.du) < 1e-9 || scene.removed(point.p)) { continue; }
+                    raw = normalize(raw);
+                    const Vec3 t1 = normalize(point.du), t2 = cross(raw, t1);
+                    ++tried;
+                    for (int side = 0; side < 2; ++side) {
+                        const Vec3 facing = raw * (side == 0 ? 1.0 : -1.0);
+                        for (int index = 0; index < 5; ++index) {
+                            const double a = 1.2566370614359172 * index;
+                            const Vec3 d = index == 0 ? facing : normalize(facing + (t1 * std::cos(a) + t2 * std::sin(a)) * 0.8);
+                            if (!blocked(scene, point.p + facing * 0.02, d, 0.05)) { ++open[side]; }
+                        }
+                    }
+                }
+            }
+            if (tried > 8 && open[0] == 0 && open[1] > 0) { inward_[k] = 0; }
+            if (tried > 8 && open[1] == 0 && open[0] > 0) { inward_[k] = 1; }
+        }
+    }
     // Is the body in the way of a ray? Against the lattice's flat cells,
     // which is enough for a fraction of a hemisphere. Hits nearer than
     // `from` are the surface the ray starts on.
@@ -1339,11 +1384,17 @@ private:
         stack[top++] = 0;
         while (top > 0) {
             const Node& node = nodes_[stack[--top]];
-            double t_near;
-            if (!hit_box(node.box, origin, inverse, 1e30, t_near)) { continue; }
+            const double limit = 1e30; // a box on the stack has been found to be on the ray
             if (!node.leaf) {
-                stack[top++] = node.left;
-                stack[top++] = node.right;
+                // The nearer child is taken first.
+                double tl = 0, tr = 0;
+                const bool hl = hit_box(nodes_[node.left].box, origin, inverse, limit, tl), hr = hit_box(nodes_[node.right].box, origin, inverse, limit, tr);
+                if (hl && hr) {
+                    stack[top++] = tl < tr ? node.right : node.left;
+                    stack[top++] = tl < tr ? node.left : node.right;
+                } else if (hl || hr) {
+                    stack[top++] = hl ? node.left : node.right;
+                }
                 continue;
             }
             for (std::uint32_t k = node.left; k < node.left + node.right; ++k) {
@@ -1374,11 +1425,19 @@ private:
         stack[top++] = 0;
         while (top > 0) {
             const Node& node = nodes_[stack[--top]];
+            const double limit = best;
             double t_near;
-            if (!hit_box(node.box, origin, inverse, best, t_near)) { continue; }
+            if (!hit_box(node.box, origin, inverse, limit, t_near)) { continue; }
             if (!node.leaf) {
-                stack[top++] = node.left;
-                stack[top++] = node.right;
+                // The nearer child is taken first.
+                double tl = 0, tr = 0;
+                const bool hl = hit_box(nodes_[node.left].box, origin, inverse, limit, tl), hr = hit_box(nodes_[node.right].box, origin, inverse, limit, tr);
+                if (hl && hr) {
+                    stack[top++] = tl < tr ? node.right : node.left;
+                    stack[top++] = tl < tr ? node.left : node.right;
+                } else if (hl || hr) {
+                    stack[top++] = hl ? node.left : node.right;
+                }
                 continue;
             }
             for (std::uint32_t k = node.left; k < node.left + node.right; ++k) {
@@ -1438,10 +1497,11 @@ private:
         need_bvh(scene, true);
         const Rigid& pose = scene.pose;
         const auto to_body = [&](Vec3 d) { return Vec3{pose.a[0] * d.x + pose.a[3] * d.y + pose.a[6] * d.z, pose.a[1] * d.x + pose.a[4] * d.y + pose.a[7] * d.z, pose.a[2] * d.x + pose.a[5] * d.y + pose.a[8] * d.z}; };
-        // 64 directions of a cosine-weighted hemisphere, in the frame of the normal.
-        double rays[64][3];
-        for (int k = 0; k < 64; ++k) {
-            const double r = std::sqrt((k + 0.5) / 64.0), angle = 2.399963229728653 * k;
+        // 32 directions of a cosine-weighted hemisphere, in the frame of the normal.
+        constexpr int directions = 32;
+        double rays[directions][3];
+        for (int k = 0; k < directions; ++k) {
+            const double r = std::sqrt((k + 0.5) / double(directions)), angle = 2.399963229728653 * k;
             rays[k][0] = r * std::cos(angle);
             rays[k][1] = r * std::sin(angle);
             rays[k][2] = std::sqrt(1.0 - r * r);
@@ -1474,12 +1534,17 @@ private:
             level.texel.resize(std::size_t(level.width) * std::size_t(level.height));
             back = level;
             const std::size_t texels = level.texel.size();
-            std::vector<std::uint32_t> landed(transfer ? texels * 2 * 64 : 0, none);
+            std::vector<std::uint32_t> landed(transfer ? texels * 2 * directions : 0, none);
             const double cu = double(surface.cells_u());
+            // Every second texel of every second row first. A texel between four
+            // of those that all see the whole room is taken to see it too: on
+            // the outside of a convex part that is most of them.
+            for (int stage = 0; stage < 2; ++stage) {
             parallel_rows(level.height, options.threads, [&](int begin, int end, int) {
                 for (int y = begin; y < end; ++y) {
                     const double v = part.v_of((y + 0.5) / double(level.height));
                     for (int x = 0; x < level.width; ++x) {
+                        if ((stage == 0) != (x % 2 == 0 && y % 2 == 0)) { continue; }
                         const SurfacePoint point = surface.eval((x + 0.5) / double(level.width) * cu, v);
                         Vec3 raw = cross(point.du, point.dv);
                         const bool flat = length(raw) > 1e-12 && length(point.du) > 1e-9;
@@ -1495,6 +1560,24 @@ private:
                             const std::size_t own = std::size_t(side) * texels + std::size_t(y) * std::size_t(level.width) + std::size_t(x);
                             int open = 0, cast = 0;
                             Vec3 mean{};
+                            if (k < inward_.size() && side == inward_[k]) {
+                                // Inside the material: nothing is seen from here and nothing sees it.
+                                cast = 1;
+                            } else if (stage == 1) {
+                                const LightMap::Level& done = side == 0 ? level : back;
+                                const int x0 = x & ~1, y0 = y & ~1;
+                                const int x1 = surface.periodic_u() ? (x0 + 2) % level.width : std::min(x0 + 2, (level.width - 1) & ~1);
+                                const int y1 = std::min(y0 + 2, (level.height - 1) & ~1);
+                                const auto whole = [&](int tx, int ty) { return (done.texel[std::size_t(ty) * std::size_t(level.width) + std::size_t(tx)] >> 24) == 255u; };
+                                const auto shut = [&](int tx, int ty) { return (done.texel[std::size_t(ty) * std::size_t(level.width) + std::size_t(tx)] >> 24) == 0u; };
+                                if (whole(x0, y0) && whole(x1, y0) && whole(x0, y1) && whole(x1, y1)) {
+                                    open = cast = 1;
+                                    mean = facing;
+                                } else if (scene.parts[k].solid && shut(x0, y0) && shut(x1, y0) && shut(x0, y1) && shut(x1, y1)) {
+                                    // Between four texels that see nothing, on a closed solid: inside the material.
+                                    cast = 1;
+                                }
+                            }
                             const auto ray = [&](int index) {
                                 const Vec3 d = t1 * (rays[index][0] * ct - rays[index][1] * st) + t2 * (rays[index][0] * st + rays[index][1] * ct) + facing * rays[index][2];
                                 ++cast;
@@ -1509,7 +1592,7 @@ private:
                                             int tx = int(hu / double(other.cells_u()) * w);
                                             tx = other.periodic_u() ? ((tx % w) + w) % w : std::min(w - 1, std::max(0, tx));
                                             const int ty = std::min(h - 1, std::max(0, int(mesh.parts[hit_part].t_of(hv) * h)));
-                                            landed[own * 64 + std::size_t(index)] =
+                                            landed[own * std::size_t(directions) + std::size_t(index)] =
                                                 moved.offset[hit_part] + (front ? 0u : std::uint32_t(w) * std::uint32_t(h)) + std::uint32_t(ty) * std::uint32_t(w) + std::uint32_t(tx);
                                         }
                                         return;
@@ -1519,10 +1602,12 @@ private:
                                 mean = mean + d;
                             };
                             // A quarter of the directions first; the rest only if those differ.
-                            for (int index = 0; index < 64; index += 4) { ray(index); }
-                            if (open != 0 && open != cast) {
-                                for (int index = 0; index < 64; ++index) {
-                                    if (index % 4 != 0) { ray(index); }
+                            if (cast == 0) {
+                                for (int index = 0; index < directions; index += 4) { ray(index); }
+                                if (open != 0 && open != cast) {
+                                    for (int index = 0; index < directions; ++index) {
+                                        if (index % 4 != 0) { ray(index); }
+                                    }
                                 }
                             }
                             const Vec3 bent = to_body(open > 0 ? normalize(mean) : facing);
@@ -1540,12 +1625,13 @@ private:
                     }
                 }
             });
+            }
             if (transfer) {
                 for (std::size_t own = 0; own < texels * 2; ++own) {
                     const std::size_t id = std::size_t(moved.offset[k]) + own;
                     moved.first[id] = std::uint32_t(moved.target.size());
-                    for (int index = 0; index < 64; ++index) {
-                        if (landed[own * 64 + std::size_t(index)] != none) { moved.target.push_back(landed[own * 64 + std::size_t(index)]); }
+                    for (int index = 0; index < directions; ++index) {
+                        if (landed[own * std::size_t(directions) + std::size_t(index)] != none) { moved.target.push_back(landed[own * std::size_t(directions) + std::size_t(index)]); }
                     }
                 }
             }
@@ -1615,6 +1701,7 @@ private:
                     const Vec3 thrown = light[id] - direct[id];
                     level.texel[own] = byte(thrown.x) | byte(thrown.y) << 8 | byte(thrown.z) << 16 | 0xff000000u;
                 }
+                smooth_level(level, part.open.wrap);
                 smooth_level(level, part.open.wrap);
                 LightMap& map = side == 0 ? part.bounce : part.bounce_back;
                 map.wrap = part.open.wrap;
@@ -1874,7 +1961,7 @@ private:
         if (options.ground && std::fabs(dir.y) > 1e-9) { ground_t = (scene.ground_y - view.eye.y) / dir.y; }
         Vec3 face;
         if (cut_face(scene, options, view, dir, (crossings & 1) != 0, ground_t, hit, face)) { return face; }
-        if (found && !(ground_t > 0.0 && ground_t < best.t - 1e-4 && view.eye.y > scene.ground_y)) {
+        if (found && !(ground_t > 0.0 && ground_t < best.t - sink(dir) && view.eye.y > scene.ground_y)) {
             hit.u = float(best.u);
             hit.v = float(best.v);
             hit.t = float(best.t);
@@ -2026,6 +2113,7 @@ public:
         mesh.lit_diffuse_only = bake.diffuse_only;
         transport_lattices(scene, view, nullptr, options);
         build_shadow_map(scene, options);
+        find_inward(scene);
         need_bvh(scene, options.gloss && options.lighting && !bake.diffuse_only);
         mesh.texels = 0;
         const Rigid& pose = scene.pose;
@@ -2093,6 +2181,8 @@ public:
                             // away, from the camera's mirror image in the surface.
                             const Vec3 facing = raw * (side == 0 ? 1.0 : -1.0);
                             std::uint32_t& out = (side == 0 ? level : back).texel[index];
+                            // The inward side of a closed solid is inside the material and never drawn.
+                            if (side == inward_[k]) { continue; }
                             double lit = 1.0;
                             Vec3 colour;
                             if (bake.diffuse_only) {
@@ -2218,7 +2308,7 @@ private:
         const double depth = sample.triangle != 0xffffffffu ? 1.0 / double(sample.iz) : 0.0;
         Vec3 face;
         if (cut_face(scene, options, view, dir, sample.crossings % 2 != 0, ground_t, hit, face)) { return face; }
-        if (sample.triangle == 0xffffffffu || (ground_t > 0.0 && ground_t < depth - 1e-4 && view.eye.y > scene.ground_y)) {
+        if (sample.triangle == 0xffffffffu || (ground_t > 0.0 && ground_t < depth - sink(dir) && view.eye.y > scene.ground_y)) {
             if (!(ground_t > 0.0)) { return options.gloss || options.floor_reflection ? sky(scene, view.eye, dir) : background(dir); }
             return floor_colour(scene, options, view.eye + dir * ground_t, ground_t, &view, &work);
         }

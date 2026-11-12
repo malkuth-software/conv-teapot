@@ -42,6 +42,15 @@ public:
     virtual bool periodic_u() const = 0;
     virtual SurfacePoint eval(double u, double v) const = 0;
     virtual Vec3 position(double u, double v) const { return eval(u, v).p; }
+    // A band between two surfaces lies on one of them along each of its two
+    // edges (v = 0 and v = cells_v). For the edge asked, at u: which surface,
+    // and where on it. False for a surface that is not such a band.
+    virtual bool edge_on(bool last, double u, const Surface*& other, double& other_u, double& other_v) const {
+        (void)last; (void)u; (void)other; (void)other_u; (void)other_v;
+        return false;
+    }
+    // The surface itself, under any motion it is carried by.
+    virtual const Surface* underlying() const { return this; }
 };
 
 // A rigid motion: p -> A p + b, A a rotation.
@@ -64,6 +73,8 @@ class PosedSurface final : public Surface {
 public:
     const Surface* base = nullptr;
     const Rigid* pose = nullptr;
+    bool edge_on(bool last, double u, const Surface*& other, double& other_u, double& other_v) const override { return base->edge_on(last, u, other, other_u, other_v); }
+    const Surface* underlying() const override { return base->underlying(); }
     std::size_t cells_u() const override { return base->cells_u(); }
     std::size_t cells_v() const override { return base->cells_v(); }
     bool periodic_u() const override { return base->periodic_u(); }
@@ -187,6 +198,20 @@ public:
 
     std::size_t cells_u() const override { return lattice.cells_u(); }
     std::size_t cells_v() const override { return lattice.cells_v() * spread; }
+    bool edge_on(bool last, double u, const Surface*& other, double& other_u, double& other_v) const override {
+        if (on == nullptr || !toward) { return false; }
+        if (last) {
+            other = toward_on;
+            other_u = u;
+            other_v = toward->position_own(u, double(lattice.cells_v())).x;
+        } else {
+            const Vec3 q = position_own(u, 0.0);
+            other = on;
+            other_u = q.x;
+            other_v = q.y;
+        }
+        return true;
+    }
     bool periodic_u() const override { return lattice.wrap_u; }
 
     SurfacePoint eval(double u, double v) const override {
