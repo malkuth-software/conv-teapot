@@ -342,6 +342,41 @@ inline SheetPlan plan_rows_by_error(const ProfileCurve& source, std::size_t rows
     return best;
 }
 
+// The error of a plan as plan_rows_by_error measures it: the largest distance
+// from the profile of the CONV lines through the plan's rows.
+inline double plan_error(const ProfileCurve& source, const SheetPlan& plan, bool on_axis) {
+    ProfileCurve profile = source;
+    profile.build_table(32);
+    const std::size_t n = plan.row_arc.size();
+    std::vector<double> x(n), y(n);
+    for (std::size_t k = 0; k < n; ++k) {
+        std::size_t run = 0;
+        double t = 0.0;
+        profile.locate(std::min(profile.length, std::max(0.0, plan.row_arc[k])), run, t);
+        profile.point_on_run(run, t, x[k], y[k]);
+        if (on_axis && (k == 0 || k + 1 == n)) { x[k] = 0.0; }
+    }
+    double worst = 0.0;
+    for (std::size_t cell = 0; cell + 1 < n; ++cell) {
+        const double h = plan.row_arc[cell + 1] - plan.row_arc[cell];
+        for (double t : {0.1, 0.25, 0.4, 0.5, 0.6, 0.75, 0.9}) {
+            const double px = cut_line(x, plan.row_seam, cell, t), py = cut_line(y, plan.row_seam, cell, t), arc = plan.row_arc[cell] + t * h;
+            const auto first = std::lower_bound(profile.table_s.begin(), profile.table_s.end(), arc - 2.0 * h);
+            std::size_t k = first == profile.table_s.begin() ? 0 : std::size_t(first - profile.table_s.begin()) - 1;
+            double best = 1e30;
+            for (; k + 1 < profile.table_s.size() && profile.table_s[k] <= arc + 2.0 * h; ++k) {
+                const double ax = profile.table_x[k], ay = profile.table_y[k];
+                const double bx = profile.table_x[k + 1] - ax, by = profile.table_y[k + 1] - ay;
+                const double len2 = bx * bx + by * by;
+                const double f = len2 > 0.0 ? std::max(0.0, std::min(1.0, ((px - ax) * bx + (py - ay) * by) / len2)) : 0.0;
+                best = std::min(best, std::hypot(ax + f * bx - px, ay + f * by - py));
+            }
+            worst = std::max(worst, best);
+        }
+    }
+    return worst;
+}
+
 // Chains planar runs of samples (each an edge of one source patch) into one
 // curve, starting from the end that lies on the axis x = 0 at the smallest
 // height, or, when no end is on the axis, from the end `start_hint` picks.

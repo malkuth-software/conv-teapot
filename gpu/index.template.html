@@ -218,7 +218,10 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
         `${state[30]} nodes · ${gpu.vertexCount} grid points · ${gpu.triangleCount} triangles, each grid point and pixel evaluated from the lattice on the GPU\n` +
         (gpu.roomMs ? `room light: ${gpu.options.directions} directions in ${gpu.roomMs.toFixed(0)} ms` + (gpu.thrownMs ? `, gathered in ${gpu.thrownMs.toFixed(0)} ms` : '') + ` · ` : '') +
         (check ? `shaders against the CPU at ${check.points} points: largest distance ${check.worst.toExponential(2)}, largest angle between normals ${check.worstAngle.toFixed(4)}\u00b0`
-               : 'not yet checked against the CPU');
+               : 'not yet checked against the CPU') +
+        (gpu.rowsPlaced ? `\nrows placed on the GPU: ` + gpu.rowsPlaced.map((p) => `${p.which === 0 ? 'body' : 'lid'} ${p.rows} rows in ${p.ms.toFixed(0)} ms, error ${p.error.toExponential(2)}` +
+          (rowsChecked && rowsChecked[p.which] ? ` (measured on the CPU ${rowsChecked[p.which].measured.toExponential(2)}; the CPU's own plan ${rowsChecked[p.which].ownError.toExponential(2)})` : '') +
+          `, nodes within ${p.nodes.toExponential(1)} of the CPU's`).join(' · ') : '');
       stats.style.whiteSpace = 'pre-wrap';
       pauseButton.textContent = running ? 'Pause' : 'Run';
       if (wasRunning && !running) { dirty = true; }
@@ -244,7 +247,8 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
     const [w, h] = event.target.value.split('x').map(Number);
     resize(w, h);
   });
-  document.getElementById('check').addEventListener('click', () => { gpu.compare(); dirty = true; });
+  let rowsChecked = null;
+  document.getElementById('check').addEventListener('click', () => { gpu.compare(); rowsChecked = gpu.rowsCheck(); dirty = true; });
   document.getElementById('drop').addEventListener('click', () => {
     engine._tp_action(0);
     if (onGpu()) { engine._tp_set(12, 0); takePose(); sim().running = true; }

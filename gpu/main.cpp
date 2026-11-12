@@ -187,6 +187,7 @@ EMSCRIPTEN_KEEPALIVE void tp_set(int key, double value) {
     case 26: e.show_interior = value != 0; break;
     case 36: e.side = int(value); break;
     case 37: e.joins = value != 0; e.rebuild(); break;
+    case 40: e.rows_outside = value != 0; if (e.version == Version::v2026_unified) { e.rebuild(); } break;
     default: break;
     }
 }
@@ -326,6 +327,82 @@ EMSCRIPTEN_KEEPALIVE const double* tp_hull_triangles() {
             }
         }
     }
+    return body.data();
+}
+// The source of a sheet of the unified teapot whose rows are placed by CONV's
+// own error (0: body, 1: lid), for placing them elsewhere: the meridian the
+// sampled patches give, as the engine chains it. Numbers, in order: 1 if there
+// is such a sheet; rows asked for; nodes around; length; number of runs; points
+// a run; number of creases; sizes of the fine table, the coarse table and the
+// engine's own plan; then the creases' arc lengths, the runs' samples (x, y),
+// the fine table (s, x, y, t, run), the coarse table (s, x, y), and the
+// engine's row arc lengths, to compare with.
+// Rows placed on the GPU, handed back: arc lengths then crease flags, for the
+// body and then the lid, written by the page into tp_rows_buffer().
+static double rows_buffer[1024];
+EMSCRIPTEN_KEEPALIVE int tp_rows_wanted() { return engine->rows_wanted() ? 1 : 0; }
+EMSCRIPTEN_KEEPALIVE int tp_rows_given() { return engine->rows_given() ? 1 : 0; }
+EMSCRIPTEN_KEEPALIVE int tp_rows_scale() { return engine->blinn_scale ? 1 : 0; }
+EMSCRIPTEN_KEEPALIVE double* tp_rows_buffer() { return rows_buffer; }
+EMSCRIPTEN_KEEPALIVE void tp_rows(int body_rows, int lid_rows) {
+    tconv::SheetPlan* plans = engine->given_rows[engine->blinn_scale ? 1 : 0];
+    const double* from = rows_buffer;
+    for (int which = 0; which < 2; ++which) {
+        const int n = which == 0 ? body_rows : lid_rows;
+        plans[which].row_arc.assign(from, from + n);
+        plans[which].row_seam.clear();
+        for (int k = 0; k < n; ++k) { plans[which].row_seam.push_back(from[n + k] > 0.5 ? 1 : 0); }
+        from += 2 * n;
+    }
+    engine->rebuild();
+}
+EMSCRIPTEN_KEEPALIVE const double* tp_sheet(int which, int compare) {
+    using namespace tconv;
+    body.assign(1, 0.0);
+    if (engine->version != Version::v2026_unified || which < 0 || which > 1) { return body.data(); }
+    const TeapotOptions defaults;
+    const bool is_body = which == 0;
+    const double y_scale = engine->blinn_scale ? 1.0 : 4.0 / 3.0;
+    std::vector<ProfileCurve::Run> runs;
+    for (int r = 0; r < (is_body ? utah::dense_body_runs : utah::dense_lid_runs); ++r) {
+        ProfileCurve::Run run;
+        for (int k = 0; k < utah::dense_profile_points; ++k) {
+            const float* p = is_body ? utah::dense_body_profile[r][k] : utah::dense_lid_profile[r][k];
+            run.x.push_back(double(p[0]));
+            run.y.push_back(double(p[1]) * y_scale);
+        }
+        runs.push_back(run);
+    }
+    const ProfileCurve coarse = chain_runs(runs);
+    ProfileCurve fine = coarse;
+    fine.build_table(32);
+    std::vector<double> creases;
+    for (std::size_t run = 1; run < fine.runs.size(); ++run) {
+        if (fine.turn_at_joint(run) > 4.0) { creases.push_back(fine.run_start[run]); }
+    }
+    body = {1.0, double(is_body ? defaults.sheet_rows : defaults.sheet_rows * 3 / 4), double(defaults.sheet_around), fine.length, double(fine.runs.size()),
+            double(utah::dense_profile_points), double(creases.size()), double(fine.table_s.size()), double(coarse.table_s.size()), double(compare)};
+    body.insert(body.end(), creases.begin(), creases.end());
+    for (const ProfileCurve::Run& run : fine.runs) {
+        for (std::size_t k = 0; k < run.x.size(); ++k) { body.insert(body.end(), {run.x[k], run.y[k]}); }
+    }
+    for (std::size_t k = 0; k < fine.table_s.size(); ++k) {
+        body.insert(body.end(), {fine.table_s[k], fine.table_x[k], fine.table_y[k], fine.table_t[k], double(fine.table_run[k])});
+    }
+    for (std::size_t k = 0; k < coarse.table_s.size(); ++k) { body.insert(body.end(), {coarse.table_s[k], coarse.table_x[k], coarse.table_y[k]}); }
+    if (compare == 0) { return body.data(); }
+    // To compare with: the engine's own plan and its error, and its first plan (by curvature).
+    const std::size_t rows = std::size_t(body[1]);
+    double error = 0.0;
+    const SheetPlan own = plan_rows_by_error(coarse, rows, true, 0.2, 8, &error);
+    const SheetPlan first = plan_rows(fine, rows, fine.length / (40.0 * double(rows)), 4.0 * fine.length / double(rows), 0.2);
+    body.push_back(double(own.row_arc.size()));
+    body.insert(body.end(), own.row_arc.begin(), own.row_arc.end());
+    body.push_back(error);
+    body.push_back(double(first.row_arc.size()));
+    body.insert(body.end(), first.row_arc.begin(), first.row_arc.end());
+    // The error, measured here, of the rows the page gave (0 if it gave none).
+    body.push_back(engine->rows_given() ? plan_error(coarse, engine->given_rows[engine->blinn_scale ? 1 : 0][which], true) : 0.0);
     return body.data();
 }
 // The pose from that simulation: rotation by rows, then translation.

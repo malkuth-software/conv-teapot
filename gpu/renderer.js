@@ -8,7 +8,7 @@ class TeapotGpu {
     if (!gl) { throw new Error('WebGL 2 is not available'); }
     if (!gl.getExtension('EXT_color_buffer_float')) { throw new Error('rendering to float textures (EXT_color_buffer_float) is not available'); }
     this.gl = gl;
-    this.options = { material: 0, gloss: 0, lighting: 1, shadows: 1, ground: 1, wire: 0, texture: 0, mapping: 0, perPixel: 1, shadowSize: 2048, polished: 0, trace: 1, filter: 2, roomLight: 2, directions: 256, gatherDirections: 48, gathers: 5, layers: 6 };
+    this.options = { material: 0, gloss: 0, lighting: 1, shadows: 1, ground: 1, wire: 0, texture: 0, mapping: 0, perPixel: 1, shadowSize: 2048, polished: 0, trace: 1, filter: 2, placeRows: 1, roomLight: 2, directions: 256, gatherDirections: 48, gathers: 5, layers: 6 };
     // The surface from the lattice at every vertex (used once, to evaluate them, and to check against the CPU);
     // the teapot from those evaluated vertices; the maps of what each point sees of the room.
     this.conv = this.program(VERTEX_GLSL, PROBE_FRAGMENT_GLSL);
@@ -72,6 +72,7 @@ class TeapotGpu {
     padded.set(data);
     if (!this.textures[key]) { this.textures[key] = gl.createTexture(); }
     if (key === 'cells') { this.cellRows = rows; }
+    if (key === 'nodes') { this.nodeRows = rows; }
     gl.bindTexture(gl.TEXTURE_2D, this.textures[key]);
     gl.texImage2D(gl.TEXTURE_2D, 0, channels === 4 ? gl.RGBA32F : gl.R32F, 2048, rows, 0, channels === 4 ? gl.RGBA : gl.RED, gl.FLOAT, padded);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
@@ -83,17 +84,33 @@ class TeapotGpu {
   // Take from the engine what is shown now, if it has changed.
   upload() {
     const e = this.engine, gl = this.gl;
+    // Where the nodes are: the rows of the unified teapot's body and lid are placed here,
+    // by CONV's own error (rows.js), and the engine builds on them.
+    if (!this.rowPlanner) { this.rowPlanner = new RowPlanner(this); }
+    if (this.rowsAsked !== this.options.placeRows) { this.rowsAsked = this.options.placeRows; e._tp_set(40, this.options.placeRows); }
+    if (e._tp_rows_wanted()) {
+      const scale = e._tp_rows_scale();
+      this.rowPlans = this.rowPlans || {};
+      this.rowPlans[scale] = this.rowPlanner.placeAll(e);
+    }
     if (e._tp_build() === 0 && this.parts.length > 0) { return false; }
     const floats = (kind) => new Float32Array(e.HEAPF32.buffer, e._tp_buffer(kind), e._tp_length(kind)).slice();
     this.floatTexture('cells', floats(0), 4);
     this.floatTexture('shapes', floats(1), 4);
     this.floatTexture('trims', floats(7), 1);
-    this.floatTexture('nodes', floats(12), 4);
+    const cpuNodes = floats(12);
+    this.floatTexture('nodes', cpuNodes, 4);
     this.floatTexture('patches', floats(13), 4);
     const lattices = floats(2), meta = floats(3), table = floats(6), exact = floats(9), other = floats(14);
     this.lattice = (index) => index < 0 ? { cells: 0, shapes: 0, cu: 1, cv: 1, nv: 2, wrap: 0, nu: 2, nodes: 0, shapesAround: 0 }
       : { cells: lattices[index * 12], shapes: lattices[index * 12 + 1], cu: lattices[index * 12 + 2], cv: lattices[index * 12 + 3], nv: lattices[index * 12 + 4], wrap: lattices[index * 12 + 5],
           nu: lattices[index * 12 + 6], nodes: lattices[index * 12 + 7], shapesAround: lattices[index * 12 + 8] };
+    // The nodes on those rows are made here too, and written over the engine's.
+    this.rowsPlaced = null;
+    if (e._tp_rows_given()) {
+      this.rowsPlaced = this.rowPlans[e._tp_rows_scale()];
+      for (const plan of this.rowsPlaced) { plan.nodes = this.rowPlanner.writeNodes(plan.which, this.lattice(plan.which), plan, cpuNodes); }
+    }
     // The admitted u-cells of every lattice, made here from its nodes.
     this.compileCells(lattices);
     const count = e._tp_length(8);
@@ -925,6 +942,16 @@ class TeapotGpu {
 
   // The shaders' surface against the CPU's, at points spread over every part:
   // the largest distance between the two, and the largest angle between their normals.
+  // The rows placed here beside the engine's own plan: rows, errors (the engine's
+  // measure of both plans) and the largest distance between a row and its counterpart.
+  rowsCheck() {
+    if (!this.engine._tp_rows_given()) { return null; }
+    return [0, 1].map((which) => {
+      const made = this.rowPlanner.plan(this.engine, which, 1);
+      return { which, rows: made.rows, error: made.error, measured: made.own.given, ownRows: made.own.rows, ownError: made.own.error, apart: made.own.apart, first: made.own.firstApart };
+    });
+  }
+
   compare(perPart = 1500) {
     const gl = this.gl, e = this.engine;
     if (!this.lastView) { return null; }

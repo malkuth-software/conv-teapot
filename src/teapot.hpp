@@ -75,6 +75,9 @@ struct TeapotOptions {
     // Unified sheets: place rows by CONV's own error (plan_rows_by_error)
     // instead of by the profile's radius of curvature.
     bool rows_by_error = true;
+    // Unified sheets: rows placed elsewhere (the GPU page places them in a
+    // shader) for the body [0] and the lid [1]; used when given.
+    const SheetPlan* given_rows[2] = {nullptr, nullptr};
     // Unified sheets: node rows across a join's band, where it meets the outer
     // wall and where the spout's channel meets the inner wall.
     // join_two_sided: the band's two sides are stored as separate lattices of
@@ -364,8 +367,10 @@ inline Teapot make_teapot(const TeapotOptions& options) {
             }
             const ProfileCurve profile = chain_runs(runs);
             const std::size_t rows = std::string(group) == "body" ? options.sheet_rows : options.sheet_rows * 3 / 4;
-            const SheetPlan plan = options.rows_by_error ? plan_rows_by_error(profile, rows, true)
-                                                         : plan_rows(profile, rows, profile.length / 3000.0, profile.length / 30.0);
+            const SheetPlan* given = options.given_rows[is_body ? 0 : 1];
+            const SheetPlan plan = given != nullptr ? *given
+                                   : options.rows_by_error ? plan_rows_by_error(profile, rows, true)
+                                                           : plan_rows(profile, rows, profile.length / 3000.0, profile.length / 30.0);
             auto part = std::make_unique<TeapotPart>();
             part->name = group;
             part->group = group;

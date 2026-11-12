@@ -1724,6 +1724,48 @@ points of the surface in each direction from the centre of mass) is kept
 as an option; it reaches the same resting pose for the drop within 0.16
 units but is not the same solver.
 
+The body's mass, centre of mass and inertia are computed by a shader
+that sums signed tetrahedra over the faces of the collision hulls. They
+agree with the engine's to $8\times10^{-7}$ (mass, relative),
+$2\times10^{-7}$\,m (centre) and $4\times10^{-6}$ (inertia, relative).
+
+\subsection{Placing the rows}
+
+The rows of the unified teapot's body and lid are placed by CONV's own
+error (Section~\ref{sec:unified}): the wanted spacing at an arc length
+is $(e/h^4)^{-1/4}$ for a cell of length $h$ whose CONV line lies $e$
+from the source meridian, a projective grading turns that spacing into
+rows, and the step is repeated, keeping the plan with the smallest
+error. On the GPU each step is a pass over a small texture. The engine
+hands over the meridian of the sampled patches as a table. One pass
+writes the wanted spacing at each station of each section between
+creases; one texel finds, by 120 steps of bisection, the scale for which
+the gradings hold the asked number of rows; one pass writes each row's
+arc length; one pass admits, for each cell, the two CONV lines through
+the rows and measures their distance from the meridian at seven
+parameters; one pass keeps the better plan. Nine rounds take about
+0.1\,s a sheet. The engine then builds its lattice on the rows handed
+back, and a shader writes the nodes on those rows.
+
+The first plan, which uses the meridian's radius of curvature, agrees
+with the CPU's to $2\times10^{-4}$ to $7\times10^{-4}$ in arc length on
+meridians 8.5 long. The kept plans have the same number of rows (73 and
+55) and nearly the same error, measured on the CPU in 64-bit for both:
+body $6.95\times10^{-4}$ on the GPU's rows against $7.03\times10^{-4}$
+on the CPU's, lid $2.53\times10^{-4}$ against $2.46\times10^{-4}$; at
+the taller height scale, body $6.62\times10^{-4}$ against
+$5.79\times10^{-4}$ and lid $2.25\times10^{-4}$ against
+$2.33\times10^{-4}$. The rows themselves are up to 0.16 apart in arc
+length (0.31 at the taller scale): the rounds produce several plans
+whose errors lie within a few percent of each other, the selections in
+the grading (minimum over neighbours, growth limits) amplify the
+difference between 32-bit and 64-bit arithmetic, and a different plan is
+kept. The nodes the shader writes are within $6\times10^{-7}$ of the
+engine's on the same rows, and the surface check of the shaders against
+the CPU, both on the GPU's rows, stays at $2\times10^{-6}$. The rows of
+the handle and spout, the joins' lattices and the collision hulls are
+still made on the CPU.
+
 \section{Limits}
 
 The variation bound is factorwise and coordinatewise; it does not bound

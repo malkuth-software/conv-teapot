@@ -1,3 +1,4 @@
 out/
 .claude/
 web/index.html
+web/gpu/

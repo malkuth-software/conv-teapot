@@ -26,6 +26,13 @@ public:
     bool bottom_cap = true;
     Version version = Version::v1976;
     bool blinn_scale = true;
+    // Rows of the unified body and lid placed outside the engine (the GPU
+    // page places them in a shader): one plan for each sheet and each height
+    // scale. Until they are given the sheets take the plain plan by curvature.
+    bool rows_outside = false;
+    SheetPlan given_rows[2][2];
+    bool rows_wanted() const { return rows_outside && version == Version::v2026_unified && given_rows[blinn_scale ? 1 : 0][0].row_arc.empty(); }
+    bool rows_given() const { return rows_outside && version == Version::v2026_unified && !given_rows[blinn_scale ? 1 : 0][0].row_arc.empty(); }
     bool show_handle = true, show_spout = true, show_lid = true, show_body = true, show_interior = true;
     int side = 0;      // 0: the whole teapot; 1, 2: cut along its plane of symmetry, one half shown
     bool joins = true; // unified version: blend the handle and spout into the body
@@ -72,6 +79,12 @@ public:
         options.seams = geometry != Geometry::conv_seamless;
         options.circular = geometry == Geometry::conv_round;
         options.closure = geometry == Geometry::conv_seamless ? Closure::paper : Closure::cubic;
+        if (rows_given()) {
+            options.given_rows[0] = &given_rows[blinn_scale ? 1 : 0][0];
+            options.given_rows[1] = &given_rows[blinn_scale ? 1 : 0][1];
+        } else if (rows_wanted()) {
+            options.rows_by_error = false; // a stand-in until the rows arrive
+        }
         teapot_ = make_teapot(options);
         sim.move_nodes = false; // the lattice stays at rest; the pose carries the motion
         sim.build(teapot_);
