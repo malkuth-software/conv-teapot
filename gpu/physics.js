@@ -59,6 +59,11 @@ void main() {
     if (size > limit) { impulse *= limit / size; }
     v += impulse / uMass;
     w += inertia * cross(r, impulse);
+    // The hand also stops the swing about the held point (src/sim.hpp, hold_damping, 4 per second).
+    float decay = 1.0 - 1.0 / (1.0 + h * 4.0);
+    vec3 turn = w * -decay;
+    w += turn;
+    v -= cross(turn, r);
   }
 
   // Contact with the floor. Every point that reaches the floor answers for

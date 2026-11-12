@@ -48,7 +48,7 @@ layout(location = 2) out vec4 outPassV;
 layout(location = 3) out vec4 outPassW;
 
 const float kGravity = 9.81;
-const float kLinearDamping = 0.02, kAngularDamping = 0.05;
+const float kLinearDamping = 0.02, kAngularDamping = 0.05, kHoldDamping = 4.0;
 const float kPushMax = 0.5, kLinearSlop = 0.0005, kSpeculative = 0.002, kBounceFrom = 1.0;
 const float kSleepLinear = 0.004, kSleepAngular = 0.02, kSleepTime = 0.5;
 const float kRegularization = 0.03, kRelaxation = 0.1, kLoose = 1.0e-3, kTight = 1.0e-5;
@@ -334,6 +334,12 @@ void main() {
     if (size > limit) { impulse *= limit / size; }
     V += impulse / uMass;
     W += inverseInertia * cross(r, impulse);
+    // The hand also stops the swing (src/sim.hpp, hold_damping): the turn about the
+    // held point decays, the centre's velocity changed with it so the held point moves as before.
+    float decay = 1.0 - 1.0 / (1.0 + h * kHoldDamping);
+    vec3 turn = W * -decay;
+    W += turn;
+    V -= cross(turn, r);
   }
 
   // Contacts: every hull vertex within the margin of the floor.

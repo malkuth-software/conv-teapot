@@ -31,9 +31,21 @@ int main() {
     sim.grab(held);
     const Vec3 target = held + Vec3{0.0, 6.0, 0.0};
     Vec3 point = held;
-    for (int k = 0; k < 1200; ++k) {
+    // Lifted over two seconds, then held still; how long the swing goes on.
+    double settled = -1.0, last_second = 0.0;
+    Rigid before = sim.pose();
+    for (int k = 0; k < 2400; ++k) {
         sim.drag(held + (target - held) * std::min(1.0, k / 240.0));
         sim.step(1.0 / 120.0);
+        const Rigid now = sim.pose();
+        double turn = 0.0;
+        for (int i = 0; i < 9; ++i) { turn = std::max(turn, std::fabs(now.a[i] - before.a[i])); }
+        before = now;
+        const double spin = turn * 120.0; // about the angular speed, rad/s
+        if (k >= 240) {
+            if (spin > 0.05) { settled = -1.0; } else if (settled < 0.0) { settled = (k - 240) / 120.0; }
+        }
+        if (k >= 2280) { last_second = std::max(last_second, spin); }
     }
     // Where the held node is now: the handle's node with the same index.
     std::size_t index = 0;
@@ -54,6 +66,8 @@ int main() {
     std::printf("grab: held point %.3f from the pointer; body turned %.1f deg; centre of the body %.3f below and %.3f beside the held point (was %.3f beside)\n", miss, tilt,
                 point.y - centre_after.y, sideways, std::hypot(centre_before.x - held.x, centre_before.z - held.z));
     const bool ok = miss < 0.15 && tilt > 45.0 && point.y > centre_after.y && sideways < 0.7; // a moment of a swing that has not died down: 0.59 to 0.61 as the hulls have changed
+    std::printf("grab: held still after the lift, the swing is under 0.05 rad/s from %.2f s on (%s); fastest turn in the last second %.3f rad/s\n",
+                settled, settled < 0.0 ? "never" : "and stays", last_second);
     std::puts(ok ? "grab check passed" : "FAIL grab check");
     return ok ? 0 : 1;
 }

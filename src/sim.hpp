@@ -34,6 +34,8 @@ public:
     // Off, the lattice stays at rest and pose() carries the motion, which
     // is what a renderer should use (see PosedSurface).
     bool move_nodes = true;
+    // How fast a held teapot's swing about the held point dies away (1/s).
+    static constexpr double hold_damping = 4.0;
     // Points of a surface at a list of (u, v), found outside (the GPU page evaluates them in a shader).
     std::function<bool(const ConvSurface&, const std::vector<std::array<double, 2>>&, std::vector<Vec3>&)> positions;
 
@@ -416,7 +418,17 @@ private:
         const double limit = 6.0 * shape_.mass * 9.81 * h;
         const double size = std::sqrt(impulse.x * impulse.x + impulse.y * impulse.y + impulse.z * impulse.z);
         if (size > limit) { impulse = impulse * (limit / size); }
-        world_->add_velocity(body_, impulse * (1.0 / shape_.mass), spin(zc::phys::cross(r, impulse)));
+        Vec3 dv = impulse * (1.0 / shape_.mass), dw = spin(zc::phys::cross(r, impulse));
+        // A hand that holds the teapot also stops it swinging: the turn about the
+        // held point decays at hold_damping per second. The spin is reduced and the
+        // centre's velocity changed with it so that the held point moves as before.
+        // Without this nothing but the solver's 0.05/s angular damping takes the
+        // swing out, and a teapot hung from its handle swings for a minute.
+        const double decay = 1.0 - 1.0 / (1.0 + h * hold_damping);
+        const Vec3 turn = (state.w + dw) * -decay;
+        dw = dw + turn;
+        dv = dv - zc::phys::cross(turn, r);
+        world_->add_velocity(body_, dv, dw);
     }
 
 public:
