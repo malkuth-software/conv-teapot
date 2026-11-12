@@ -94,6 +94,7 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
       <fieldset>
         <legend>GPU</legend>
         <label class="check"><input type="checkbox" data-option="perPixel" checked> surface normal at every pixel</label>
+        <label class="check"><input type="checkbox" data-option="trace" checked> traced rays (shadow edges, the teapot in itself)</label>
         <label class="row">Room light
           <select data-option="roomLight"><option value="2" selected>through what each point sees, plus light gathered from the pot</option><option value="1">through what each point sees</option><option value="0">by the normal alone</option></select></label>
         <label class="row">Shadow map
@@ -128,6 +129,8 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
   const canvas = document.getElementById('view');
   try {
     engine = await TeapotEngine();
+    stats.textContent = 'compiling the shaders…';
+    await new Promise((resolve) => setTimeout(resolve, 30));
     gpu = new TeapotGpu(canvas, engine);
   } catch (error) { stats.textContent = 'Could not start: ' + error.message; return; }
   let width = 960, height = 600, dirty = true, last = performance.now(), smooth = 0, wasRunning = false, measured = 0, remeasure = true;

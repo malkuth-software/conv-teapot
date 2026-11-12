@@ -1642,17 +1642,27 @@ and the polished floor are the CPU renderer's formulas. A cutaway counts
 crossings of the kept half in the stencil buffer, and an odd count shows
 the cut face. The teapot is drawn first for depth alone and then shaded
 at the nearest surface of each pixel, so the surface is evaluated once
-per pixel and not once per layer behind it. Against the CPU ray tracer
-at $960\times600$, the share of pixels that differ by more than 8 of 255
-is 0.23\% for porcelain, 0.23\% with the polished floor, 0.4\% with a
-texture, 0.9\% for a cutaway, and 3.6\% for chrome. The chrome difference
-is the teapot's reflection of itself, which the CPU traces and the
-shaders, like the CPU's baked renderer, do not have; the rest is along
-shadow edges, which here come from a map of $2048^2$ and there from
-traced rays. A frame takes 7\,ms at $960\times600$ and 15\,ms at
-$1920\times1200$ on the laptop used throughout (9\,ms with normals
-carried from the vertices), against 21\,ms for a moving frame and 43 to
-50\,ms for a resting one of the CPU's baked renderer at $960\times600$.
+per pixel and not once per layer behind it.
+
+Two things the CPU does with rays are done with rays here too. A tree of
+boxes over the baked mesh's triangles, at rest, is kept in two textures,
+and a fragment shader walks it with a small stack, nearer box first.
+Where the shadow map's texels around a point disagree, light rays are
+traced from a rotated grid inside the pixel, as on the CPU; and a glossy
+teapot's mirror ray is traced one bounce, the point it reaches being
+shaded as the CPU shades a surface seen at second hand. The rays meet
+the mesh (within $2.5\times10^{-3}$ of the surface), not the surface
+itself.
+
+Against the CPU ray tracer at $960\times600$, the share of pixels that
+differ by more than 8 of 255 is 0.25\% for porcelain, 0.25\% with the
+polished floor, 0.46\% with a texture, 0.56\% for chrome and 0.96\% for a
+cutaway. Without the traced mirror ray chrome differed in 3.6\%. A frame
+takes 11\,ms at $960\times600$ and 18\,ms at $1920\times1200$ on the
+laptop used throughout (14\,ms without traced rays), and 22 and 43\,ms
+for chrome with its traced bounce, against 21\,ms for a moving frame and
+43 to 50\,ms for a resting one of the CPU's baked renderer at
+$960\times600$.
 
 \subsection{Room light without rays}
 

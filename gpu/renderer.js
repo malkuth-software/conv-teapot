@@ -8,10 +8,10 @@ class TeapotGpu {
     if (!gl) { throw new Error('WebGL 2 is not available'); }
     if (!gl.getExtension('EXT_color_buffer_float')) { throw new Error('rendering to float textures (EXT_color_buffer_float) is not available'); }
     this.gl = gl;
-    this.options = { material: 0, gloss: 0, lighting: 1, shadows: 1, ground: 1, wire: 0, texture: 0, mapping: 0, perPixel: 1, shadowSize: 2048, polished: 0, roomLight: 2, directions: 256, gatherDirections: 48, gathers: 5, layers: 6 };
+    this.options = { material: 0, gloss: 0, lighting: 1, shadows: 1, ground: 1, wire: 0, texture: 0, mapping: 0, perPixel: 1, shadowSize: 2048, polished: 0, trace: 1, roomLight: 2, directions: 256, gatherDirections: 48, gathers: 5, layers: 6 };
     // The surface from the lattice at every vertex (used once, to evaluate them, and to check against the CPU);
     // the teapot from those evaluated vertices; the maps of what each point sees of the room.
-    this.conv = this.program(VERTEX_GLSL, FRAGMENT_GLSL, ['vWorld', 'vNormal']);
+    this.conv = this.program(VERTEX_GLSL, PROBE_FRAGMENT_GLSL, ['vWorld', 'vNormal']);
     this.main = this.program(CARRIED_VERTEX_GLSL, FRAGMENT_GLSL);
     this.mapSurface = this.program(MAP_VERTEX_GLSL, MAP_SURFACE_GLSL);
     this.mapOpen = this.program(MAP_VERTEX_GLSL, MAP_OPEN_GLSL);
@@ -88,6 +88,8 @@ class TeapotGpu {
     this.floatTexture('cells', floats(0), 4);
     this.floatTexture('shapes', floats(1), 4);
     this.floatTexture('trims', floats(7), 1);
+    this.floatTexture('treeNodes', floats(10), 4);
+    this.floatTexture('treeTriangles', floats(11), 4);
     const lattices = floats(2), meta = floats(3), table = floats(6), exact = floats(9);
     this.lattice = (index) => index < 0 ? { cells: 0, shapes: 0, cu: 1, cv: 1, nv: 2, wrap: 0 }
       : { cells: lattices[index * 8], shapes: lattices[index * 8 + 1], cu: lattices[index * 8 + 2], cv: lattices[index * 8 + 3], nv: lattices[index * 8 + 4], wrap: lattices[index * 8 + 5] };
@@ -136,6 +138,16 @@ class TeapotGpu {
       x += w + 4;
       shelf = Math.max(shelf, h + 4);
     }
+    // What a traced ray needs of the part it reaches.
+    const partTable = new Float32Array(Math.max(1, this.parts.length) * 16);
+    this.parts.forEach((part, k) => {
+      partTable.set([part.orientation, part.interiorFrom, part.twoSided, 0, part.cells[0], part.cells[1], part.per[0], part.per[1], ...part.rect], k * 16);
+    });
+    if (!this.textures.partTable) { this.textures.partTable = gl.createTexture(); }
+    gl.bindTexture(gl.TEXTURE_2D, this.textures.partTable);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, partTable.length / 4, 1, 0, gl.RGBA, gl.FLOAT, partTable);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     this.evaluateVertices();
     this.roomKey = '';
     return true;
@@ -540,6 +552,15 @@ class TeapotGpu {
 
   roomUniforms(u, view, mode) {
     const gl = this.gl, s = view.state, o = this.options;
+    // Rays traced against the teapot: its tree and where it is.
+    gl.activeTexture(gl.TEXTURE12); gl.bindTexture(gl.TEXTURE_2D, this.textures.treeNodes); gl.uniform1i(u.uTreeNodes, 12);
+    gl.activeTexture(gl.TEXTURE13); gl.bindTexture(gl.TEXTURE_2D, this.textures.treeTriangles); gl.uniform1i(u.uTreeTriangles, 13);
+    gl.activeTexture(gl.TEXTURE14); gl.bindTexture(gl.TEXTURE_2D, this.textures.partTable); gl.uniform1i(u.uPartTable, 14);
+    gl.uniformMatrix3fv(u.uTracePose, false, view.pose);
+    gl.uniform3fv(u.uTraceShift, view.shift);
+    gl.uniform1i(u.uTraceOn, o.trace && mode === 0 ? 1 : 0);
+    gl.uniform1i(u.uTraceCut, s[22] > 0.5 ? 1 : 0);
+    gl.uniform3f(u.uTraceCutNormal, s[0] * s[23] + s[3] * s[24] + s[6] * s[25], s[1] * s[23] + s[4] * s[24] + s[7] * s[25], s[2] * s[23] + s[5] * s[24] + s[8] * s[25]);
     gl.uniform3f(u.uLight, s[19], s[20], s[21]);
     gl.uniform3fv(u.uEye, view.eye);
     gl.uniform1f(u.uGround, s[31]);
@@ -788,6 +809,7 @@ class TeapotGpu {
   // the largest distance between the two, and the largest angle between their normals.
   compare(perPart = 1500) {
     const gl = this.gl, e = this.engine;
+    if (!this.lastView) { return null; }
     let worst = 0, worstAngle = 0, points = 0;
     const identity = { state: this.lastView.state, eye: [0, 0, 0], viewProj: this.lastView.viewProj, lightMatrix: this.lastView.lightMatrix, pose: new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]),
                        shift: [0, 0, 0], shadowX: [1, 0, 0], shadowY: [0, 1, 0], shadowCentre: [0, 0, 0], shadowRadius: 1 };

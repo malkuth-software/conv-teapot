@@ -13,7 +13,7 @@ static tconv::Engine* engine = nullptr;
 namespace {
 
 constexpr int atlas_width = 2048;
-std::vector<float> cells, shapes, lattice_meta, part_meta, vertices, trim_table, trim_data, trim_table_exact;
+std::vector<float> cells, shapes, lattice_meta, part_meta, vertices, trim_table, trim_data, trim_table_exact, tree_nodes, tree_triangles;
 double rest_bounds[4] = {0, 0, 0, 1};
 std::vector<std::uint32_t> indices;
 std::vector<double> state(64, 0.0), evaluated(9, 0.0), body;
@@ -21,6 +21,50 @@ std::uint64_t built_for = 0;
 
 struct LatticeEntry {
     int cells_base, shapes_base;
+};
+
+// A tree of boxes over the baked mesh's triangles at rest, for rays traced in
+// a shader. A node is two texels: (low corner, left child) and (high corner,
+// right child); a leaf has -(first triangle + 1) and the number of triangles
+// in their place. A triangle is eight texels: for each corner (point, u) and
+// (normal, v), then (part, 0, 0, 0) and one unused.
+struct TreeBuilder {
+    struct Item {
+        float low[3], high[3], centre[3];
+        std::uint32_t triangle;
+    };
+    std::vector<Item> items;
+    std::vector<float>& nodes;
+    std::uint32_t build(std::uint32_t first, std::uint32_t count) {
+        const std::uint32_t index = std::uint32_t(nodes.size() / 8);
+        nodes.resize(nodes.size() + 8, 0.0f);
+        float low[3] = {1e30f, 1e30f, 1e30f}, high[3] = {-1e30f, -1e30f, -1e30f};
+        for (std::uint32_t k = first; k < first + count; ++k) {
+            for (int axis = 0; axis < 3; ++axis) {
+                low[axis] = std::min(low[axis], items[k].low[axis]);
+                high[axis] = std::max(high[axis], items[k].high[axis]);
+            }
+        }
+        float left = 0.0f, right = 0.0f;
+        if (count <= 4) {
+            left = -float(first + 1);
+            right = float(count);
+        } else {
+            int axis = 0;
+            for (int k = 1; k < 3; ++k) {
+                if (high[k] - low[k] > high[axis] - low[axis]) { axis = k; }
+            }
+            const std::uint32_t half = count / 2;
+            std::nth_element(items.begin() + first, items.begin() + first + half, items.begin() + first + count,
+                             [axis](const Item& a, const Item& b) { return a.centre[axis] < b.centre[axis]; });
+            left = float(build(first, half));
+            right = float(build(first + half, count - half));
+        }
+        float* node = &nodes[std::size_t(index) * 8];
+        node[0] = low[0]; node[1] = low[1]; node[2] = low[2]; node[3] = left;
+        node[4] = high[0]; node[5] = high[1]; node[6] = high[2]; node[7] = right;
+        return index;
+    }
 };
 
 void pad(std::vector<float>& texels) {
@@ -83,6 +127,42 @@ void build() {
         const Vec3 p = to_body(vertex.p - pose.b);
         low = {std::min(low.x, p.x), std::min(low.y, p.y), std::min(low.z, p.z)};
         high = {std::max(high.x, p.x), std::max(high.y, p.y), std::max(high.z, p.z)};
+    }
+    {
+        // The tree for traced rays.
+        tree_nodes.clear();
+        tree_triangles.clear();
+        TreeBuilder builder{{}, tree_nodes};
+        const std::size_t count = e.mesh.triangle_count();
+        builder.items.resize(count);
+        const auto rest = [&](std::uint32_t v) { return to_body(e.mesh.vertices[v].p - pose.b); };
+        for (std::size_t t = 0; t < count; ++t) {
+            TreeBuilder::Item& item = builder.items[t];
+            item.triangle = std::uint32_t(t);
+            for (int axis = 0; axis < 3; ++axis) {
+                item.low[axis] = 1e30f;
+                item.high[axis] = -1e30f;
+            }
+            for (int corner = 0; corner < 3; ++corner) {
+                const Vec3 p = rest(e.mesh.triangles[t * 3 + std::size_t(corner)]);
+                const float xyz[3] = {float(p.x), float(p.y), float(p.z)};
+                for (int axis = 0; axis < 3; ++axis) {
+                    item.low[axis] = std::min(item.low[axis], xyz[axis]);
+                    item.high[axis] = std::max(item.high[axis], xyz[axis]);
+                }
+            }
+            for (int axis = 0; axis < 3; ++axis) { item.centre[axis] = 0.5f * (item.low[axis] + item.high[axis]); }
+        }
+        if (count > 0) { builder.build(0, std::uint32_t(count)); }
+        tree_triangles.reserve(count * 32);
+        for (const TreeBuilder::Item& item : builder.items) {
+            for (int corner = 0; corner < 3; ++corner) {
+                const MeshVertex& vertex = e.mesh.vertices[e.mesh.triangles[std::size_t(item.triangle) * 3 + std::size_t(corner)]];
+                const Vec3 p = to_body(vertex.p - pose.b), n = to_body(vertex.n);
+                tree_triangles.insert(tree_triangles.end(), {float(p.x), float(p.y), float(p.z), vertex.u, float(n.x), float(n.y), float(n.z), vertex.v});
+            }
+            tree_triangles.insert(tree_triangles.end(), {float(e.mesh.triangle_part[item.triangle]), 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f});
+        }
     }
     const Vec3 centre = (low + high) * 0.5;
     rest_bounds[0] = centre.x; rest_bounds[1] = centre.y; rest_bounds[2] = centre.z;
@@ -191,6 +271,8 @@ EMSCRIPTEN_KEEPALIVE const void* tp_buffer(int kind) {
     case 6: return trim_table.data();
     case 7: return trim_data.data();
     case 9: return trim_table_exact.data();
+    case 10: return tree_nodes.data();
+    case 11: return tree_triangles.data();
     default: return nullptr;
     }
 }
@@ -205,6 +287,8 @@ EMSCRIPTEN_KEEPALIVE int tp_length(int kind) {
     case 6: return int(trim_table.size());
     case 7: return int(trim_data.size());
     case 9: return int(trim_table_exact.size());
+    case 10: return int(tree_nodes.size());
+    case 11: return int(tree_triangles.size());
     case 8: return int(engine->scene_parts().size());
     default: return 0;
     }

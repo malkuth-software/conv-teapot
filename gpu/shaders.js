@@ -466,9 +466,8 @@ float litAt(vec3 p, float bias) {
   return mix(mix(open[0], open[1], ax), mix(open[2], open[3], ax), ay);
 }
 float shadowBias(float nl) { return 0.02 + 0.02 * min(12.0, sqrt(max(0.0, 1.0 - nl * nl)) / nl); }
-vec3 floorColour(vec3 p, float width, float reach, bool shadowed) {
+vec3 floorColour(vec3 p, float width, float reach, float lit) {
   vec3 base = checkerOf(p, width);
-  float lit = shadowed ? litAt(p + vec3(0.0, 0.004, 0.0), 0.02) : 1.0;
   float light = 0.55 + 0.45 * lit * max(0.0, uLight.y);
   float fade = smooth01(18.0, 60.0, reach);
   return mix(base * light, vec3(0.80, 0.84, 0.90), fade);
@@ -476,10 +475,120 @@ vec3 floorColour(vec3 p, float width, float reach, bool shadowed) {
 vec4 encode(vec3 linear) { return vec4(sqrt(clamp(linear, 0.0, 1.0)), 1.0); }   // gamma 2, as the CPU's bytes
 `;
 
+// Rays traced in the shader against the teapot: a tree of boxes over the
+// baked mesh's triangles, at rest, in two textures. The ray is taken into
+// the teapot's frame. Used for what a glossy teapot shows of itself and for
+// shadow edges, where the CPU traces too.
+const TRACE_GLSL = `
+uniform sampler2D uTreeNodes, uTreeTriangles;
+uniform mat3 uTracePose;      // the teapot's rotation
+uniform vec3 uTraceShift;
+uniform int uTraceCut;        // the teapot is cut: what is beyond the plane through its origin is not there
+uniform vec3 uTraceCutNormal; // in the teapot's frame
+uniform int uTraceOn;
+vec4 treeNode(int i) { return texelFetch(uTreeNodes, ivec2(i & 2047, i >> 11), 0); }
+vec4 treeTriangle(int i) { return texelFetch(uTreeTriangles, ivec2(i & 2047, i >> 11), 0); }
+// The nearest triangle along a ray of the room between tMin and tMax (or any, for a shadow).
+bool traceRay(vec3 origin, vec3 direction, float tMin, float tMax, bool any, out float tHit, out int triangle, out vec2 weights) {
+  vec3 o = (origin - uTraceShift) * uTracePose, d = direction * uTracePose;   // into the teapot's frame
+  vec3 inv = 1.0 / mix(d, vec3(1e-20), lessThan(abs(d), vec3(1e-20)));
+  int stack[40];
+  int top = 0;
+  tHit = tMax;
+  triangle = -1;
+  // Where the ray is inside a box, or -1 if it misses it.
+  #define ENTER(a, b, result) { vec3 t0 = (a.xyz - o) * inv, t1 = (b.xyz - o) * inv; vec3 low = min(t0, t1), high = max(t0, t1); \
+    float near = max(max(low.x, low.y), max(low.z, tMin)), far = min(min(high.x, high.y), min(high.z, tHit)); result = near <= far ? near : -1.0; }
+  float entered;
+  { vec4 a = treeNode(0), b = treeNode(1); ENTER(a, b, entered) }
+  if (entered >= 0.0) { stack[top++] = 0; }
+  for (int step = 0; step < 2048 && top > 0; ++step) {
+    int node = stack[--top];
+    vec4 a = treeNode(2 * node), b = treeNode(2 * node + 1);
+    if (a.w >= 0.0) {
+      // The two children: the nearer is taken first, one the ray misses not at all.
+      int left = int(a.w), right = int(b.w);
+      vec4 la = treeNode(2 * left), lb = treeNode(2 * left + 1), ra = treeNode(2 * right), rb = treeNode(2 * right + 1);
+      float nearLeft, nearRight;
+      ENTER(la, lb, nearLeft)
+      ENTER(ra, rb, nearRight)
+      if (top < 38) {
+        if (nearLeft >= 0.0 && nearRight >= 0.0) {
+          stack[top++] = nearLeft < nearRight ? right : left;
+          stack[top++] = nearLeft < nearRight ? left : right;
+        } else if (nearLeft >= 0.0) {
+          stack[top++] = left;
+        } else if (nearRight >= 0.0) {
+          stack[top++] = right;
+        }
+      }
+      continue;
+    }
+    // A leaf reached before a nearer hit was found may be beyond it now.
+    ENTER(a, b, entered)
+    if (entered < 0.0) { continue; }
+    int first = int(-a.w) - 1, count = int(b.w);
+    for (int k = 0; k < count; ++k) {
+      int base = (first + k) * 8;
+      vec3 p0 = treeTriangle(base).xyz, e1 = treeTriangle(base + 2).xyz - p0, e2 = treeTriangle(base + 4).xyz - p0;
+      vec3 pv = cross(d, e2);
+      float det = dot(e1, pv);
+      if (abs(det) < 1e-14) { continue; }
+      vec3 tv = o - p0;
+      float wu = dot(tv, pv) / det;
+      vec3 qv = cross(tv, e1);
+      float wv = dot(d, qv) / det;
+      if (wu < 0.0 || wv < 0.0 || wu + wv > 1.0) { continue; }
+      float t = dot(e2, qv) / det;
+      if (t <= tMin || t >= tHit) { continue; }
+      if (uTraceCut != 0 && dot(uTraceCutNormal, o + d * t) > 0.0) { continue; }
+      tHit = t;
+      triangle = first + k;
+      weights = vec2(wu, wv);
+      if (any) { return true; }
+    }
+  }
+  return triangle >= 0;
+}
+// The lit fraction at p as the CPU finds it: where the shadow map's texels
+// around p agree, their answer; where they differ, light rays traced from a
+// rotated grid inside the pixel (dx, dy: the pixel's extent at p).
+float litTraced(vec3 p, float bias, vec3 dx, vec3 dy) {
+  if (uShadows == 0) { return 1.0; }
+  float coarse = litAt(p, bias);
+  if (uTraceOn == 0) { return coarse; }
+  vec3 d = p - uShadowCentre;
+  float reach = uShadowRadius * (1.0 + 4.0 / uShadowSize);
+  if (abs(dot(d, uShadowX)) > reach || abs(dot(d, uShadowY)) > reach) { return 1.0; }
+  ivec2 at = ivec2(floor((vec2(dot(d, uShadowX), dot(d, uShadowY)) / uShadowRadius * 0.5 + 0.5) * uShadowSize));
+  float sz = -dot(d, uLight);
+  int open = 0, shut = 0;
+  for (int j = -1; j <= 1; ++j) {
+    for (int i = -1; i <= 1; ++i) {
+      ivec2 texel = at + ivec2(i, j);
+      bool outside = texel.x < 0 || texel.y < 0 || texel.x >= int(uShadowSize) || texel.y >= int(uShadowSize);
+      if (outside || sz - bias <= texelFetch(uShadowMap, texel, 0).r) { ++open; } else { ++shut; }
+    }
+  }
+  if (shut == 0) { return 1.0; }
+  if (open == 0) { return 0.0; }
+  float t;
+  int triangle;
+  vec2 weights;
+  float first = traceRay(p + dx * -0.375 + dy * -0.125, uLight, 1e-3, 1e30, true, t, triangle, weights) ? 0.0 : 1.0;
+  float second = traceRay(p + dx * 0.375 + dy * 0.125, uLight, 1e-3, 1e30, true, t, triangle, weights) ? 0.0 : 1.0;
+  if (first == second) { return first; }
+  float third = traceRay(p + dx * 0.125 + dy * -0.375, uLight, 1e-3, 1e30, true, t, triangle, weights) ? 0.0 : 1.0;
+  float fourth = traceRay(p + dx * -0.125 + dy * 0.375, uLight, 1e-3, 1e30, true, t, triangle, weights) ? 0.0 : 1.0;
+  return 0.25 * (first + second + third + fourth);
+}
+`;
+
 const FRAGMENT_GLSL = `#version 300 es
 ${CONV_GLSL}
 ${TRIM_GLSL}
 ${ROOM_GLSL}
+${TRACE_GLSL}
 in vec3 vWorld;
 in vec3 vNormal;
 in vec3 vUvs;
@@ -517,6 +626,66 @@ float lineInk(float coordinate, float period, float gradient, float halfWidth) {
   float scaled = coordinate / period;
   float distance = abs(scaled - floor(scaled + 0.5)) * period / max(gradient, 1e-12);
   return 1.0 - smooth01(halfWidth - 0.5, halfWidth + 0.5, distance);
+}
+
+// Per part, four texels: orientation, interior from, two-sided, 0; cells u, cells v, per u, per v; its rectangle in the maps; 0.
+uniform sampler2D uPartTable;
+// A point of the teapot reached by a mirror ray, shaded as the CPU shades a
+// surface seen at second hand: its own colour, the sun and the room, and for
+// its own gloss only the room.
+vec3 shadeHit(vec3 point, vec3 direction, int triangle, vec2 weights) {
+  int base = triangle * 8;
+  vec4 a0 = treeTriangle(base), a1 = treeTriangle(base + 1), b0 = treeTriangle(base + 2), b1 = treeTriangle(base + 3), c0 = treeTriangle(base + 4), c1 = treeTriangle(base + 5);
+  float wa = 1.0 - weights.x - weights.y;
+  vec2 uv = vec2(a0.w, a1.w) * wa + vec2(b0.w, b1.w) * weights.x + vec2(c0.w, c1.w) * weights.y;
+  int part = int(treeTriangle(base + 6).x);
+  vec4 info = texelFetch(uPartTable, ivec2(part * 4, 0), 0), cells = texelFetch(uPartTable, ivec2(part * 4 + 1, 0), 0), rect = texelFetch(uPartTable, ivec2(part * 4 + 2, 0), 0);
+  vec3 raw = normalize(uPose * (a1.xyz * wa + b1.xyz * weights.x + c1.xyz * weights.y));
+  vec3 normal = raw * info.x;
+  vec3 incoming = normalize(direction), toEye = -incoming;
+  bool back = dot(normal, toEye) < 0.0;
+  if (back) { normal = -normal; }
+  bool inside = back && info.z < 0.5;
+  vec3 base_colour = vec3(0.93, 0.92, 0.89);
+  if (uTextureOn != 0) {
+    float tx, ty;
+    if (uMapping == 1) {
+      tx = -uv.x / max(1.0, cells.z);
+      ty = uv.y / max(1.0, cells.w);
+      ty = ty - floor(ty);
+    } else {
+      tx = 0.70 - uv.x / cells.x * (cells.x >= 16.0 ? 3.0 : 1.0);
+      ty = uv.y / cells.y;
+    }
+    vec3 c, cu, cv;
+    evalLat(uTexture, (tx - floor(tx)) * float(uTexture.cu), clamp(ty, 0.0, 1.0) * float(uTexture.cv), c, cu, cv);
+    base_colour = clamp(c, 0.0, 1.0);
+  }
+  if (inside && uRoomLight == 0) { base_colour *= 0.55; }
+  if (uLighting == 0) { return base_colour; }
+  float nl = dot(normal, uLight);
+  float lit = nl > 0.0 ? litAt(point + normal * 0.02, shadowBias(nl)) : 1.0;
+  vec3 ambient = ambientOf(normal);
+  if (uRoomLight != 0) {
+    vec2 at = (clamp(vec2(uv.x - floor(uv.x / cells.x) * cells.x, uv.y) / cells.xy * rect.zw, vec2(0.5), rect.zw - 0.5) + rect.xy) / vec2(textureSize(uOpenFront, 0));
+    bool backSide = dot(raw, toEye) < 0.0;
+    vec4 seen = backSide ? texture(uOpenBack, at) : texture(uOpenFront, at);
+    vec3 bent = dot(seen.xyz, seen.xyz) > 1e-8 ? uPose * normalize(seen.xyz) : normal;
+    ambient = ambientOf(bent) * clamp(seen.a * uOpenScale, 0.0, 1.0);
+    if (uRoomLight > 1) { ambient += backSide ? texture(uThrownBack, at).rgb : texture(uThrownFront, at).rgb; }
+  }
+  vec3 colour = base_colour * (ambient + vec3(0.80, 0.78, 0.74) * max(0.0, nl) * lit);
+  bool chrome = uMaterial == 1 && uTextureOn == 0;
+  float f0 = chrome ? 0.86 : 0.05;
+  float fresnel = f0 + (1.0 - f0) * fifth(1.0 - max(0.0, dot(normal, toEye)));
+  vec3 reflected = reflect(incoming, normal);
+  if (uGloss != 0) {
+    vec3 tint = chrome ? vec3(0.95, 0.96, 0.98) : vec3(1.0);
+    vec3 under = chrome ? vec3(0.0) : colour;
+    return under * (1.0 - fresnel) + skyOf(point + normal * 2e-3, reflected) * tint * (fresnel * mirrorDim(lit, nl));
+  }
+  vec3 halfway = normalize(uLight + toEye);
+  return colour * (1.0 - 0.6 * fresnel) + environmentOf(reflected) * (0.6 * fresnel) + vec3(0.55 * ninetieth(max(0.0, dot(normal, halfway))) * lit);
 }
 
 void main() {
@@ -588,7 +757,18 @@ void main() {
   vec3 colour = base;
   if (uLighting != 0) {
     float nl = dot(normal, uLight);
-    float lit = nl > 0.0 ? litAt(vWorld + normal * 0.02, shadowBias(nl)) : 1.0;
+    float lit = 1.0;
+    if (nl > 0.0) {
+      // The shadow map's own answer toward the terminator, where a traced ray
+      // meets the surface's own neighbourhood at a glancing angle; the traced
+      // one where the surface faces the light squarely or where something
+      // well clear of it is in the way.
+      float bias = shadowBias(nl);
+      lit = litAt(vWorld + normal * 0.02, bias);
+      float trust = smooth01(0.2, 0.5, nl);
+      if (uTraceOn != 0 && trust < 1.0 && litAt(vWorld + normal * 0.02, 0.3) < 1.0) { trust = 1.0; }
+      if (uTraceOn != 0 && trust > 0.0) { lit += (litTraced(vWorld + normal * 0.02, bias, dFdx(vWorld), dFdy(vWorld)) - lit) * trust; }
+    }
     float diffuse = max(0.0, nl) * lit;
     vec3 ambient = ambientOf(normal);
     if (uRoomLight != 0) {
@@ -613,13 +793,20 @@ void main() {
         // its window above, the floor below with its pattern and the shadow on it.
         vec3 origin = vWorld + normal * 2e-3;
         vec3 mirror;
-        if (facesCavity(vUvs.y) && !leavesCavity(reflected)) {
+        float tHit;
+        int triangle;
+        vec2 weights;
+        float floorAt = uGroundOn != 0 && reflected.y < -1e-9 && origin.y > uGround ? (uGround - origin.y) / reflected.y : 1e30;
+        if (uImage == 0 && uTraceOn != 0 && traceRay(origin, reflected, 1e-3, floorAt, false, tHit, triangle, weights)) {
+          // The teapot shows itself: the point the mirror ray reaches, lit as a surface seen at second hand.
+          mirror = shadeHit(origin + reflected * tHit, reflected, triangle, weights);
+        } else if (uTraceOn == 0 && facesCavity(vUvs.y) && !leavesCavity(reflected)) {
           mirror = vec3(0.27, 0.26, 0.25);
         } else if (uImage == 0 && uGroundOn != 0 && reflected.y < -1e-9 && origin.y > uGround) {
           float reach = (uGround - origin.y) / reflected.y;
           vec3 q = origin + reflected * reach;
           float width = max(length(dFdx(q.xz)), length(dFdy(q.xz)));
-          mirror = floorColour(q, width, reach, true);
+          mirror = floorColour(q, width, reach, litAt(q + vec3(0.0, 0.004, 0.0), 0.02));
         } else {
           mirror = skyOf(origin, reflected);
         }
@@ -661,6 +848,7 @@ precision highp float;
 precision highp int;
 precision highp sampler2D;
 ${ROOM_GLSL}
+${TRACE_GLSL}
 in vec2 vScreen;
 uniform vec3 uForward, uRight, uUp;   // right and up scaled so that forward + x right + y up is the ray at (x, y) in [-1, 1]
 uniform mat4 uViewProj;
@@ -680,7 +868,7 @@ void main() {
   vec3 p = uEye + dir * t;
   float far = length(p - uEye);
   float width = far / (1.0 / length(dFdy(vScreen.y) * uUp)) / max(0.08, abs(uEye.y - p.y) / max(far, 1e-9));
-  vec3 colour = floorColour(p, width, t, uLighting != 0);
+  vec3 colour = floorColour(p, width, t, uLighting != 0 ? litTraced(p + vec3(0.0, 0.004, 0.0), 0.02, dFdx(p), dFdy(p)) : 1.0);
   if (uPolished != 0 && uLighting != 0 && uEye.y > uGround) {
     vec3 unit = normalize(dir);
     vec4 image = texelFetch(uImageMap, ivec2(gl_FragCoord.xy), 0);
@@ -937,4 +1125,15 @@ void main() {
   outFront = front / total;
   outBack = back / total;
 }
+`;
+
+// For reading the surface back (the check against the CPU) and for evaluating the vertices: nothing is shaded.
+const PROBE_FRAGMENT_GLSL = `#version 300 es
+precision highp float;
+in vec3 vWorld;
+in vec3 vNormal;
+in vec3 vUvs;
+uniform int uMode;
+out vec4 outColour;
+void main() { outColour = vec4(uMode == 4 ? vNormal : vWorld, 1.0); }
 `;
