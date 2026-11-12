@@ -128,6 +128,14 @@ public:
     // form: its first and second derivatives vanish at both edges, so the band
     // has there the tangent plane and curvature of the side it lies on.
     std::shared_ptr<ConvSurface> toward;
+    // With `on` and `toward_on` set, the two sides are not lattices of
+    // points but of parameters: this lattice holds, in x and y, where on the
+    // surface `on` side A is, and `toward` holds in x where along the tube
+    // `toward_on` side B is (around it, B has the band's own u). Each side
+    // is then a piece of the surface it names, so the band's edges are on
+    // those surfaces with their normals and curvature, not near them.
+    const Surface* on = nullptr;
+    const Surface* toward_on = nullptr;
     // A band's few rows carry a surface that turns far across it. To whoever
     // samples the surface by its cells (the renderers' lattices, the mesh) it
     // presents `spread` cells for each interval between its rows.
@@ -187,6 +195,20 @@ public:
         SurfacePoint a = eval_own(u, v * scale), b = toward->eval_own(u, v * scale);
         a.dv = a.dv * scale;
         b.dv = b.dv * scale;
+        if (on != nullptr) {
+            // Chain rule through the parameter maps.
+            const SurfacePoint body = on->eval(a.p.x, a.p.y);
+            const SurfacePoint tube = toward_on->eval(u, b.p.x);
+            SurfacePoint side_a, side_b;
+            side_a.p = body.p;
+            side_a.du = body.du * a.du.x + body.dv * a.du.y;
+            side_a.dv = body.du * a.dv.x + body.dv * a.dv.y;
+            side_b.p = tube.p;
+            side_b.du = tube.du + tube.dv * b.du.x;
+            side_b.dv = tube.dv * b.dv.x;
+            a = side_a;
+            b = side_b;
+        }
         const double rows = double(cells_v());
         const double tau = v <= 0.0 ? 0.0 : v >= rows ? 1.0 : v / rows;
         const double beta = tau * tau * tau * (10.0 + tau * (6.0 * tau - 15.0));
@@ -201,7 +223,14 @@ public:
     Vec3 position(double u, double v) const override {
         if (!toward) { return position_own(u, v); }
         const double scale = 1.0 / double(spread);
-        const Vec3 a = position_own(u, v * scale);
+        Vec3 a = position_own(u, v * scale);
+        if (on != nullptr) {
+            const Vec3 b = toward_on->position(u, toward->position_own(u, v * scale).x);
+            a = on->position(a.x, a.y);
+            const double rows = double(cells_v());
+            const double tau = v <= 0.0 ? 0.0 : v >= rows ? 1.0 : v / rows;
+            return a + (b - a) * (tau * tau * tau * (10.0 + tau * (6.0 * tau - 15.0)));
+        }
         const double rows = double(cells_v());
         const double tau = v <= 0.0 ? 0.0 : v >= rows ? 1.0 : v / rows;
         return a + (toward->position_own(u, v * scale) - a) * (tau * tau * tau * (10.0 + tau * (6.0 * tau - 15.0)));

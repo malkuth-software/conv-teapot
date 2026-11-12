@@ -60,6 +60,8 @@ EMSCRIPTEN_KEEPALIVE void tp_set(int key, double value) {
     case 38: e.mesh_options.match_edge_normals = value != 0; break;
     case 39: e.mesh_options.diagonal = int(value); break;
     case 40: e.quick_while_moving = value != 0; break;
+    case 41: e.render.ambient = int(value); e.mesh.lit = false; break;
+    case 42: e.render.plain_inside = value != 0; e.mesh.lit = false; break;
     default: break;
     }
 }

@@ -89,11 +89,13 @@ int main(int argc, char** argv) {
         turn.b = Vec3{0, 0, 0} - turn.direction({0.0, 1.5, 0.0});
         double low = 1e30;
         for (auto& part : teapot.parts) {
+            if (part->conv.on != nullptr) { continue; } // a join's nodes are parameters, not points
             for (const Vec3& node : part->conv.lattice.nodes) { low = std::min(low, turn.point(node).y); }
         }
         turn.b.y -= low;
         if (number("movenodes", 0) != 0) {
             for (auto& part : teapot.parts) {
+                if (part->conv.on != nullptr) { continue; }
                 for (Vec3& node : part->conv.lattice.nodes) { node = turn.point(node); }
                 part->conv.compile();
             }
@@ -162,6 +164,8 @@ int main(int argc, char** argv) {
     options.supersample = int(number("ss", 2));
     options.mesh_lines = number("lines", 0) != 0;
     options.live_reflection = number("live", 1) != 0;
+    options.ambient = int(number("ambient", 0));
+    options.plain_inside = number("plaininside", 0) != 0;
     options.exact_shadows = number("exact", 1) != 0;
     options.wire = Wire(int(number("wire", 0)));
     options.texture = int(number("texture", 0));

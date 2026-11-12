@@ -13,7 +13,7 @@ rows  96  lid   runs 5  length 3.366  lattice 12x73 = 876 nodes, 1 crease rows |
 
 Joins (unified version, default sizes): the band's edge on the body
    parts 8, nodes 2912 (body 876, lid 660, handle 400, spout 592, joins 384)
-   handle_join  edge on the body: gap max 3.72e-04, normal mismatch max 0.818 deg; the join turns the normal by up to 89.7 deg across the band
-   handle_join  edge on the body: gap max 1.62e-04, normal mismatch max 1.088 deg; the join turns the normal by up to 88.9 deg across the band
-   spout_join   edge on the body: gap max 7.94e-04, normal mismatch max 0.833 deg; the join turns the normal by up to 89.6 deg across the band
-   spout_join   edge on the body: gap max 2.28e-04, normal mismatch max 0.422 deg; the join turns the normal by up to 84.0 deg across the band
+   handle_join  edge on the body: gap max 1.06e-07, normal mismatch max 0.005 deg; the join turns the normal by up to 89.7 deg across the band
+   handle_join  edge on the body: gap max 1.22e-07, normal mismatch max 0.005 deg; the join turns the normal by up to 89.0 deg across the band
+   spout_join   edge on the body: gap max 1.17e-07, normal mismatch max 0.005 deg; the join turns the normal by up to 90.0 deg across the band
+   spout_join   edge on the body: gap max 1.13e-07, normal mismatch max 0.005 deg; the join turns the normal by up to 84.1 deg across the band

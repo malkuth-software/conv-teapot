@@ -140,6 +140,12 @@ struct MeshPart {
     double world_around = 0, world_along = 0; // sizes in model units, for the light map's resolution
     LightMap light, light_back;             // the side the normal points to, and the other
     std::vector<float> texel_point, texel_normal; // every texel's point and normal in the body's frame, for finding its light again
+    // How much of the room each point sees past the body, and which way: in
+    // alpha the fraction of its cosine-weighted hemisphere that is open, in
+    // the colour channels the mean open direction in the body's frame.
+    // Coarser than the light map; belongs to the body and holds for any motion.
+    LightMap open, open_back;
+    LightMap bounce, bounce_back; // the light the body throws on each point (RenderOptions::ambient 3)
     double t_of(double v) const {
         const double x = v < 0.0 ? 0.0 : v > double(arc.size() - 1) ? double(arc.size() - 1) : v;
         const std::size_t k = std::min(arc.size() - 2, std::size_t(x));
@@ -151,6 +157,18 @@ struct MeshPart {
         const double span = double(arc[k + 1]) - double(arc[k]);
         return double(k) + (span > 0.0 ? std::min(1.0, std::max(0.0, (t - double(arc[k])) / span)) : 0.0);
     }
+};
+
+// Where the blocked directions of every texel of the open-fraction maps land:
+// for texel `id` (offset[part] + side * texels + index), target[first[id] ..
+// first[id + 1]) are the texels its blocked directions reach, of `cast`
+// directions in all. With every texel's point and outward normal in the
+// body's frame. It belongs to the body; light is gathered through it
+// whenever the room or the sun changes relative to the body.
+struct MeshTransfer {
+    std::vector<std::uint32_t> offset, first, target;
+    std::vector<std::uint8_t> cast;
+    std::vector<float> point, normal;
 };
 
 // The floor as an emitter for reflections: not the floor that is drawn, but
@@ -189,6 +207,11 @@ struct Mesh {
     bool lit_diffuse_only = false;
     double light_turn[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
     Vec3 light_origin;
+    // The light inside the cavity after its bounces, for the part of a
+    // cavity point's hemisphere that the body itself fills.
+    Vec3 cavity_light;
+    MeshTransfer transfer;
+    int ambient = 0; // RenderOptions::ambient at the bake
     FloorEmitter floor;
     std::uint64_t version = 0;   // changes whenever positions change
     std::size_t evaluations = 0; // surface evaluations spent building it

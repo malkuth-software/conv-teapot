@@ -573,8 +573,7 @@ that approach each other. The buried part of the tube and the covered
 part of the body are trimmed in their parameter domains, by a cut around
 the tube and a polygon on the body. The join is stored as its two sides:
 a lattice of 16 by 3 nodes for $A$ and another for $B$, with $\beta$
-evaluated in closed form (the comparison with sampling $C$ itself follows
-Table~\ref{tab:joinedges}). The intersection curve
+evaluated in closed form (described after Table~\ref{tab:joinedges}). The intersection curve
 is found by bisection along each column of the tube against the body's
 radius at that height, which the body's being a surface of revolution
 makes a one-dimensional search.
@@ -596,53 +595,57 @@ replaces.
 \hline
 Join & Gap max & Normal mismatch max\\
 \hline
-Handle, upper & $3.7\times10^{-4}$ & $0.8^\circ$\\
-Handle, lower & $1.6\times10^{-4}$ & $1.1^\circ$\\
-Spout base & $7.9\times10^{-4}$ & $0.8^\circ$\\
-Spout channel, interior & $2.3\times10^{-4}$ & $0.4^\circ$\\
+Handle, upper & $1.1\times10^{-7}$ & $0.005^\circ$\\
+Handle, lower & $1.2\times10^{-7}$ & $0.005^\circ$\\
+Spout base & $1.2\times10^{-7}$ & $0.005^\circ$\\
+Spout channel, interior & $1.1\times10^{-7}$ & $0.005^\circ$\\
 \hline
 \end{tabular}
 \end{table}
 
-The joins agree with the body to about a degree. The band's points are
-found by walking the given distance along each surface in short steps
-that read the surface's own speed, not by one step from the speed at the
-start, which is wrong where rows are graded.
+The band's points are found by walking the given distance along each
+surface in short steps that read the surface's own speed, not by one
+step from the speed at the start, which is wrong where rows are graded.
 
-How the band is stored decides how many nodes it needs. If $C$ itself is
-sampled as a lattice of rows across the band, CONV takes the tangent at
-each edge from the first four rows by a one-sided stencil, and over
-those rows $\beta$ is already rising: the error is all at the two edges
-(Table~\ref{tab:joinstore}), and it took nine rows on the exterior joins
-and seventeen on the interior one to hold them to a few degrees. But
-$\beta$ is known in closed form, and $A$ and $B$ are short walks on
-smooth surfaces. Stored as two lattices of three rows each and blended
-at evaluation, the band has exactly the weight of \eqref{eq:join}, its
-edges have the tangent plane and curvature of the three-row lattice
-they lie on, and that lattice is a quadratic through points of the
-surface over a distance $w$. The four joins take 384 nodes in place of
-704 and are closer to the reference at every join. To whoever samples
-the surface by its cells the band presents four cells for each interval
-between its rows, since it turns the normal through $90^\circ$ across
-two intervals.
+How the band is stored decides how many nodes it needs and how well its
+edges meet the surfaces. If $C$ itself is sampled as a lattice of rows
+across the band, CONV takes the tangent at each edge from the first four
+rows by a one-sided stencil, and over those rows $\beta$ is already
+rising: the normal at the edge was off by $3^\circ$ with nine rows
+(seventeen on the interior join) and by $1^\circ$ with seventeen
+everywhere. But $\beta$ is known in closed form, and $A$ and $B$ are
+short walks on the two surfaces. So the band stores where those walks
+are: for $A$ a lattice of 16 by 3 points of the body's parameter domain,
+for $B$ one coordinate along the tube at each of 16 by 3 places. At
+evaluation CONV interpolates the parameters, the body and the tube are
+evaluated there, and the two are blended with $\beta$. Each side is
+then a piece of the surface it names. At the band's edge the blend
+weight and its first two derivatives vanish, so the band has the body's
+position, normal and curvature there by construction; the measured gap
+of $10^{-7}$ and mismatch of $0.005^\circ$ in Table~\ref{tab:joinedges}
+are the offset at which they were sampled. An earlier version stored
+the two sides as points near the surfaces and met the body within
+$1^\circ$, which chrome showed as a line along the join from some
+angles. The four joins take 384 nodes in place of 704. To whoever
+samples the surface by its cells the band presents four cells for each
+interval between its rows, since it turns the normal through $90^\circ$
+across two intervals.
 
 \begin{table}[H]
-\caption{The four joins against how they are stored. Distance and normal
-are the largest deviations from the two-sided band with 65 rows a side;
-the normal's largest deviation is at the band's edges in every case.}
+\caption{The four joins stored as two sides, against the same with 65
+rows a side: largest distance and largest normal deviation inside the
+band. At the edges the deviation is zero for every row count.}
 \label{tab:joinstore}
 \centering
 \scriptsize
-\begin{tabular}{l|c|cc}
+\begin{tabular}{c|c|cc}
 \hline
-Stored as & Nodes & Distance & Normal\\
+Rows a side & Nodes & Distance & Normal\\
 \hline
-$C$ sampled, 7 rows & 448 & $1.2\times10^{-3}$ & $9.6^\circ$\\
-$C$ sampled, 9 rows (17 interior) & 704 & $4.5\times10^{-4}$ & $3.1^\circ$\\
-$C$ sampled, 17 rows & 1088 & $4.4\times10^{-5}$ & $0.5^\circ$\\
-$A$ and $B$, 2 rows each & 256 & $2.3\times10^{-3}$ & $5.2^\circ$\\
-$A$ and $B$, 3 rows each & 384 & $2.5\times10^{-4}$ & $0.9^\circ$\\
-$A$ and $B$, 4 rows each & 512 & $1.4\times10^{-4}$ & $0.3^\circ$\\
+2 & 256 & $2.8\times10^{-3}$ & $1.1^\circ$\\
+3 & 384 & $4.4\times10^{-4}$ & $0.2^\circ$\\
+4 & 512 & $2.8\times10^{-4}$ & $0.1^\circ$\\
+5 & 640 & $2.0\times10^{-4}$ & $0.1^\circ$\\
 \hline
 \end{tabular}
 \end{table}
@@ -661,8 +664,7 @@ in the cavity that the 2026 model does not have. The part of a tube to
 remove is the part nearer the axis than the wall it meets, at both ends:
 inside the body at the spout's base, inside the cavity at the end of the
 channel. Cut where it crosses the inner wall and blended to the wall
-there, the channel opens flush into the cavity and meets the wall within
-$0.4^\circ$.
+there, the channel opens flush into the cavity.
 Fig.~\ref{fig:unified} shows reflection lines running from the body
 through the join onto the spout without a break.
 
@@ -1311,9 +1313,45 @@ of a moving frame takes 8\,ms with the bake and 13 without (frames of 21
 and 25\,ms), and a frame at rest 51\,ms against 65, or 50 against 71
 with gloss and the floor's reflection on.
 
-This scene's room light is a closed form of the normal. A room with
-content would need it tabulated by direction, and the body's own
-blocking of that light stored per texel; neither is done here.
+\subsection{What each point sees of the room}
+
+The room's diffuse light above is a function of the normal alone, as if
+nothing were in the way. That is wrong wherever the body is in its own
+way: the inside of the teapot received the whole sky, darkened by a
+constant; under the knob, in the gap around the lid and down the spout's
+channel nothing darkened at all. A second bake, optional and at four
+times the texel size, stores for every texel and side the fraction of
+its cosine-weighted hemisphere that 64 rays find open past the body, and
+the mean open direction in the body's frame. Sixteen rays are cast first
+and the rest only if those differ. The set is turned by a different
+angle at each texel and the map is smoothed, so the resolution of 1/64
+shows neither as bands nor as grain. The room's light at a pixel is then
+the open fraction times the room's light from the mean open direction as
+the pose turns it. This holds for any motion of the body.
+
+With that alone the lid, the knob and the channel are shaded by their
+own geometry, and the interior is nearly black: most of what reaches the
+inside of a white pot has bounced off the pot. Two ways of adding that
+were tried. One value for the whole cavity, the light entering it
+divided by what a bounce loses, makes the interior bright and uniform
+and the channel as bright as the cavity. The other keeps, for every
+texel, the texels on which its blocked rays land. This transfer belongs
+to the body. Whenever the sun or the room turns relative to the body,
+the direct light $E_0$ of every texel is found (room light through the
+open fraction, and the sun by the shadow map) and
+$E=E_0+\rho\,T E$ is solved by six gathers through the transfer with
+albedo $\rho=0.9$; $E-E_0$ is stored and added at each pixel. The
+interior then has the level a white cavity in sun should have, and the
+channel and the knob's underside receive what their surroundings throw
+on them. The gather is part of the pass that finds the lit fraction
+again and that pass still takes about 190\,ms. The bake is where the
+cost is: on one thread 0.37\,s without the open fraction, 1.3\,s with
+it and 2.5\,s with the transfer (0.7, 1.9 and 3.3\,s in the browser).
+A frame at rest costs 43, 46 and 48\,ms. While the body turns the
+gathered light is not refreshed; it turns with the body until the body
+rests. The option to leave the surface's pattern off whatever faces the
+cavity is separate. These modes exist only in the baked renderer; the
+ray-traced renderers still use the normal alone.
 
 \subsection{Reflections from emitters}
 

@@ -198,7 +198,9 @@ public:
             for (int k = 0; k < 9; ++k) { turned = turned || std::fabs(mesh.light_turn[k] - pose_now_.a[k]) > 1e-7; }
             if (turned) { renderer.bake_light(scene, camera(), render, frame.width, frame.height, light_texel, true); }
         }
-        if (moving) {
+        if (moving && quick_while_moving) {
+            // Quick frames: one visibility sample per pixel and a smaller shadow map as well as half the size.
+            // With quick frames off a moving frame is drawn exactly as a resting one.
             options.supersample = 1;
             options.shadow_size = 512;
         }

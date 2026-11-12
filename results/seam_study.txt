@@ -5,10 +5,10 @@ lid            12x55    660      0    12.52     52.7      3300      6216      26
 handle         16x25    400     32     3.26    122.7       759      1410      232.8        104
 spout          16x37    592     61     5.79    102.3      1719      3112      297.0        226
 handle_join     16x3     96      0     0.23    421.3       229       400     1004.9          0
-handle_join     16x3     96      0     0.29    334.5       258       458      899.0          0
-spout_join      16x3     96      0     0.76    126.2       319       558      419.5          0
-spout_join      16x3     96      0     0.23    414.0       245       424     1056.6          0
-all                    2912    108    94.62     30.8     13663     25584      144.4
+handle_join     16x3     96      0     0.29    334.5       258       458      898.9          0
+spout_join      16x3     96      0     0.76    126.2       305       530      400.9          0
+spout_join      16x3     96      0     0.23    413.6       243       420     1047.0          0
+all                    2912    108    94.62     30.8     13647     25552      144.2
 
 Rows and vertices within 0.10 of a crease or an end of a sheet
 sheet     creases    rows    near  length near    rows near  vertices near smallest h/median
@@ -19,38 +19,38 @@ spout           0      37       2           6%           5%             5%      
 
 Joins against how they are stored (reference: two sides of 65 rows)
 stored      rows  nodes | join             distance     normal   at edges
-sampled        7    112 | handle_join a    6.71e-04      1.53°      1.53°
-sampled        7    112 | handle_join b    1.18e-03      9.58°      9.58°
-sampled        7    112 | spout_join a     9.65e-04      3.86°      3.86°
-sampled        7    112 | spout_join b     4.48e-04      2.37°      2.37°
+sampled        7    112 | handle_join a    9.52e-04      1.64°      1.64°
+sampled        7    112 | handle_join b    1.37e-03      9.62°      9.62°
+sampled        7    112 | spout_join a     2.69e-03      3.86°      3.86°
+sampled        7    112 | spout_join b     8.86e-04      2.37°      2.37°
                     448   in the four joins; 2976 in the teapot
-sampled        9    144 | handle_join a    3.00e-04      1.12°      1.12°
-sampled        9    144 | handle_join b    4.50e-04      3.10°      3.10°
-sampled        9    144 | spout_join a     3.85e-04      1.27°      1.27°
-sampled       17    272 | spout_join b     1.72e-05      0.45°      0.45°
+sampled        9    144 | handle_join a    6.13e-04      1.48°      1.48°
+sampled        9    144 | handle_join b    7.19e-04      3.18°      3.18°
+sampled        9    144 | spout_join a     2.69e-03      1.57°      1.57°
+sampled       17    272 | spout_join b     6.11e-04      0.61°      0.61°
                     704   in the four joins; 3232 in the teapot
-sampled       17    272 | handle_join a    3.77e-05      0.47°      0.47°
-sampled       17    272 | handle_join b    3.41e-05      0.50°      0.50°
-sampled       17    272 | spout_join a     4.44e-05      0.48°      0.48°
-sampled       17    272 | spout_join b     1.72e-05      0.45°      0.45°
+sampled       17    272 | handle_join a    4.91e-04      0.99°      0.99°
+sampled       17    272 | handle_join b    4.31e-04      0.50°      0.50°
+sampled       17    272 | spout_join a     2.69e-03      0.94°      0.94°
+sampled       17    272 | spout_join b     6.11e-04      0.61°      0.61°
                    1088   in the four joins; 3616 in the teapot
-two sides      2     64 | handle_join a    6.43e-04      1.76°      1.76°
-two sides      2     64 | handle_join b    1.86e-03      4.91°      4.91°
-two sides      2     64 | spout_join a     2.28e-03      5.18°      5.18°
-two sides      2     64 | spout_join b     7.47e-04      3.13°      3.13°
+two sides      2     64 | handle_join a    2.14e-03      1.06°      0.00°
+two sides      2     64 | handle_join b    1.84e-03      0.33°      0.00°
+two sides      2     64 | spout_join a     2.83e-03      0.57°      0.00°
+two sides      2     64 | spout_join b     3.83e-04      0.40°      0.00°
                     256   in the four joins; 2784 in the teapot
-two sides      3     96 | handle_join a    5.92e-05      0.05°      0.04°
-two sides      3     96 | handle_join b    1.90e-04      0.94°      0.94°
-two sides      3     96 | spout_join a     2.54e-04      0.22°      0.22°
-two sides      3     96 | spout_join b     1.60e-05      0.09°      0.09°
+two sides      3     96 | handle_join a    2.58e-04      0.20°      0.00°
+two sides      3     96 | handle_join b    1.86e-04      0.23°      0.00°
+two sides      3     96 | spout_join a     4.40e-04      0.20°      0.00°
+two sides      3     96 | spout_join b     1.99e-05      0.02°      0.00°
                     384   in the four joins; 2912 in the teapot
-two sides      4    128 | handle_join a    2.23e-05      0.03°      0.03°
-two sides      4    128 | handle_join b    1.43e-04      0.32°      0.32°
-two sides      4    128 | spout_join a     1.35e-04      0.31°      0.31°
-two sides      4    128 | spout_join b     6.81e-06      0.07°      0.07°
+two sides      4    128 | handle_join a    3.82e-05      0.04°      0.00°
+two sides      4    128 | handle_join b    9.86e-05      0.04°      0.00°
+two sides      4    128 | spout_join a     2.82e-04      0.08°      0.00°
+two sides      4    128 | spout_join b     6.15e-06      0.01°      0.00°
                     512   in the four joins; 3040 in the teapot
-two sides      5    160 | handle_join a    1.29e-05      0.03°      0.02°
-two sides      5    160 | handle_join b    6.83e-05      0.27°      0.27°
-two sides      5    160 | spout_join a     1.04e-04      0.09°      0.09°
-two sides      5    160 | spout_join b     2.09e-06      0.03°      0.03°
+two sides      5    160 | handle_join a    2.10e-05      0.02°      0.00°
+two sides      5    160 | handle_join b    1.04e-04      0.03°      0.00°
+two sides      5    160 | spout_join a     2.02e-04      0.09°      0.00°
+two sides      5    160 | spout_join b     5.06e-06      0.01°      0.00°
                     640   in the four joins; 3168 in the teapot

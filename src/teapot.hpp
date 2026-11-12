@@ -467,6 +467,8 @@ inline Teapot make_teapot(const TeapotOptions& options) {
                         part->conv.toward->lattice = made.toward;
                         part->conv.toward->bubble = options.bubble;
                         part->conv.spread = 4;
+                        part->conv.on = &body;
+                        part->conv.toward_on = &tube;
                     }
                     part->per_u = part->per_v = 0;
                     part->row_param.assign(part->conv.lattice.nv, 0.0);

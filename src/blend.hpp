@@ -200,9 +200,12 @@ inline JoinResult make_join(const Surface& body, const BodyBranch& branch, bool 
             const Vec3 a = body.position(q[0], q[1]);
             const Vec3 b = tube.position(u, on_tube_at(width * tau));
             if (two_sided) {
-                // The two sides are kept apart and blended at evaluation (ConvSurface::toward).
-                result.blend.at(k, std::size_t(j)) = a;
-                result.toward.at(k, std::size_t(j)) = b;
+                // The two sides are kept apart, as where they are on the body and
+                // along the tube, and blended at evaluation (ConvSurface::toward, on).
+                (void)a;
+                (void)b;
+                result.blend.at(k, std::size_t(j)) = Vec3{q[0], q[1], 0.0};
+                result.toward.at(k, std::size_t(j)) = Vec3{on_tube_at(width * tau), 0.0, 0.0};
             } else {
                 result.blend.at(k, std::size_t(j)) = a * (1.0 - beta(tau)) + b * beta(tau);
             }

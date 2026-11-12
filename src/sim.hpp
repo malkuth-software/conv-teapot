@@ -350,6 +350,11 @@ private:
         std::size_t index = 0;
         for (auto& part : teapot_->parts) {
             Lattice& lattice = part->conv.lattice;
+            if (part->conv.on != nullptr) {
+                // A join's nodes are parameters on the surfaces it joins, not points: they do not move.
+                index += lattice.nodes.size();
+                continue;
+            }
             for (Vec3& node : lattice.nodes) {
                 const zc::phys::Vec3 local = to_physics(rest_[index++]) - shape_.com_offset;
                 node = to_model(pose.p + zc::phys::rotate(pose.q, local));

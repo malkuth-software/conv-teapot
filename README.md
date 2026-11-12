@@ -135,6 +135,20 @@ engine of PlaySuite's rock-stacking game (wrench-transport solver).
   floor's shadow is kept relative to the body and carried along the light.
   While the teapot turns, shadows come from the shadow map, and the lit
   fraction is found again when it rests.
+- **Join edges on the body exactly.** A band's two sides are stored as
+  parameters on the body and along the tube, not as points near them, so
+  each side is a piece of the surface it names and the band's edge has the
+  body's position, normal and curvature (gap 1e-7, mismatch 0.005 degrees).
+- **Room light through what each point sees (experimental, baked renderer).**
+  An optional bake stores per texel the open fraction of its hemisphere and
+  the mean open direction, in the body's frame, and optionally the texels its
+  blocked directions land on, through which the light the teapot throws on
+  itself is gathered. It shades the lid gap, the knob's underside, the spout's
+  channel and the interior by their own geometry. `results/room_light.png`
+  compares the four modes. A separate option leaves the pattern off whatever
+  faces the cavity.
+- **Quick frames off** now means a moving frame is drawn exactly as a resting
+  one.
 - **Arrow keys** fly the camera; Page Up and Page Down raise and lower it,
   Shift slows it, Home returns it.
 - **Collision hulls enclose round parts.** A hull through 12 nodes of a ring
