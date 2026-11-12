@@ -17,7 +17,7 @@ The same teapot as the CPU version, drawn and simulated by WebGL 2.
 | Cutaway | GPU | Crossings of the kept half are counted in the stencil buffer; an odd count shows the cut face. |
 | Room light | GPU | The body is drawn from 256 directions; every texel of a map over the parts looks itself up in each picture: open fraction and mean open direction. |
 | Light the body throws on itself | GPU | For each direction the body is peeled into depth layers, each carrying its light; every texel takes the layer it faces. Repeated five times. |
-| Rigid body | GPU | `physics.js`: one fragment shader run over four texels is one step: gravity, the grab's soft pin, contact with the floor, friction, rolling resistance. The state is read back each frame (13 numbers). The points that can meet the floor are found on the GPU once per teapot: a plane touches a body only at corners of its convex hull, and those are the farthest points of the surface from the centre of mass in their own directions, so every grid point is drawn into a 36 x 36 picture by direction, keeping the farthest. Each point is used with its mirror image in the teapot's plane of symmetry. The engine's hull points can be chosen instead. |
+| Rigid body | GPU | `wrench.js`: PlaySuite's wrench-transport solver, ported to a fragment shader. One run of the shader is one frame of the solver: contact at every hull vertex within the margin of the floor, the impulses each contact retains, the passes of Newton with exact line search on the 6 x 6 system, rolling resistance, restitution, sleep. The body's state is a few texels and each contact vertex keeps its impulses in its own pair of texels. The state is read back each frame. (`physics.js` keeps an earlier, simpler step, selectable in the page.) |
 | Picking | GPU | Part and (u, v) are drawn to a float target and one pixel is read. |
 | Where the nodes are; mass and inertia | CPU (WebAssembly), once per teapot | The teapot itself: which points of the source surface are its nodes (rows placed by bisection on CONV's error), and the body's mass, centre of mass and inertia, which the engine takes from its convex hulls. `main.cpp` hands the nodes over as textures. Nothing on the CPU is evaluated per frame, per vertex or per pixel. |
 
@@ -27,12 +27,15 @@ The same teapot as the CPU version, drawn and simulated by WebGL 2.
 - Picture at 960 x 600 against the CPU ray tracer, share of pixels differing by more than 8 of 255: porcelain 0.25%, polished floor 0.25%, texture 0.39%, chrome 0.55%, cutaway 0.96%.
 - A frame: 12 ms at 960 x 600, 21 ms at 1920 x 1200 (chrome with its traced bounce: 28 and 54 ms), on the laptop used for the paper, from 66 528 grid points and 132 096 triangles.
 - Room light and gathered light against the CPU's baked renderer: mean difference 1 to 2 of 255. The two estimate the same integrals differently (32 rays a texel there, 256 directions for all texels here).
-- Rigid body: the standard drop comes to rest upright and facing the same way in both (the CPU's is turned 0.3 degrees, the GPU's not at all), 0.16 units apart along its path; the GPU's rests with its surface on the floor, the CPU's 0.007 in. The CPU's solver (zc_phys) solves a frame's contacts together; the shader takes, in ten passes, the mean of what each contact point asks for, so the two are not the same step for step.
+- Rigid body: the shader's solver against the CPU's, frame by frame, largest difference of the pose's position over the whole run (model units; the teapot is about 3 high): a drop of 600 frames 2.6e-3 (2026) and 3e-6 (1976); a grab at the handle dragged and released over 360 frames 8e-5; a poke 2e-5 to 4e-5. Both come to rest in the same pose to 3e-4. The shader works in 32-bit floats and stops Newton at a relative gradient of 1e-5 where the CPU stops at 1e-9. A frame of it takes 1.4 to 2.4 ms with the read-back.
 
 ## Not the same
 
 - Traced rays meet the grid's triangles, not the surface itself.
-- For one body the GPU is the slower place for the physics: a frame's steps with the read-back take 6 ms against 0.13 ms on the CPU. The CPU's engine can be chosen in the page.
+
+## Licence
+
+`wrench.js` is a port of PlaySuite's engine (`third_party/zc_phys`) and is under PlaySuite's licence, not MIT; see `third_party/zc_phys/PROVENANCE.md`. The rest of this folder is MIT like the repository.
 
 ## Build
 

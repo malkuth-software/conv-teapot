@@ -296,10 +296,11 @@ class TeapotPhysics {
     this.running = true;
     this.still = 0;
   }
+  moveHold(point) { if (this.grab) { this.grab.target = point; } }
   // A push: a change of velocity at a point along a direction.
   poke(point, direction, speed) {
     const s = this.state;
-    const arm = [point[0] - s[0], point[1] - s[1], point[2] - s[2]], push = direction.map((d) => d * speed);
+    const arm = [point[0] - s[0], point[1] - s[1], point[2] - s[2]], push = direction.map((d) => d * speed / 0.07);   // speed in m/s; a model unit is 0.07 m
     const r2 = this.pokeRadius * this.pokeRadius;
     s[8] += push[0]; s[9] += push[1]; s[10] += push[2];
     s[12] += (arm[1] * push[2] - arm[2] * push[1]) / r2;

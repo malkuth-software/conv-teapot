@@ -291,6 +291,23 @@ EMSCRIPTEN_KEEPALIVE const double* tp_body() {
     for (const tconv::Vec3& p : sim.collision_points()) { body.insert(body.end(), {p.x, p.y, p.z}); }
     return body.data();
 }
+// The body as the engine's own solver has it, in the engine's frame (metres, z up,
+// origin at the centre of mass): mass, radius, centre of mass in the input frame (3),
+// inertia (9), friction, restitution, rolling resistance, frame time, number of
+// hull vertices; then each vertex with the index of its hull.
+EMSCRIPTEN_KEEPALIVE const double* tp_solver_body() {
+    const zc::phys::Shape& shape = engine->sim.shape();
+    body = {shape.mass, shape.radius, shape.com_offset.x, shape.com_offset.y, shape.com_offset.z};
+    body.insert(body.end(), shape.inertia.begin(), shape.inertia.end());
+    body.insert(body.end(), {shape.friction, shape.restitution, shape.rolling_resistance, engine->sim.world_params().frame_dt});
+    std::size_t count = 0;
+    for (const auto& hull : shape.hulls) { count += hull.vertices.size(); }
+    body.push_back(double(count));
+    for (std::size_t h = 0; h < shape.hulls.size(); ++h) {
+        for (const zc::phys::Vec3& v : shape.hulls[h].vertices) { body.insert(body.end(), {v.x, v.y, v.z, double(h)}); }
+    }
+    return body.data();
+}
 // The pose from that simulation: rotation by rows, then translation.
 EMSCRIPTEN_KEEPALIVE void tp_pose(double a0, double a1, double a2, double a3, double a4, double a5, double a6, double a7, double a8, double x, double y, double z) {
     tconv::Rigid pose;

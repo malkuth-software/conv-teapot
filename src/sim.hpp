@@ -235,6 +235,9 @@ public:
     // inverse of the inertia about it (per kg unit^2), and the radius the
     // poke turns by.
     const std::vector<Vec3>& collision_points() const { return collision_points_; }
+    // The cooked shape and the world's settings, in the engine's own frame and units, for the same solver run elsewhere.
+    const zc::phys::Shape& shape() const { return shape_; }
+    const zc::phys::WorldParams& world_params() const { return world_->params(); }
     Vec3 centre_of_mass() const { return to_model(shape_.com_offset); }
     double poke_radius() const { return shape_.radius / metres; }
     std::array<double, 9> inverse_inertia_model() const {

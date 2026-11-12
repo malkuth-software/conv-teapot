@@ -1532,6 +1532,7 @@ boundaries and the bands, which is removed from the count. Geometry in
 the removed half casts no shadow, so light reaches the interior. 
 
 \section{Motion}
+\label{sec:motion}
 
 Since every node is a surface point, the collision shape of the teapot
 can be taken from the lattice with no separate model: the convex hull of
@@ -1692,35 +1693,36 @@ different samples.
 
 \subsection{The rigid body}
 
-The teapot's state is thirteen numbers in four texels, and one fragment
-shader run over them is one step of 1/240\,s: gravity, the grab's soft
-pin (the same implicit impulse as on the CPU), contact with the floor,
-friction, rolling resistance and damping, with the CPU engine's
-parameters. The floor is a plane and the collision shape is convex
-hulls, so the contacts are the hull's corners that reach the floor, and
-the shader goes over all the candidate points. Each point that approaches the floor
-answers from the velocity the pass began with, by the impulse that stops
-it and the friction that impulse allows, and the body takes the mean of
-the answers, ten times. Taking the answers one after another depended on
-the order of the points and sent a teapot dropped in its plane of
-symmetry out of that plane; the mean does not. A body in the floor is
-lifted out by position, not by a velocity it would keep. This is not the
-CPU's solver, which solves a frame's contacts together, and the two are
-not expected to agree step for step. The points that can meet the floor
-are found on the GPU as well. A plane touches a body only at corners of
-its convex hull, and a corner of the hull is the farthest point of the
-surface from the centre of mass in its own direction. So every grid
-point is drawn once into a picture of $36\times36$ texels by its
-direction from the centre of mass, with its distance as depth, farthest
-in front, and the 1296 points that remain take the place of the
-engine's hulls. Each is used with its mirror image in the teapot's plane
-of symmetry, so that a teapot dropped in that plane has nothing to turn
-it out of it. With these points the standard drop comes to rest upright
-and unturned, 0.16 units from where the CPU's does, with its surface on
-the floor, where the hulls leave it 0.007 in. For one body the GPU is the slower
-place: a frame's steps with the read-back of the state take 6\,ms,
-against 0.13\,ms on the CPU, most of it waiting for the frame being
-drawn to finish.
+The CPU version's rigid-body engine (Section~\ref{sec:motion}) solves a
+frame's contacts together: each contact point keeps the impulse it
+carried last, and a frame runs a few passes, each minimising over the
+body's twist a convex cost by Newton's method with an exact line search.
+That solver is ported to a fragment shader. One run of the shader is one
+frame. The contacts are the hull vertices within the margin of the
+floor; the frame's rows live in arrays inside the shader; the Newton
+system is $6\times6$, since there is one body, and is solved by
+elimination; the line search is the CPU's. A fragment can write only its
+own texel, so the body's new state, a few texels, is written by
+fragments that each run the frame, and the impulses the contact points
+retain are a pair of texels per hull vertex, each vertex in contact
+running the same frame again and keeping its own. The frame is
+deterministic, so they agree. Numbers are 32-bit floats, and Newton
+stops at a relative gradient of $10^{-5}$ where the CPU stops at
+$10^{-9}$.
+
+The two were run side by side, frame by frame. Over a drop of 600 frames
+the pose's position differs by at most $2.6\times10^{-3}$ model units
+for the 2026 teapot and $3\times10^{-6}$ for the 1976 one (the teapot is
+about 3 units high); over a grab at the handle, dragged and released,
+360 frames, by $8\times10^{-5}$; over a poke, by $2\times10^{-5}$ to
+$4\times10^{-5}$. Both come to rest in the same pose to
+$3\times10^{-4}$. A frame of the shader's solver takes 1.4 to 2.4\,ms
+with the read-back of the state, against 0.13\,ms on the CPU. An
+earlier, simpler step (a mean over the contact points of the impulse
+each asks for, with contact points found on the GPU as the farthest
+points of the surface in each direction from the centre of mass) is kept
+as an option; it reaches the same resting pose for the drop within 0.16
+units but is not the same solver.
 
 \section{Limits}
 
