@@ -704,14 +704,21 @@ private:
         const float z_min = std::min({a[2], b[2], c[2]});
         const float z_max = std::max({a[2], b[2], c[2]});
         const float z_low = z_min - 0.25f * (z_max - z_min) - 1e-3f * z_min;
+        // What does not change along a row, or over the triangle, is found before the pixels: the
+        // corners as doubles, the row's own differences, the edges' margins, one reciprocal.
+        const double ax = a[0], ay = a[1], bx = b[0], by = b[1], cx = c[0], cy = c[1];
+        const double margin_a = -dilate * len_a, margin_b = -dilate * len_b, margin_c = -dilate * len_c;
+        const double per_area = 1.0 / area;
         for (int y = y0; y <= y1; ++y) {
+            const double py = y + 0.5;
+            const double cy_py = cy - py, by_py = by - py, ay_py = ay - py;
             for (int x = x0; x <= x1; ++x) {
-                const double px = x + 0.5, py = y + 0.5;
-                const double e_a = (double(b[0]) - px) * (double(c[1]) - py) - (double(b[1]) - py) * (double(c[0]) - px);
-                const double e_b = (double(c[0]) - px) * (double(a[1]) - py) - (double(c[1]) - py) * (double(a[0]) - px);
+                const double px = x + 0.5;
+                const double e_a = (bx - px) * cy_py - by_py * (cx - px);
+                const double e_b = (cx - px) * ay_py - cy_py * (ax - px);
                 const double e_c = area - e_a - e_b;
-                if (sign * e_a < -dilate * len_a || sign * e_b < -dilate * len_b || sign * e_c < -dilate * len_c) { continue; }
-                const double w_a = e_a / area, w_b = e_b / area, w_c = e_c / area;
+                if (sign * e_a < margin_a || sign * e_b < margin_b || sign * e_c < margin_c) { continue; }
+                const double w_a = e_a * per_area, w_b = e_b * per_area, w_c = e_c * per_area;
                 Candidate candidate;
                 candidate.u = float(w_a * a[3] + w_b * b[3] + w_c * c[3]);
                 candidate.v = float(w_a * a[4] + w_b * b[4] + w_c * c[4]);

@@ -1,0 +1,43 @@
+CPU renderer audit, 2026-11-12
+host: Apple A18 Pro (2 performance and 4 efficiency cores); Apple clang; flags -O3 -ffp-contract=off
+load averages while measured: about 6 (other work on the machine); every figure is the best of four
+alternated runs of the build before (b6eabe8) and after, five frames each
+view: the unified teapot, 2912 nodes, 960x600, default camera
+
+What was changed (each gives the same picture, byte for byte, as the build before on one thread):
+  1. The surface evaluation carries two numbers through the admission across the rows (value and
+     d/du), not three: the rows' values do not depend on the parameter across, whose derivative
+     comes from the basis alone.  tools/eval_bench: 374 -> 275 ns an evaluation, same sums.
+  2. Predictions: the lattice's cells are filed once under bands of eight rows; bands are handed
+     out a few at a time.  Before, each of 24 bands scanned every cell, and six threads took one
+     chunk each, so an efficiency core set the time.
+  3. Predictions: what does not change along a row or over a triangle is found before the pixel
+     loop (corners as doubles, the row's differences, the edges' margins, one reciprocal).
+  4. A trim's loop is tested against its box first.
+  5. The capacity threshold returns its first form when the mass is under 4.5 times the smallest
+     capacity (taken in over 90% of cells; no time gained by itself).
+
+Found on the way: the band test allowed one row beyond a cell where a prediction can reach two, so
+a few predictions were lost at each band's edge and the picture depended on the number of threads
+(419 130 candidates on one thread, 419 104 on six). With two rows it does not.
+
+Before -> after:
+method=transport                             total   94.5 ->   59.9 ms  (predict  22.9 ->  11.8, solve+shade   67.2 ->   47.1)
+method=transport threads=1                   total  291.6 ->  183.7 ms  (predict  37.5 ->  35.0, solve+shade  252.9 ->  147.4)
+method=transport gloss=1 material=1          total  161.0 ->  114.4 ms  (predict  24.4 ->  12.0, solve+shade  134.6 ->  101.6)
+method=transport gloss=1 material=1 floor=1  total  219.1 ->  150.5 ms  (predict  54.0 ->  24.5, solve+shade  163.0 ->  122.5)
+method=independent                           total  141.8 ->  114.5 ms  (predict   0.0 ->   0.0, solve+shade  139.5 ->  112.3)
+method=raster light=1                        total   18.5 ->   17.5 ms  (predict   6.7 ->   6.0, solve+shade   11.5 ->   11.3, bake 427 -> 414, mesh 76 -> 45)
+
+Tried and withdrawn (no time gained, same pictures): skipping boxes wholly behind the tangent plane
+a mirror or bake ray leaves, and testing each box of the per-ray tree once. The boxes such a ray
+meets are the ones round its own origin, which straddle that plane.
+
+Not done, with what was measured about each:
+  - Edge samples: 7242 edge pixels cost 74 000 solves and 187 000 evaluations, as much as all the
+    other pixels together (aa=0: 53 ms; aa=1: 69 ms before these changes).
+  - The admission itself is most of an evaluation (compile_cell: about a quarter of a frame).
+  - Mirror and bake rays walk the boxes round their own origin; on the GPU the gain came from
+    knowing which cells are clear of their own part, which needs a tree per part here.
+  - With gloss the picture still depends on the number of threads (1078 pixels by at most 3 of 255
+    between one thread and six), before and after.

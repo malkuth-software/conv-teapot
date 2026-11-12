@@ -1071,6 +1071,35 @@ more. Right: a checker mapped in patch coordinates.}
 \label{fig:work}
 \end{figure}
 
+\subsection{An audit of the loops}
+
+The loops of the CPU renderer were read against a list of what makes a
+tight kernel fast: bookkeeping paid once per block, each datum found
+once, the shape fixed before the loop, and work handed out so that no
+core waits for another. Five changes came of it, each giving the same
+picture byte for byte on one thread. A surface point carried its value
+and both derivatives through the admission across the rows; the rows'
+values do not depend on the parameter across them, whose derivative
+comes from the basis alone, so the admission now carries two numbers
+and an evaluation takes 275\,ns where it took 374. The predictions were
+written by 24 bands of rows that each scanned every lattice cell, with
+six threads taking one chunk each, so that on a processor with two fast
+cores and four slow ones a slow core set the time; the cells are now
+filed once under bands of eight rows, which are handed out a few at a
+time. In the prediction's pixel loop, what is constant along a row or
+over a triangle is found before it. A trim's loop is tested against its
+box first. For the unified teapot at $960\times600$ a frame by transport
+went from 94 to 60\,ms on six threads and from 292 to 184\,ms on one,
+chrome from 161 to 114\,ms, and the per-ray method from 142 to 115\,ms,
+on a loaded machine, best of alternated runs
+(\texttt{results/cpu\_audit.txt}). The baked renderer's frame did not
+change. One defect was found: the band test allowed one row beyond a
+cell where a prediction can reach two, so a few predictions were lost at
+each band's edge and the picture depended on the number of threads.
+Skipping tree boxes behind the tangent plane a mirror ray leaves gained
+nothing, since the boxes such a ray meets are those round its own
+origin, and was withdrawn.
+
 \section{Baked Vertices}
 \label{sec:baked}
 
