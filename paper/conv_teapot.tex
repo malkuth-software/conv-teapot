@@ -1610,10 +1610,10 @@ drawn from its lattice at rest, carried by the body's pose.}
 \label{sec:gpu}
 
 A second version of the demonstration draws and simulates the same
-teapot with WebGL~2. The lattices, the placement of rows, the $(u,v)$
-layout of the mesh and the collision hulls are made once per teapot on
-the CPU, as before, and handed over as textures and buffers. What is
-computed for a frame is computed in shaders.
+teapot with WebGL~2. The CPU makes the teapot, that is, places its
+nodes, and hands the nodes over as textures. Everything after that is
+computed in shaders: the surface, the mesh it is drawn from, the tree
+its rays walk, its light, and its motion.
 
 \subsection{CONV in a shader}
 
@@ -1630,9 +1630,11 @@ each choice the derivative of the value chosen, which is what the CPU's
 dual numbers do; the derivative along $v$ is the derivative of the
 basis. A band between two parts evaluates its two parameter lattices,
 then the body and the tube there, and blends them. The surface is
-evaluated at every vertex once, the points being kept on the GPU by
-transform feedback and carried by the pose in each frame, and again at
-every pixel for the normal. Numbers are 32-bit floats. At 12\,000
+evaluated once at every point of a grid over each part, the grid's
+steps dividing the node intervals evenly, into a texture; there is no
+vertex buffer, a vertex's number saying which cell and corner of the
+grid it is, and each frame carries the points by the pose. It is
+evaluated again at every pixel for the normal. Numbers are 32-bit floats. At 12\,000
 points spread over the parts the shader's surface is within
 $2.3\times10^{-6}$ of the CPU's and its normal within $0.027^\circ$. The
 B\'ezier patches and the control mesh are evaluated in the shader too,
@@ -1648,25 +1650,26 @@ the cut face. The teapot is drawn first for depth alone and then shaded
 at the nearest surface of each pixel, so the surface is evaluated once
 per pixel and not once per layer behind it.
 
-Two things the CPU does with rays are done with rays here too. A tree of
-boxes over the baked mesh's triangles, at rest, is kept in two textures,
-and a fragment shader walks it with a small stack, nearer box first.
-Where the shadow map's texels around a point disagree, light rays are
-traced from a rotated grid inside the pixel, as on the CPU; and a glossy
-teapot's mirror ray is traced one bounce, the point it reaches being
-shaded as the CPU shades a surface seen at second hand. The rays meet
-the mesh (within $2.5\times10^{-3}$ of the surface), not the surface
-itself.
+Two things the CPU does with rays are done with rays here too. Over the
+cells of the grid stands a pyramid of boxes, each level a quarter of the
+one below, which the GPU makes by taking the smallest and largest corner
+of four boxes at a time; a fragment shader walks it with a small stack,
+nearer box first. Where the shadow map's texels around a point disagree,
+light rays are traced from a rotated grid inside the pixel, as on the
+CPU; and a glossy teapot's mirror ray is traced one bounce, the point it
+reaches being shaded as the CPU shades a surface seen at second hand.
+The rays meet the grid's triangles, not the surface itself.
 
 Against the CPU ray tracer at $960\times600$, the share of pixels that
 differ by more than 8 of 255 is 0.25\% for porcelain, 0.25\% with the
-polished floor, 0.46\% with a texture, 0.56\% for chrome and 0.96\% for a
-cutaway. Without the traced mirror ray chrome differed in 3.6\%. A frame
-takes 11\,ms at $960\times600$ and 18\,ms at $1920\times1200$ on the
-laptop used throughout (14\,ms without traced rays), and 22 and 43\,ms
-for chrome with its traced bounce, against 21\,ms for a moving frame and
-43 to 50\,ms for a resting one of the CPU's baked renderer at
-$960\times600$.
+polished floor, 0.39\% with a texture, 0.55\% for chrome and 0.96\% for a
+cutaway. Without the traced mirror ray chrome differed in 3.6\%. The
+unified teapot is 66\,528 grid points and 132\,096 triangles. A frame
+takes 12\,ms at $960\times600$ and 21\,ms at $1920\times1200$ on the
+laptop used throughout (8\,ms at $960\times600$ without traced rays),
+and 28 and 54\,ms for chrome with its traced bounce, against 21\,ms for
+a moving frame and 43 to 50\,ms for a resting one of the CPU's baked
+renderer at $960\times600$.
 
 \subsection{Room light without rays}
 
@@ -1706,14 +1709,14 @@ CPU's solver, which solves a frame's contacts together, and the two are
 not expected to agree step for step. The standard drop comes to rest
 upright in both, at the same height, 0.16 units apart and turned
 $4.7^\circ$ about the vertical. The points that meet the floor
-need not be the hulls' either. In a second mode every vertex the GPU has
-evaluated is drawn, each step, into a picture of $64\times64$ texels by
+need not be the hulls' either. In a second mode every grid point is drawn, each step, into a picture of $64\times64$ texels by
 its direction from the centre of mass, with its height as depth, so that
 each texel keeps the lowest point of the surface in its direction, and
-the contact pass goes over those. No hull is used; the teapot then rests
-with its surface on the floor, where the hulls leave it 0.007 in, and
-the standard drop again ends upright. It costs about 15\,ms a frame
-against 4. For one body the GPU is the slower
+the contact pass goes over those. No hull is used, and the teapot rests
+with its surface on the floor, where the hulls leave it 0.007 in. The
+standard drop is sensitive to which points make contact: in this mode
+it has ended upright with one grid and resting on its lid with another.
+It costs about 15\,ms a frame against 4 to 7. For one body the GPU is the slower
 place: a frame's steps with the read-back of the state take 6\,ms,
 against 0.13\,ms on the CPU, most of it waiting for the frame being
 drawn to finish.

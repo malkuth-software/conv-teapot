@@ -105,8 +105,6 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
           <select data-option="roomLight"><option value="2" selected>through what each point sees, plus light gathered from the pot</option><option value="1">through what each point sees</option><option value="0">by the normal alone</option></select></label>
         <label class="row">Shadow map
           <select data-option="shadowSize"><option value="1024">1024</option><option value="2048" selected>2048</option><option value="4096">4096</option></select></label>
-        <label class="row">Mesh
-          <select data-engine="28"><option value="0.01">coarse (1e-2)</option><option value="0.0025" selected>fine (2.5e-3)</option><option value="0.0006">finer (6e-4)</option></select></label>
         <label class="row">Size
           <select id="size"><option>640x400</option><option selected>960x600</option><option>1280x800</option></select></label>
         <button id="check">Check against the CPU</button>
@@ -214,7 +212,7 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
       stats.textContent = `${measured.toFixed(1)} ms/frame on the GPU at ${canvas.width}\u00d7${canvas.height}` +
         (running ? (onGpu() ? ` · physics on the GPU: ${physics.steps} steps over ${physics.count} points, ${physics.stepMs.toFixed(2)} ms with the read-back`
                             : ` · physics ${state[29].toFixed(2)} ms, ${state[28]} contacts`) : '') + `\n` +
-        `${state[30]} nodes · ${gpu.vertexCount} vertices · ${gpu.triangleCount} triangles, each vertex and pixel evaluated from the lattice\n` +
+        `${state[30]} nodes · ${gpu.vertexCount} grid points · ${gpu.triangleCount} triangles, each grid point and pixel evaluated from the lattice on the GPU\n` +
         (gpu.roomMs ? `room light: ${gpu.options.directions} directions in ${gpu.roomMs.toFixed(0)} ms` + (gpu.thrownMs ? `, gathered in ${gpu.thrownMs.toFixed(0)} ms` : '') + ` · ` : '') +
         (check ? `shaders against the CPU at ${check.points} points: largest distance ${check.worst.toExponential(2)}, largest angle between normals ${check.worstAngle.toFixed(4)}\u00b0`
                : 'not yet checked against the CPU');

@@ -138,8 +138,8 @@ void main() {
 const CANDIDATE_VERTEX_GLSL = `#version 300 es
 precision highp float;
 precision highp sampler2D;
-layout(location = 2) in vec3 aPoint;
-uniform sampler2D uState;
+uniform sampler2D uState, uGridPoints, uGridNormals;
+uniform vec4 uRect;
 uniform vec3 uCom;
 uniform float uGround;
 out vec3 vRest;
@@ -147,12 +147,15 @@ vec3 turnBy(vec4 q, vec3 v) { return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.
 void main() {
   vec3 x = texelFetch(uState, ivec2(0, 0), 0).xyz;
   vec4 q = texelFetch(uState, ivec2(1, 0), 0);
+  ivec2 texel = ivec2(int(uRect.x) + gl_VertexID % int(uRect.z), int(uRect.y) + gl_VertexID / int(uRect.z));
+  vec3 aPoint = texelFetch(uGridPoints, texel, 0).xyz;
   vec3 arm = aPoint - uCom;
   float height = x.y + turnBy(q, arm).y - uGround;
   vec3 d = arm / max(1e-9, abs(arm.x) + abs(arm.y) + abs(arm.z));
   vec2 at = d.y >= 0.0 ? d.xz : (1.0 - abs(d.zx)) * vec2(d.x >= 0.0 ? 1.0 : -1.0, d.z >= 0.0 ? 1.0 : -1.0);
   vRest = aPoint;
   gl_Position = vec4(at * (63.0 / 64.0), clamp(height / 20.0, -0.99, 0.99), 1.0);
+  if (texelFetch(uGridNormals, texel, 0).a < 0.5) { gl_Position = vec4(2.0, 2.0, 2.0, 1.0); }   // under a join: not part of the surface
   gl_PointSize = 1.0;
 }
 `;
@@ -329,8 +332,13 @@ class TeapotPhysics {
         gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.states[0].texture); gl.uniform1i(c.uState, 0);
         gl.uniform3fv(c.uCom, this.com);
         gl.uniform1f(c.uGround, ground);
-        gl.bindVertexArray(this.gpu.carriedVao);
-        gl.drawArrays(gl.POINTS, 0, this.gpu.vertexCount);
+        gl.activeTexture(gl.TEXTURE12); gl.bindTexture(gl.TEXTURE_2D, this.gpu.targets.mapSurface.first); gl.uniform1i(c.uGridPoints, 12);
+        gl.activeTexture(gl.TEXTURE13); gl.bindTexture(gl.TEXTURE_2D, this.gpu.targets.mapSurface.second); gl.uniform1i(c.uGridNormals, 13);
+        gl.bindVertexArray(this.gpu.emptyVao);
+        for (const part of this.gpu.parts) {
+          gl.uniform4fv(c.uRect, part.rect);
+          gl.drawArrays(gl.POINTS, 0, part.rect[2] * part.rect[3]);
+        }
         gl.disable(gl.DEPTH_TEST);
         gl.depthFunc(gl.LEQUAL);
         gl.useProgram(this.step.program);
