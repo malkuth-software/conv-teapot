@@ -502,6 +502,7 @@ uniform sampler2D uThrownFront, uThrownBack;   // the light the body throws on e
 uniform sampler2D uDirectFront, uDirectBack;   // the light each texel has from the room and the sun
 uniform sampler2D uPrevLayer;                  // peeling: the layer taken last
 uniform int uPeel;                             // peeling: how many layers are taken
+uniform int uImage;                            // drawing the image in a polished floor: a second bounce shows only the room
 out vec4 outColour;
 
 // Where this point is in the maps laid over the parts.
@@ -614,7 +615,7 @@ void main() {
         vec3 mirror;
         if (facesCavity(vUvs.y) && !leavesCavity(reflected)) {
           mirror = vec3(0.27, 0.26, 0.25);
-        } else if (uGroundOn != 0 && reflected.y < -1e-9 && origin.y > uGround) {
+        } else if (uImage == 0 && uGroundOn != 0 && reflected.y < -1e-9 && origin.y > uGround) {
           float reach = (uGround - origin.y) / reflected.y;
           vec3 q = origin + reflected * reach;
           float width = max(length(dFdx(q.xz)), length(dFdy(q.xz)));
@@ -632,7 +633,7 @@ void main() {
       }
     }
   }
-  if (uWire != 0) {
+  if (uWire != 0 && uImage == 0) {
     // Node lines and patch outlines from the point's own parameters.
     float gu = length(vec2(dFdx(vUvs.x), dFdy(vUvs.x))), gv = length(vec2(dFdx(vUvs.y), dFdy(vUvs.y)));
     float node = max(lineInk(vUvs.x, 1.0, gu, 0.55), lineInk(vUvs.y, 1.0, gv, 0.55));
@@ -665,6 +666,8 @@ uniform vec3 uForward, uRight, uUp;   // right and up scaled so that forward + x
 uniform mat4 uViewProj;
 uniform int uGroundOn, uGloss, uLighting;
 uniform float uSink;   // the floor hides the teapot only where it is this far below the floor
+uniform int uPolished;        // a polished floor shows the teapot's image
+uniform sampler2D uImageMap;  // that image, drawn from the eye mirrored in the floor
 out vec4 outColour;
 void main() {
   vec3 dir = uForward + uRight * vScreen.x + uUp * vScreen.y;
@@ -677,7 +680,16 @@ void main() {
   vec3 p = uEye + dir * t;
   float far = length(p - uEye);
   float width = far / (1.0 / length(dFdy(vScreen.y) * uUp)) / max(0.08, abs(uEye.y - p.y) / max(far, 1e-9));
-  outColour = encode(floorColour(p, width, t, uLighting != 0));
+  vec3 colour = floorColour(p, width, t, uLighting != 0);
+  if (uPolished != 0 && uLighting != 0 && uEye.y > uGround) {
+    vec3 unit = normalize(dir);
+    vec4 image = texelFetch(uImageMap, ivec2(gl_FragCoord.xy), 0);
+    vec3 seen = image.a > 0.5 ? image.rgb * image.rgb : skyOf(p, vec3(unit.x, -unit.y, unit.z));
+    float fresnel = 0.07 + 0.93 * fifth(1.0 - abs(unit.y));
+    float keep = fresnel * (1.0 - smooth01(18.0, 60.0, t));
+    colour = colour * (1.0 - keep) + seen * keep;
+  }
+  outColour = encode(colour);
   // Depth of the floor a little below itself, so a body resting slightly in it is not cut by it.
   vec4 clip = uViewProj * vec4(p - vec3(0.0, uSink, 0.0), 1.0);
   gl_FragDepth = clamp(0.5 * clip.z / clip.w + 0.5, 0.0, 1.0);
@@ -719,6 +731,7 @@ uniform vec3 uShift;
 uniform mat4 uViewProj;
 uniform vec3 uEyeAt;
 uniform float uNearer;
+uniform vec2 uImageOf;   // x > 0: draw the teapot's image in a floor at height y (as the eye sees it reflected there)
 out vec3 vWorld;
 out vec3 vNormal;
 out vec3 vUvs;
@@ -726,7 +739,9 @@ void main() {
   vWorld = uPose * aPoint + uShift;
   vNormal = uPose * aSurfaceNormal;
   vUvs = aUvs;
-  gl_Position = uViewProj * vec4(vWorld + (uEyeAt - vWorld) * uNearer, 1.0);
+  vec3 placed = vWorld + (uEyeAt - vWorld) * uNearer;
+  if (uImageOf.x > 0.0) { placed.y = 2.0 * uImageOf.y - placed.y; }
+  gl_Position = uViewProj * vec4(placed, 1.0);
 }
 `;
 

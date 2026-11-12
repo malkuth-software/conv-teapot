@@ -89,6 +89,7 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
         <label class="check"><input type="checkbox" data-option="shadows" checked> shadows</label>
         <label class="check"><input type="checkbox" data-option="ground" checked> floor</label>
         <label class="check"><input type="checkbox" data-option="gloss"> gloss</label>
+        <label class="check"><input type="checkbox" data-option="polished"> polished floor</label>
       </fieldset>
       <fieldset>
         <legend>GPU</legend>
@@ -309,6 +310,7 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
   window.addEventListener('keyup', (event) => { slow = event.shiftKey; held.delete(event.key); dirty = true; });
   window.addEventListener('blur', () => held.clear());
   window.teapot = { engine, gpu, physics, redraw: () => { dirty = true; }, state: () => stateNow(0) };
+  setTimeout(() => { dirty = true; }, 100);
   setTimeout(() => { try { gpu.compare(); dirty = true; } catch (error) { console.error(error); } }, 600);
 })();
 </script>

@@ -1,5 +1,7 @@
 # The Utah Teapot in CONV geometry
 
+**GPU version:** https://malkuth-software.github.io/conv-teapot/conv-teapot-gpu/: the same teapot drawn and simulated by WebGL 2, with the CONV surface evaluated in shaders. Source and notes in [`gpu/`](gpu/README.md).
+
 The Utah Teapot rebuilt from points that lie on its own surface, traced
 without a mesh, and dropped on a floor. A paper and a browser demo are
 included.

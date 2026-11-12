@@ -1606,6 +1606,96 @@ drawn from its lattice at rest, carried by the body's pose.}
 \label{fig:drop}
 \end{figure*}
 
+\section{On the GPU}
+\label{sec:gpu}
+
+A second version of the demonstration draws and simulates the same
+teapot with WebGL~2. The lattices, the placement of rows, the $(u,v)$
+layout of the mesh and the collision hulls are made once per teapot on
+the CPU, as before, and handed over as textures and buffers. What is
+computed for a frame is computed in shaders.
+
+\subsection{CONV in a shader}
+
+The admitted $u$-cells of every lattice row are compiled on the CPU, as
+the CPU evaluator compiles them, and read from a texture: seven numbers
+per coordinate per cell. The $v$-cell through the eight row values at
+the query has to be admitted at the query, because its inputs depend on
+$u$. Admission is piecewise linear in its
+inputs: every step is a sum, a multiple by a constant, or a choice
+between two values by comparing them. So the derivative along $u$ is
+carried through it as the second component of a two-vector, taking at
+each choice the derivative of the value chosen, which is what the CPU's
+dual numbers do; the derivative along $v$ is the derivative of the
+basis. A band between two parts evaluates its two parameter lattices,
+then the body and the tube there, and blends them. The surface is
+evaluated at every vertex once, the points being kept on the GPU by
+transform feedback and carried by the pose in each frame, and again at
+every pixel for the normal. Numbers are 32-bit floats. At 12\,000
+points spread over the parts the shader's surface is within
+$2.3\times10^{-6}$ of the CPU's and its normal within $0.027^\circ$.
+
+\subsection{The picture}
+
+Lighting, the shadow map, the trims of the joins, emitter reflections
+and the polished floor are the CPU renderer's formulas. A cutaway counts
+crossings of the kept half in the stencil buffer, and an odd count shows
+the cut face. The teapot is drawn first for depth alone and then shaded
+at the nearest surface of each pixel, so the surface is evaluated once
+per pixel and not once per layer behind it. Against the CPU ray tracer
+at $960\times600$, the share of pixels that differ by more than 8 of 255
+is 0.23\% for porcelain, 0.23\% with the polished floor, 0.4\% with a
+texture, 0.9\% for a cutaway, and 3.6\% for chrome. The chrome difference
+is the teapot's reflection of itself, which the CPU traces and the
+shaders, like the CPU's baked renderer, do not have; the rest is along
+shadow edges, which here come from a map of $2048^2$ and there from
+traced rays. A frame takes 7\,ms at $960\times600$ and 15\,ms at
+$1920\times1200$ on the laptop used throughout (9\,ms with normals
+carried from the vertices), against 21\,ms for a moving frame and 43 to
+50\,ms for a resting one of the CPU's baked renderer at $960\times600$.
+
+\subsection{Room light without rays}
+
+The CPU bake of Section~\ref{sec:posefree} casts rays from every texel.
+A rasterizer is better at the opposite order. The body is drawn from
+each of 256 directions spread over the sphere, keeping the distance
+along the direction of what is nearest; every texel of a map laid over
+the parts then looks itself up in each picture and, if nothing is nearer,
+adds the direction weighted by its cosine. The sum is the open fraction
+and the mean open direction. This takes about 30\,ms. For the light the
+body throws on itself the CPU stores which texels each texel's blocked
+rays land on. Here that is found again each time: along each of 48
+directions the body is peeled into six depth layers, each layer carrying
+the light of its far side, and a texel that faces the direction with the
+body in front of it takes the layer just in front of it; five such
+gathers take 0.7 to 1.0\,s when the teapot comes to rest in a new
+attitude. Against the CPU's baked renderer the mean difference of the
+picture is 1 to 2 of 255; the two estimate the same integrals from
+different samples.
+
+\subsection{The rigid body}
+
+The teapot's state is thirteen numbers in four texels, and one fragment
+shader run over them is one step of 1/240\,s: gravity, the grab's soft
+pin (the same implicit impulse as on the CPU), contact with the floor,
+friction, rolling resistance and damping, with the CPU engine's
+parameters. The floor is a plane and the collision shape is convex
+hulls, so the contacts are the hull points that reach the floor, and the
+shader goes over all 1280 of them. Each point that approaches the floor
+answers from the velocity the pass began with, by the impulse that stops
+it and the friction that impulse allows, and the body takes the mean of
+the answers, ten times. Taking the answers one after another depended on
+the order of the points and sent a teapot dropped in its plane of
+symmetry out of that plane; the mean does not. A body in the floor is
+lifted out by position, not by a velocity it would keep. This is not the
+CPU's solver, which solves a frame's contacts together, and the two are
+not expected to agree step for step. The standard drop comes to rest
+upright in both, at the same height, 0.16 units apart and turned
+$4.7^\circ$ about the vertical. For one body the GPU is the slower
+place: a frame's steps with the read-back of the state take 6\,ms,
+against 0.13\,ms on the CPU, most of it waiting for the frame being
+drawn to finish.
+
 \section{Limits}
 
 The variation bound is factorwise and coordinatewise; it does not bound

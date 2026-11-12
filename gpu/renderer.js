@@ -8,7 +8,7 @@ class TeapotGpu {
     if (!gl) { throw new Error('WebGL 2 is not available'); }
     if (!gl.getExtension('EXT_color_buffer_float')) { throw new Error('rendering to float textures (EXT_color_buffer_float) is not available'); }
     this.gl = gl;
-    this.options = { material: 0, gloss: 0, lighting: 1, shadows: 1, ground: 1, wire: 0, texture: 0, mapping: 0, perPixel: 1, shadowSize: 2048, roomLight: 2, directions: 256, gatherDirections: 48, gathers: 5, layers: 6 };
+    this.options = { material: 0, gloss: 0, lighting: 1, shadows: 1, ground: 1, wire: 0, texture: 0, mapping: 0, perPixel: 1, shadowSize: 2048, polished: 0, roomLight: 2, directions: 256, gatherDirections: 48, gathers: 5, layers: 6 };
     // The surface from the lattice at every vertex (used once, to evaluate them, and to check against the CPU);
     // the teapot from those evaluated vertices; the maps of what each point sees of the room.
     this.conv = this.program(VERTEX_GLSL, FRAGMENT_GLSL, ['vWorld', 'vNormal']);
@@ -514,6 +514,8 @@ class TeapotGpu {
     }
     gl.activeTexture(gl.TEXTURE10); gl.bindTexture(gl.TEXTURE_2D, mode === 6 && this.previousLayer ? this.previousLayer : null); gl.uniform1i(u.uPrevLayer, 10);
     gl.uniform1i(u.uPeel, 0);
+    gl.uniform1i(u.uImage, view.image ? 1 : 0);
+    gl.uniform2f(u.uImageOf, view.image ? 1 : 0, s[31]);
     const maps = (room || mode === 6) && this.targets.mapOpen;
     gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, maps ? this.targets.mapOpen.first : null); gl.uniform1i(u.uOpenFront, 4);
     gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_2D, maps ? this.targets.mapOpen.second : null); gl.uniform1i(u.uOpenBack, 5);
@@ -681,9 +683,32 @@ class TeapotGpu {
       gl.disable(gl.STENCIL_TEST);
     }
 
-    // 3. The teapot.
+    // 3. The teapot: first only where it is (depth), then its colour at the
+    // nearest surface of each pixel, so that the surface is evaluated and lit
+    // once per pixel and not once per layer of the teapot behind it.
+    gl.colorMask(false, false, false, false);
+    this.beginTeapot(view, 5);
+    this.drawTeapot(false);
+    gl.colorMask(true, true, true, true);
+    gl.depthMask(false);
     this.beginTeapot(view, 0);
     this.drawTeapot(false);
+    gl.depthMask(true);
+
+    // A polished floor: the teapot's image in it, as the eye mirrored in the floor would see the teapot.
+    const polished = o.polished && o.ground && o.lighting && view.eye[1] > state[31];
+    if (polished) {
+      const image = this.target('image', width, height, gl.RGBA8);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, image.framebuffer);
+      gl.viewport(0, 0, width, height);
+      gl.clearBufferfv(gl.COLOR, 0, [0, 0, 0, 0]);
+      gl.clear(gl.DEPTH_BUFFER_BIT);
+      this.beginTeapot({ ...view, eye: [view.eye[0], 2 * state[31] - view.eye[1], view.eye[2]], image: true }, 0);
+      gl.uniform3fv(this.main.uniforms.uEyeAt, view.eye);
+      this.drawTeapot(false);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      gl.viewport(0, 0, width, height);
+    }
 
     // 4. The cut face, where the count was odd and nothing kept is in front.
     if (cut) {
@@ -730,9 +755,11 @@ class TeapotGpu {
     gl.uniform3fv(u.uUp, view.up);
     gl.uniformMatrix4fv(u.uViewProj, false, view.viewProj);
     gl.uniform1i(u.uGroundOn, o.ground);
-    gl.uniform1i(u.uGloss, o.gloss);
+    gl.uniform1i(u.uGloss, o.gloss || o.polished ? 1 : 0);
     gl.uniform1i(u.uLighting, o.lighting);
     gl.uniform1f(u.uSink, 0.012);
+    gl.uniform1i(u.uPolished, polished ? 1 : 0);
+    gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, polished ? this.targets.image.texture : null); gl.uniform1i(u.uImageMap, 4);
     gl.bindVertexArray(this.emptyVao);
     gl.drawArrays(gl.TRIANGLES, 0, 3);
     gl.bindVertexArray(null);
