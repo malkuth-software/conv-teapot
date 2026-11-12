@@ -439,7 +439,11 @@ inline Teapot make_teapot(const TeapotOptions& options) {
                     const bool at_first = end == 0;
                     const bool exterior_end = group == "handle" || (at_first == first_is_wider);
                     const double width = (group == "handle" ? 0.11 : exterior_end ? 0.14 : 0.07) * y_scale;
-                    JoinResult made = make_join(body, exterior_end ? exterior : interior, exterior_end, tube, at_first, width, body_lattice.nu, exterior_end ? 9 : 17);
+                    // At either end the part of the tube to remove is the part nearer the
+                    // axis than the wall it meets: inside the body at the spout's base,
+                    // inside the cavity at the end of its channel. The channel is cut where
+                    // it crosses the inner wall and blended to that wall there.
+                    JoinResult made = make_join(body, exterior_end ? exterior : interior, true, tube, at_first, width, body_lattice.nu, exterior_end ? 9 : 17);
                     if (!made.ok) { continue; }
                     auto part = std::make_unique<TeapotPart>();
                     part->name = group + "_join";

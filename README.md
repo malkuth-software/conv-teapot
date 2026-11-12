@@ -117,9 +117,12 @@ engine of PlaySuite's rock-stacking game (wrench-transport solver).
 - **Options after the official page.** Side (left or right half, with the
   cut face filled), joins on or off, match edge normals, triangulation
   direction, and a download of the baked mesh as OBJ in y-up or z-up.
-- **Interior join.** The spout's channel now meets the cavity within 3.3
-  degrees (17 before): its band has seventeen rows across, and band points
-  are found by walking true distances along each surface.
+- **Interior join.** The spout's channel is cut where it crosses the body's
+  inner wall and blended to the wall there, so it opens flush into the cavity
+  and meets the wall within 0.6 degrees. (It was first joined at the end of
+  the stub that runs on into the cavity, which left a lip.) Its band has
+  seventeen rows across, and band points are found by walking true distances
+  along each surface.
 - **Speed in the browser.** While the picture is changing it is drawn at
   half size with one visibility sample per pixel, and the mesh is carried by
   the pose. At 960 x 600 a moving frame takes about 21 ms with the mesh and
