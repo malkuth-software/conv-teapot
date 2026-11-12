@@ -222,9 +222,10 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
         (gpu.roomMs ? `room light: ${gpu.options.directions} directions in ${gpu.roomMs.toFixed(0)} ms` + (gpu.thrownMs ? `, gathered in ${gpu.thrownMs.toFixed(0)} ms` + (gpu.thrownFrames > 1 ? ` over ${gpu.thrownFrames} frames` : '') : '') + ` · ` : '') +
         (check ? `shaders against the CPU at ${check.points} points: largest distance ${check.worst.toExponential(2)}, largest angle between normals ${check.worstAngle.toFixed(4)}\u00b0`
                : 'not yet checked against the CPU') +
-        (gpu.rowsPlaced ? `\nrows placed on the GPU: ` + gpu.rowsPlaced.map((p) => `${p.which === 0 ? 'body' : 'lid'} ${p.rows} rows in ${p.ms.toFixed(0)} ms, error ${p.error.toExponential(2)}` +
+        (gpu.rowsPlaced ? `\nrows placed on the GPU: ` + gpu.rowsPlaced.map((p) => `${['body', 'lid', 'handle', 'spout'][p.which]} ${p.rows} rows in ${p.ms.toFixed(0)} ms, error ${p.error.toExponential(2)}` +
           (rowsChecked && rowsChecked[p.which] ? ` (measured on the CPU ${rowsChecked[p.which].measured.toExponential(2)}; the CPU's own plan ${rowsChecked[p.which].ownError.toExponential(2)})` : '') +
-          `, nodes within ${p.nodes.toExponential(1)} of the CPU's`).join(' · ') : '');
+          (p.nodes !== undefined ? `, nodes within ${p.nodes.toExponential(1)} of the CPU's` : '')).join(' · ') : '') +
+        (gpu.options.buildOnGpu && gpu.builder.ms > 0 ? `\nbuilt on the GPU in ${gpu.builder.ms.toFixed(0)} ms: ` + ['', 'Bezier lattices', 'sheets of rows', 'tubes', 'joins', 'sets of hull points', 'sheets of revolution'].map((name, k) => gpu.builder.counts[k] ? `${gpu.builder.counts[k]} ${name}` : '').filter((x) => x).join(', ') + (buildChecked ? ' · against the engine building it alone: ' + buildChecked : '') : '');
       stats.style.whiteSpace = 'pre-wrap';
       pauseButton.textContent = running ? 'Pause' : 'Run';
       if (wasRunning && !running) { dirty = true; }
@@ -250,8 +251,17 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
     const [w, h] = event.target.value.split('x').map(Number);
     resize(w, h);
   });
-  let rowsChecked = null;
-  document.getElementById('check').addEventListener('click', () => { gpu.compare(); rowsChecked = gpu.rowsCheck(); dirty = true; });
+  let rowsChecked = null, buildChecked = '';
+  document.getElementById('check').addEventListener('click', () => {
+    // The check of the build makes the teapot again: it is left at rest.
+    buildChecked = gpu.buildCheck();
+    engine._tp_action(1);
+    gpu.upload();
+    if (onGpu()) { takePose(); sim().running = false; sim().grab = null; }
+    gpu.compare();
+    rowsChecked = gpu.rowsCheck();
+    dirty = true;
+  });
   document.getElementById('drop').addEventListener('click', () => {
     engine._tp_action(0);
     if (onGpu()) { engine._tp_set(12, 0); takePose(); sim().running = true; }

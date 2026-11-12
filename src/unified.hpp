@@ -436,7 +436,8 @@ inline ProfileCurve chain_runs(std::vector<ProfileCurve::Run> runs, bool start_o
 }
 
 // A sheet of revolution: every row a true circle of the profile's radius.
-inline void revolve_sheet(const ProfileCurve& profile, const SheetPlan& plan, std::size_t around, Lattice& lattice) {
+using SheetNodesOutside = std::function<bool(const ProfileCurve&, const SheetPlan&, Lattice&)>;
+inline void revolve_sheet(const ProfileCurve& profile, const SheetPlan& plan, std::size_t around, Lattice& lattice, const SheetNodesOutside* nodes_outside = nullptr) {
     lattice.wrap_u = true;
     lattice.closure = Closure::cubic;
     lattice.nu = around;
@@ -444,6 +445,7 @@ inline void revolve_sheet(const ProfileCurve& profile, const SheetPlan& plan, st
     lattice.nodes.resize(lattice.nu * lattice.nv);
     lattice.seams_v.assign(plan.row_seam.begin(), plan.row_seam.end());
     lattice.seams_u.clear();
+    if (nodes_outside != nullptr && *nodes_outside && (*nodes_outside)(profile, plan, lattice)) { return; }
     for (std::size_t v = 0; v < lattice.nv; ++v) {
         double r, y;
         profile.at(plan.row_arc[v], r, y);
@@ -459,8 +461,14 @@ inline void revolve_sheet(const ProfileCurve& profile, const SheetPlan& plan, st
 // of the tube's cross-section by a stretch of its length, with two opposite
 // edges in the symmetry plane z = 0. The patches are chained along the tube
 // and the whole becomes one sheet, closed around.
+// `plan_outside` and `nodes_outside`, when given, are asked first for the rows
+// and for the nodes (the GPU page places and samples them in shaders); each
+// returns false to leave the work here.
+using RowsOutside = std::function<bool(const ProfileCurve&, std::size_t, bool, SheetPlan&)>;
+using TubeNodesOutside = std::function<bool(const std::vector<ConvSurface>&, const ProfileCurve&, const SheetPlan&, std::size_t, Lattice&)>;
 inline void tube_sheet(const float (*const* patches)[3], int count, int points, std::size_t rows, std::size_t around, Lattice& lattice,
-                       std::vector<double>& row_arc, bool rows_by_error = false) {
+                       std::vector<double>& row_arc, bool rows_by_error = false, const RowsOutside* plan_outside = nullptr,
+                       const TubeNodesOutside* nodes_outside = nullptr) {
     const std::size_t n = std::size_t(points);
     struct Half {
         std::vector<Vec3> grid; // [b * n + a]: a around, b along
@@ -563,7 +571,10 @@ inline void tube_sheet(const float (*const* patches)[3], int count, int points, 
         surfaces[k].compile();
     }
     seam.build_table(8);
-    const SheetPlan plan = rows_by_error ? plan_rows_by_error(seam, rows, false) : plan_rows(seam, rows, seam.length / 2000.0, seam.length / 24.0);
+    SheetPlan plan;
+    if (!(rows_by_error && plan_outside != nullptr && *plan_outside && (*plan_outside)(seam, rows, false, plan))) {
+        plan = rows_by_error ? plan_rows_by_error(seam, rows, false) : plan_rows(seam, rows, seam.length / 2000.0, seam.length / 24.0);
+    }
     row_arc = plan.row_arc;
     lattice.wrap_u = true;
     lattice.closure = Closure::cubic;
@@ -573,6 +584,7 @@ inline void tube_sheet(const float (*const* patches)[3], int count, int points, 
     lattice.seams_v.assign(plan.row_seam.begin(), plan.row_seam.end());
     lattice.seams_u.clear();
     const std::size_t half_count = around / 2;
+    if (nodes_outside != nullptr && *nodes_outside && (*nodes_outside)(surfaces, seam, plan, around, lattice)) { return; }
     for (std::size_t v = 0; v < lattice.nv; ++v) {
         std::size_t run = 0;
         double t = 0.0;

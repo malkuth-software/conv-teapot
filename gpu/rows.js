@@ -17,7 +17,7 @@ uniform sampler2D uProfile;     // the meridian: fine table, coarse table, runs'
 uniform int uFine, uFineCount, uCoarse, uCoarseCount, uRunBase, uRunPoints, uCreaseCount;
 uniform float uCreases[12];
 uniform float uLength, uFinest, uCoarsest, uGrowth;
-uniform int uRows, uMode, uShape, uHavePrevious, uHardnessCount;
+uniform int uRows, uMode, uShape, uHavePrevious, uHardnessCount, uOnAxis;
 uniform sampler2D uPlan, uHardness, uPrevious, uBest, uScale, uStations;
 uniform int uNodesBase, uAround, uPlanCount;
 out vec4 outValue;
@@ -119,7 +119,7 @@ int jetInCell(int cell, int node, int n) {
 // The lattice row k of the plan: the meridian's point there (a pole at each end).
 vec2 rowPoint(int k, int n) {
   vec2 p = truthAt(planArc(k));
-  if (k == 0 || k == n - 1) { p.x = 0.0; }
+  if (uOnAxis != 0 && (k == 0 || k == n - 1)) { p.x = 0.0; }
   return p;
 }
 // How far a point is from the meridian's polyline within 'reach' of arc length 'arc'.
@@ -337,13 +337,20 @@ class RowPlanner {
   // Place the rows of sheet `which` (0 body, 1 lid) from its meridian.
   // With `compare`, the engine also makes its own plan, to set beside this one.
   plan(engine, which, compare = 0) {
+    const made = this.planFrom(engine, engine._tp_sheet(which, compare), 'sheetProfile' + which + '_' + engine._tp_rows_scale(), 1, compare);
+    if (made) { made.which = which; }
+    return made;
+  }
+
+  // The rows for the sheet laid out at `pointer` (gpu/main.cpp, fill_sheet). `onAxis`: its two ends are poles.
+  planFrom(engine, pointer, key, onAxis, compare) {
     const gl = this.gpu.gl, u = this.program.uniforms;
-    const pointer = engine._tp_sheet(which, compare);
     if (new Float64Array(engine.HEAPF64.buffer, pointer, 1)[0] < 0.5) { return null; }
     const head = new Float64Array(engine.HEAPF64.buffer, pointer, 10).slice();
     const [, rows, around, length, runCount, runPoints, creaseCount, fineCount, coarseCount] = head;
     let offset = 10;
     const take = (count) => { const out = new Float64Array(engine.HEAPF64.buffer, pointer + offset * 8, count).slice(); offset += count; return out; };
+    if (creaseCount > 12) { return null; }
     const creases = take(creaseCount), runs = take(runCount * runPoints * 2), fine = take(fineCount * 5), coarse = take(coarseCount * 3);
     const own = compare ? { arcs: take(take(1)[0]), error: take(1)[0], first: take(take(1)[0]), given: take(1)[0] } : null;
     // One texture: the fine table (two texels an entry), the coarse table, the runs' samples.
@@ -353,7 +360,6 @@ class RowPlanner {
     for (let k = 0; k < coarseCount; ++k) { data.set([coarse[k * 3], coarse[k * 3 + 1], coarse[k * 3 + 2], 0], (coarseBase + k) * 4); }
     const runBase = coarseBase + coarseCount;
     for (let k = 0; k < runCount * runPoints; ++k) { data.set([runs[k * 2], runs[k * 2 + 1], 0, 0], (runBase + k) * 4); }
-    const key = 'sheetProfile' + which + '_' + engine._tp_rows_scale();
     this.gpu.floatTexture(key, data, 4);
 
     const started = performance.now();
@@ -367,6 +373,7 @@ class RowPlanner {
     gl.uniform1i(u.uCoarse, coarseBase); gl.uniform1i(u.uCoarseCount, coarseCount);
     gl.uniform1i(u.uRunBase, runBase); gl.uniform1i(u.uRunPoints, runPoints);
     gl.uniform1i(u.uCreaseCount, creaseCount);
+    gl.uniform1i(u.uOnAxis, onAxis);
     const padded = new Float32Array(12);
     padded.set(creases);
     gl.uniform1fv(u.uCreases, padded);
@@ -447,7 +454,7 @@ class RowPlanner {
     }
     arcs[0] = 0;
     arcs[found - 1] = length;
-    const result = { which, rows: found, error: kept[3], ms: performance.now() - started, arcs, seams, profile: key, coarseBase, coarseCount, around };
+    const result = { rows: found, error: kept[3], ms: performance.now() - started, arcs, seams, profile: key, coarseBase, coarseCount, around };
     if (own) {
       // Beside the engine's own plan: the errors of the two, and how far apart the rows are.
       const apart = (a, b, n) => { let worst = a.length === n ? 0 : -1; for (let k = 0; worst >= 0 && k < n; ++k) { worst = Math.max(worst, Math.abs(a[k] - b[k * 4])); } return worst; };

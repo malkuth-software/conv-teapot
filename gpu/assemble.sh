@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 python3 - <<'PY'
 template = open("gpu/index.template.html").read()
 engine = open("out/teapot_gpu_engine.js").read().replace("</script>", "<\\/script>")
-page = template.replace("/*ENGINE*/", engine).replace("/*SHADERS*/", open("gpu/shaders.js").read()).replace("/*RENDERER*/", open("gpu/renderer.js").read() + open("gpu/physics.js").read() + open("gpu/wrench.js").read() + open("gpu/rows.js").read())
+page = template.replace("/*ENGINE*/", engine).replace("/*SHADERS*/", open("gpu/shaders.js").read()).replace("/*RENDERER*/", open("gpu/renderer.js").read() + open("gpu/physics.js").read() + open("gpu/wrench.js").read() + open("gpu/rows.js").read() + open("gpu/build.js").read())
 import os
 for folder in ("docs/conv-teapot-gpu", "docs/gpu"):
     os.makedirs(folder, exist_ok=True)

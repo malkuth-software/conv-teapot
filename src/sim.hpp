@@ -21,6 +21,7 @@
 #include <cmath>
 #include <cstdint>
 #include <exception>
+#include <functional>
 #include <memory>
 #include <vector>
 
@@ -33,6 +34,8 @@ public:
     // Off, the lattice stays at rest and pose() carries the motion, which
     // is what a renderer should use (see PosedSurface).
     bool move_nodes = true;
+    // Points of a surface at a list of (u, v), found outside (the GPU page evaluates them in a shader).
+    std::function<bool(const ConvSurface&, const std::vector<std::array<double, 2>>&, std::vector<Vec3>&)> positions;
 
     void build(Teapot& teapot) {
         teapot_ = &teapot;
@@ -60,13 +63,25 @@ public:
             const bool closed = lattice.wrap_u && part->conv.on == nullptr;
             const std::size_t around = round ? 20 : closed ? std::max<std::size_t>(16, lattice.nu) : lattice.nu;
             const double out = closed ? 1.0 / std::cos(3.141592653589793 / double(around)) : 1.0;
+            // Points of the part's surface, from outside if that is offered.
+            const auto surface_points = [&](const std::vector<std::array<double, 2>>& at) {
+                std::vector<Vec3> points;
+                if (positions && positions(part->conv, at, points) && points.size() == at.size()) { return points; }
+                points.clear();
+                for (const auto& q : at) { points.push_back(part->conv.position(q[0], q[1])); }
+                return points;
+            };
             const auto ring = [&](zc::phys::HullDesc& hull, double v) {
                 std::vector<Vec3> points;
                 Vec3 centre{};
-                for (std::size_t k = 0; k < around; ++k) {
-                    points.push_back(closed ? part->conv.position(double(lattice.nu) * double(k) / double(around), v) : lattice.at(k, std::size_t(v + 0.5)));
-                    centre = centre + points.back() * (1.0 / double(around));
+                if (closed) {
+                    std::vector<std::array<double, 2>> at;
+                    for (std::size_t k = 0; k < around; ++k) { at.push_back({double(lattice.nu) * double(k) / double(around), v}); }
+                    points = surface_points(at);
+                } else {
+                    for (std::size_t k = 0; k < around; ++k) { points.push_back(lattice.at(k, std::size_t(v + 0.5))); }
                 }
+                for (const Vec3& p : points) { centre = centre + p * (1.0 / double(around)); }
                 if (round) { centre = Vec3{0.0, 0.0, 0.0}; }
                 for (Vec3 p : points) {
                     if (round) {
@@ -85,10 +100,12 @@ public:
                 // The profile is taken at the rows and at three places between each pair.
                 const std::size_t places = (lattice.nv - 1) * 4 + 1;
                 std::vector<double> r(places), y(places);
+                std::vector<std::array<double, 2>> along;
+                for (std::size_t v = 0; v < places; ++v) { along.push_back({0.0, double(v) / 4.0}); }
+                const std::vector<Vec3> profile = surface_points(along);
                 for (std::size_t v = 0; v < places; ++v) {
-                    const Vec3 p = part->conv.position(0.0, double(v) / 4.0);
-                    r[v] = std::hypot(p.x, p.z);
-                    y[v] = p.y;
+                    r[v] = std::hypot(profile[v].x, profile[v].z);
+                    y[v] = profile[v].y;
                 }
                 std::vector<std::size_t> outline;
                 for (std::size_t v = 0; v < places; ++v) {

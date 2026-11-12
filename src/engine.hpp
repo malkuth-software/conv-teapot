@@ -30,9 +30,12 @@ public:
     // page places them in a shader): one plan for each sheet and each height
     // scale. Until they are given the sheets take the plain plan by curvature.
     bool rows_outside = false;
+    // Work the page does in shaders while a teapot is built (BuildHooks); used when `use_hooks`.
+    BuildHooks hooks;
+    bool use_hooks = false;
     SheetPlan given_rows[2][2];
-    bool rows_wanted() const { return rows_outside && version == Version::v2026_unified && given_rows[blinn_scale ? 1 : 0][0].row_arc.empty(); }
-    bool rows_given() const { return rows_outside && version == Version::v2026_unified && !given_rows[blinn_scale ? 1 : 0][0].row_arc.empty(); }
+    bool rows_wanted() const { return rows_outside && !use_hooks && version == Version::v2026_unified && given_rows[blinn_scale ? 1 : 0][0].row_arc.empty(); }
+    bool rows_given() const { return rows_outside && !use_hooks && version == Version::v2026_unified && !given_rows[blinn_scale ? 1 : 0][0].row_arc.empty(); }
     bool show_handle = true, show_spout = true, show_lid = true, show_body = true, show_interior = true;
     int side = 0;      // 0: the whole teapot; 1, 2: cut along its plane of symmetry, one half shown
     bool joins = true; // unified version: blend the handle and spout into the body
@@ -79,6 +82,11 @@ public:
         options.seams = geometry != Geometry::conv_seamless;
         options.circular = geometry == Geometry::conv_round;
         options.closure = geometry == Geometry::conv_seamless ? Closure::paper : Closure::cubic;
+        if (use_hooks) {
+            options.hooks = &hooks;
+            if (hooks.begin) { hooks.begin(); }
+        }
+        sim.positions = use_hooks ? hooks.positions : nullptr;
         if (rows_given()) {
             options.given_rows[0] = &given_rows[blinn_scale ? 1 : 0][0];
             options.given_rows[1] = &given_rows[blinn_scale ? 1 : 0][1];

@@ -1717,7 +1717,8 @@ the pose's position differs by at most $2.6\times10^{-3}$ model units
 for the 2026 teapot and $3\times10^{-6}$ for the 1976 one (the teapot is
 about 3 units high); over a grab at the handle, dragged and released,
 360 frames, by $8\times10^{-5}$; over a poke, by $2\times10^{-5}$ to
-$4\times10^{-5}$. Both come to rest in the same pose to
+$4\times10^{-5}$. The state is written through four render targets, so
+that six fragments run the frame. Both come to rest in the same pose to
 $3\times10^{-4}$. A frame of the shader's solver takes 1.4 to 2.4\,ms
 with the read-back of the state, against 0.13\,ms on the CPU. An
 earlier, simpler step (a mean over the contact points of the impulse
@@ -1765,8 +1766,35 @@ difference between 32-bit and 64-bit arithmetic, and a different plan is
 kept. The nodes the shader writes are within $6\times10^{-7}$ of the
 engine's on the same rows, and the surface check of the shaders against
 the CPU, both on the GPU's rows, stays at $2\times10^{-6}$. The rows of
-the handle and spout, the joins' lattices and the collision hulls are
-still made on the CPU.
+the handle and the spout are placed by the same passes on each tube's
+seam (25 and 37 rows, errors $1.1\times10^{-4}$ and
+$2.9\times10^{-4}$).
+
+\subsection{Building the teapot}
+
+The engine asks the page for each piece of the teapot's construction at
+the point where it would compute it, and uses what comes back. The
+nodes of the 1975, 1976 and 1987 lattices are sampled from the B\'ezier
+patches by a shader. The nodes of the unified body and lid are the
+meridian at each row, turned about the axis; those of the handle and
+spout are points of the source patches' CONV surfaces around each row.
+For a join, one pass finds for each column of the tube where it crosses
+the body's wall: a search along the tube in quarter rows and then
+bisection, where each test is itself a bisection on the body for the
+wall's radius at that height. A second pass walks the band's two sides
+from the crossing, on the body away from the loop's centre and along the
+tube, in eight steps that read each surface's speed, and writes the two
+parameter lattices and the trims. The rings of surface points the
+collision hulls are made from are evaluated by a shader as well. The
+engine keeps the bookkeeping: chaining the source patches into a
+meridian, the shape of each cell, the convex hull of each set of points,
+and its own copy of the cells for the checks.
+
+Against the engine building the teapot alone, on the same rows, the
+nodes agree to $5\times10^{-7}$, the joins' lattices and trims to
+$1.1\times10^{-5}$ in parameters, where a row or a column is 1, and the
+body's mass to $10^{-7}$. Building the unified teapot this way takes
+about 0.4\,s.
 
 \section{Limits}
 

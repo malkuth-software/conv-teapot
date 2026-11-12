@@ -8,7 +8,7 @@ class TeapotGpu {
     if (!gl) { throw new Error('WebGL 2 is not available'); }
     if (!gl.getExtension('EXT_color_buffer_float')) { throw new Error('rendering to float textures (EXT_color_buffer_float) is not available'); }
     this.gl = gl;
-    this.options = { material: 0, gloss: 0, lighting: 1, shadows: 1, ground: 1, wire: 0, texture: 0, mapping: 0, perPixel: 1, shadowSize: 2048, polished: 0, trace: 1, filter: 2, placeRows: 1, gatherPerFrame: 3, roomLight: 2, directions: 256, gatherDirections: 48, gathers: 5, layers: 6 };
+    this.options = { material: 0, gloss: 0, lighting: 1, shadows: 1, ground: 1, wire: 0, texture: 0, mapping: 0, perPixel: 1, shadowSize: 2048, polished: 0, trace: 1, filter: 2, placeRows: 1, buildOnGpu: 1, gatherPerFrame: 3, roomLight: 2, directions: 256, gatherDirections: 48, gathers: 5, layers: 6 };
     // The surface from the lattice at every vertex (used once, to evaluate them, and to check against the CPU);
     // the teapot from those evaluated vertices; the maps of what each point sees of the room.
     this.conv = this.program(VERTEX_GLSL, PROBE_FRAGMENT_GLSL);
@@ -28,6 +28,9 @@ class TeapotGpu {
     this.roomKey = '';
     this.room = this.program(ROOM_VERTEX_GLSL, ROOM_FRAGMENT_GLSL);
     this.cap = this.program(CAP_VERTEX_GLSL, CAP_FRAGMENT_GLSL);
+    // The teapot's construction, asked for by the engine as it builds.
+    this.builder = new TeapotBuilder(this);
+    globalThis.teapotHook = (kind) => this.builder.hook(kind);
     this.textures = {};
     this.capVao = gl.createVertexArray();
     this.capBuffer = gl.createBuffer();
@@ -87,7 +90,14 @@ class TeapotGpu {
     // Where the nodes are: the rows of the unified teapot's body and lid are placed here,
     // by CONV's own error (rows.js), and the engine builds on them.
     if (!this.rowPlanner) { this.rowPlanner = new RowPlanner(this); }
-    if (this.rowsAsked !== this.options.placeRows) { this.rowsAsked = this.options.placeRows; e._tp_set(40, this.options.placeRows); }
+    // With buildOnGpu the engine asks for its rows, nodes, joins and hull points as it builds (build.js);
+    // without it, placeRows alone has the body's and the lid's rows placed here and handed over.
+    if (this.buildAsked !== this.options.buildOnGpu) {
+      if (this.buildAsked !== undefined) { e._tp_set(41, 1); }
+      this.buildAsked = this.options.buildOnGpu;
+    }
+    const rowsAlone = this.options.placeRows && !this.options.buildOnGpu ? 1 : 0;
+    if (this.rowsAsked !== rowsAlone) { this.rowsAsked = rowsAlone; e._tp_set(40, rowsAlone); }
     if (e._tp_rows_wanted()) {
       const scale = e._tp_rows_scale();
       this.rowPlans = this.rowPlans || {};
@@ -106,7 +116,7 @@ class TeapotGpu {
       : { cells: lattices[index * 12], shapes: lattices[index * 12 + 1], cu: lattices[index * 12 + 2], cv: lattices[index * 12 + 3], nv: lattices[index * 12 + 4], wrap: lattices[index * 12 + 5],
           nu: lattices[index * 12 + 6], nodes: lattices[index * 12 + 7], shapesAround: lattices[index * 12 + 8] };
     // The nodes on those rows are made here too, and written over the engine's.
-    this.rowsPlaced = null;
+    this.rowsPlaced = this.options.buildOnGpu && this.builder.rowPlans.length > 0 ? this.builder.rowPlans : null;
     if (e._tp_rows_given()) {
       this.rowsPlaced = this.rowPlans[e._tp_rows_scale()];
       for (const plan of this.rowsPlaced) { plan.nodes = this.rowPlanner.writeNodes(plan.which, this.lattice(plan.which), plan, cpuNodes); }
@@ -977,10 +987,50 @@ class TeapotGpu {
 
   // The shaders' surface against the CPU's, at points spread over every part:
   // the largest distance between the two, and the largest angle between their normals.
+  // The teapot built here beside the engine building it alone, both on the engine's rows
+  // (the rows have their own check): the largest difference of a node of the sampled
+  // lattices, of a join's lattices and trims (in parameters), and of the body's mass.
+  // The teapot is built three times for this and is left at rest.
+  buildCheck() {
+    const e = this.engine;
+    if (!this.options.buildOnGpu) { return ''; }
+    const now = () => {
+      this.upload();
+      const floats = (kind) => new Float32Array(e.HEAPF32.buffer, e._tp_buffer(kind), e._tp_length(kind)).slice();
+      const parts = floats(3), bands = new Set();
+      for (let k = 0; k < e._tp_length(8); ++k) { if (parts[k * 24 + 17] > 0.5) { bands.add(parts[k * 24]); bands.add(parts[k * 24 + 1]); } }
+      return { nodes: floats(12), meta: floats(2), trims: floats(7), bands, mass: new Float64Array(e.HEAPF64.buffer, e._tp_solver_body(), 1)[0] };
+    };
+    this.builder.skip = [2];
+    e._tp_set(41, 1);
+    const here = now(), counts = this.builder.counts.slice();
+    this.options.buildOnGpu = 0;
+    e._tp_set(41, 1);
+    const there = now();
+    this.options.buildOnGpu = 1;
+    this.builder.skip = null;
+    e._tp_set(41, 1);
+    this.upload();
+    if (here.nodes.length !== there.nodes.length || here.trims.length !== there.trims.length) { return 'the two are laid out differently'; }
+    // A place around the body may differ by a whole turn.
+    const period = here.meta[6];
+    const apart = (a, b) => { const d = Math.abs(a - b); return Math.min(d, Math.abs(d - period)); };
+    let nodes = 0, joins = 0, trims = 0;
+    for (let k = 0; k * 12 < here.meta.length; ++k) {
+      const base = here.meta[k * 12 + 7] * 4, count = here.meta[k * 12 + 6] * here.meta[k * 12 + 4] * 4;
+      for (let i = base; i < base + count; ++i) {
+        if (here.bands.has(k)) { joins = Math.max(joins, apart(here.nodes[i], there.nodes[i])); } else { nodes = Math.max(nodes, Math.abs(here.nodes[i] - there.nodes[i])); }
+      }
+    }
+    for (let i = 0; i < here.trims.length; ++i) { trims = Math.max(trims, apart(here.trims[i], there.trims[i])); }
+    return `nodes ${nodes.toExponential(1)}` + (counts[4] ? `, joins ${joins.toExponential(1)} and trims ${trims.toExponential(1)} in parameters` : '') +
+      `, mass ${(Math.abs(here.mass - there.mass) / there.mass).toExponential(1)} (relative)`;
+  }
+
   // The rows placed here beside the engine's own plan: rows, errors (the engine's
   // measure of both plans) and the largest distance between a row and its counterpart.
   rowsCheck() {
-    if (!this.engine._tp_rows_given()) { return null; }
+    if (!this.rowsPlaced) { return null; }
     return [0, 1].map((which) => {
       const made = this.rowPlanner.plan(this.engine, which, 1);
       return { which, rows: made.rows, error: made.error, measured: made.own.given, ownRows: made.own.rows, ownError: made.own.error, apart: made.own.apart, first: made.own.firstApart };

@@ -28,6 +28,178 @@ void pad(std::vector<float>& texels) {
     texels.resize((texels.size() + row - 1) / row * row, 0.0f);
 }
 
+// ---- Work done by the page in shaders while a teapot is built (BuildHooks).
+// The engine calls out at the point where it would do the work; what the
+// shader needs is laid out here for the page to read, and the page writes
+// its result into hook_out.
+EM_JS(int, gpu_hook, (int kind), { return globalThis.teapotHook ? globalThis.teapotHook(kind) : 0; });
+std::vector<float> hook_nodes, hook_shapes, hook_meta, hook_data;
+std::vector<double> hook_args(32, 0.0), hook_out, hook_sheet;
+std::size_t hook_cells = 0;
+const tconv::ConvSurface* hook_surface = nullptr;   // the surface the page last compiled for positions
+
+// A lattice as build() hands lattices over: nodes, cell shapes, where its cells go.
+void hook_add(const tconv::ConvSurface& surface) {
+    using namespace tconv;
+    const Lattice& lattice = surface.lattice;
+    const std::size_t cu = lattice.cells_u(), cv = lattice.cells_v();
+    hook_meta.insert(hook_meta.end(), {float(hook_cells / 4), float(hook_shapes.size() / 4), float(cu), float(cv), float(lattice.nv), lattice.wrap_u ? 1.0f : 0.0f,
+                                       float(lattice.nu), float(hook_nodes.size() / 4), 0.0f, 0.0f, 0.0f, 0.0f});
+    for (const Vec3& node : lattice.nodes) { hook_nodes.insert(hook_nodes.end(), {float(node.x), float(node.y), float(node.z), 0.0f}); }
+    hook_cells += lattice.nv * cu * 24;
+    const std::vector<CellShape>& along = surface.shapes_along();
+    for (std::size_t k = 0; k < cv; ++k) {
+        const CellShape& shape = along[k];
+        hook_shapes.insert(hook_shapes.end(), {float(int(shape.left)), float(int(shape.right)), float(int(shape.prev)), float(int(shape.next)), shape.has_prev ? 1.0f : 0.0f,
+                                               shape.has_next ? 1.0f : 0.0f, shape.six ? 1.0f : 0.0f, float((surface.reads_low(k) ? 1 : 0) + (surface.reads_high(k) ? 2 : 0))});
+    }
+    hook_meta[hook_meta.size() - 4] = float(hook_shapes.size() / 4);
+    for (const CellShape& shape : surface.shapes_around()) {
+        hook_shapes.insert(hook_shapes.end(), {float(int(shape.left)), float(int(shape.right)), float(int(shape.prev)), float(int(shape.next)), shape.has_prev ? 1.0f : 0.0f,
+                                               shape.has_next ? 1.0f : 0.0f, shape.six ? 1.0f : 0.0f, 0.0f});
+    }
+}
+void hook_clear() {
+    hook_nodes.clear(); hook_shapes.clear(); hook_meta.clear(); hook_data.clear();
+    hook_cells = 0;
+    hook_surface = nullptr;
+}
+// The meridian or seam a planner works from (see tp_sheet).
+void fill_sheet(const tconv::ProfileCurve& coarse, std::size_t rows, std::size_t around, std::vector<double>& out) {
+    using namespace tconv;
+    ProfileCurve fine = coarse;
+    fine.build_table(32);
+    std::vector<double> creases;
+    for (std::size_t run = 1; run < fine.runs.size(); ++run) {
+        if (fine.turn_at_joint(run) > 4.0) { creases.push_back(fine.run_start[run]); }
+    }
+    out = {1.0, double(rows), double(around), fine.length, double(fine.runs.size()), double(fine.runs.empty() ? 0 : fine.runs[0].x.size()),
+           double(creases.size()), double(fine.table_s.size()), double(coarse.table_s.size()), 0.0};
+    out.insert(out.end(), creases.begin(), creases.end());
+    for (const ProfileCurve::Run& run : fine.runs) {
+        for (std::size_t k = 0; k < run.x.size(); ++k) { out.insert(out.end(), {run.x[k], run.y[k]}); }
+    }
+    for (std::size_t k = 0; k < fine.table_s.size(); ++k) {
+        out.insert(out.end(), {fine.table_s[k], fine.table_x[k], fine.table_y[k], fine.table_t[k], double(fine.table_run[k])});
+    }
+    for (std::size_t k = 0; k < coarse.table_s.size(); ++k) { out.insert(out.end(), {coarse.table_s[k], coarse.table_x[k], coarse.table_y[k]}); }
+}
+
+void install_hooks(tconv::Engine& e) {
+    using namespace tconv;
+    e.use_hooks = true;
+    e.hooks.begin = [] { hook_surface = nullptr; gpu_hook(0); };
+    // 1: nodes sampled from Bezier patches.
+    e.hooks.bezier_nodes = [](const BezierSurface& bezier, bool revolved, Lattice& lattice) {
+        hook_clear();
+        for (const auto& patch : bezier.patches) {
+            for (const Vec3& c : patch) { hook_data.insert(hook_data.end(), {float(c.x), float(c.y), float(c.z), 0.0f}); }
+        }
+        hook_args = {double(bezier.patches_u), double(bezier.patches_v), double(bezier.per_u), double(bezier.per_v), bezier.wrap_u ? 1.0 : 0.0,
+                     double(lattice.nu), double(lattice.nv), revolved ? 1.0 : 0.0, double(bezier.cells_u())};
+        hook_out.assign(lattice.nu * lattice.nv * 3, 0.0);
+        if (gpu_hook(1) == 0) { return false; }
+        for (std::size_t k = 0; k < lattice.nodes.size(); ++k) { lattice.nodes[k] = {hook_out[k * 3], hook_out[k * 3 + 1], hook_out[k * 3 + 2]}; }
+        return true;
+    };
+    // 2: the rows of a seam, by CONV's own error.
+    e.hooks.rows = [](const ProfileCurve& seam, std::size_t rows, bool on_axis, SheetPlan& plan) {
+        hook_clear();
+        fill_sheet(seam, rows, 0, hook_sheet);
+        hook_args = {on_axis ? 1.0 : 0.0};
+        hook_out.assign(1024, 0.0);
+        if (gpu_hook(2) == 0) { return false; }
+        const std::size_t n = std::size_t(hook_out[0]);
+        if (n < 2 || n > 500) { return false; }
+        plan.row_arc.assign(hook_out.begin() + 1, hook_out.begin() + 1 + long(n));
+        plan.row_seam.clear();
+        for (std::size_t k = 0; k < n; ++k) { plan.row_seam.push_back(hook_out[1 + n + k] > 0.5 ? 1 : 0); }
+        return true;
+    };
+    // 6: the nodes of a sheet of revolution: every row a circle of the meridian's radius there.
+    e.hooks.sheet_nodes = [](const ProfileCurve& profile, const SheetPlan& plan, Lattice& lattice) {
+        hook_clear();
+        for (std::size_t k = 0; k < profile.table_s.size(); ++k) { hook_data.insert(hook_data.end(), {float(profile.table_s[k]), float(profile.table_x[k]), float(profile.table_y[k]), 0.0f}); }
+        for (double arc : plan.row_arc) { hook_data.insert(hook_data.end(), {float(arc), 0.0f, 0.0f, 0.0f}); }
+        hook_args = {double(profile.table_s.size()), double(lattice.nv), double(lattice.nu)};
+        hook_out.assign(lattice.nu * lattice.nv * 3, 0.0);
+        if (gpu_hook(6) == 0) { return false; }
+        for (std::size_t k = 0; k < lattice.nodes.size(); ++k) { lattice.nodes[k] = {hook_out[k * 3], hook_out[k * 3 + 1], hook_out[k * 3 + 2]}; }
+        return true;
+    };
+    // 3: a tube's nodes: on each row, points of the source patches' surfaces around it.
+    e.hooks.tube_nodes = [](const std::vector<ConvSurface>& sources, const ProfileCurve& seam, const SheetPlan& plan, std::size_t around, Lattice& lattice) {
+        if (sources.empty() || sources.size() > 8) { return false; }
+        hook_clear();
+        for (const ConvSurface& source : sources) { hook_add(source); }
+        for (std::size_t k = 0; k < seam.table_s.size(); ++k) { hook_data.insert(hook_data.end(), {float(seam.table_s[k]), float(seam.table_t[k]), float(seam.table_run[k]), 0.0f}); }
+        for (double arc : plan.row_arc) { hook_data.insert(hook_data.end(), {float(arc), 0.0f, 0.0f, 0.0f}); }
+        hook_args = {double(seam.table_s.size()), double(plan.row_arc.size()), double(around), double(sources[0].lattice.nu), double(sources.size())};
+        hook_out.assign(lattice.nu * lattice.nv * 3, 0.0);
+        if (gpu_hook(3) == 0) { return false; }
+        for (std::size_t k = 0; k < lattice.nodes.size(); ++k) { lattice.nodes[k] = {hook_out[k * 3], hook_out[k * 3 + 1], hook_out[k * 3 + 2]}; }
+        return true;
+    };
+    // 4: a join: where each column of the tube crosses the body, the two sides of the band from there, the trims.
+    e.hooks.join = [](const ConvSurface& body, const BodyBranch& branch, const ConvSurface& tube, bool at_first, double width, std::size_t body_nu, int across,
+                      JoinResult& result) {
+        hook_clear();
+        hook_add(body);
+        hook_add(tube);
+        const std::size_t columns = tube.cells_u();
+        hook_args = {branch.v_low, branch.v_high, branch.rising ? 1.0 : 0.0, at_first ? 1.0 : 0.0, width, double(body_nu), double(across), double(columns),
+                     double(tube.cells_v())};
+        const std::size_t rows = std::size_t(across);
+        hook_out.assign(2 + columns * rows * 3 + columns * 6, 0.0);
+        if (gpu_hook(4) == 0 || hook_out[0] < 0.5) { return false; }
+        result = JoinResult{};
+        result.blend.wrap_u = true;
+        result.blend.closure = Closure::cubic;
+        result.blend.nu = columns;
+        result.blend.nv = rows;
+        result.blend.nodes.resize(columns * rows);
+        result.toward = result.blend;
+        result.tube_trim.below = at_first;
+        result.body_trim.centre_u = hook_out[1];
+        result.body_trim.period_u = double(body_nu);
+        const double* nodes = hook_out.data() + 2;
+        const double* trims = nodes + columns * rows * 3;
+        for (std::size_t k = 0; k < columns; ++k) {
+            for (std::size_t j = 0; j < rows; ++j) {
+                const double* q = nodes + (j * columns + k) * 3;
+                result.blend.at(k, j) = Vec3{q[0], q[1], 0.0};
+                result.toward.at(k, j) = Vec3{q[2], 0.0, 0.0};
+            }
+            const double* t = trims + k * 6;
+            result.tube_trim.cut.push_back(t[0]);
+            result.tube_trim.cut_exact.push_back(t[1]);
+            result.body_trim.loop.push_back({t[2], t[3]});
+            result.body_trim.loop_exact.push_back({t[4], t[5]});
+        }
+        round_trim_outlines(result);
+        result.ok = true;
+        return true;
+    };
+    // 5: points of a surface.
+    e.hooks.positions = [](const ConvSurface& surface, const std::vector<std::array<double, 2>>& at, std::vector<Vec3>& points) {
+        if (at.empty() || at.size() > 512 || surface.toward) { return false; }
+        const bool fresh = hook_surface != &surface;
+        if (fresh) {
+            hook_clear();
+            hook_add(surface);
+            hook_surface = &surface;
+        }
+        hook_data.clear();
+        for (const auto& q : at) { hook_data.insert(hook_data.end(), {float(q[0]), float(q[1]), 0.0f, 0.0f}); }
+        hook_args = {double(at.size()), fresh ? 1.0 : 0.0};
+        hook_out.assign(at.size() * 3, 0.0);
+        if (gpu_hook(5) == 0) { hook_surface = nullptr; return false; }
+        points.clear();
+        for (std::size_t k = 0; k < at.size(); ++k) { points.push_back({hook_out[k * 3], hook_out[k * 3 + 1], hook_out[k * 3 + 2]}); }
+        return true;
+    };
+}
+
 void build() {
     using namespace tconv;
     Engine& e = *engine;
@@ -166,6 +338,7 @@ extern "C" {
 EMSCRIPTEN_KEEPALIVE void tp_init(int width, int height) {
     if (engine == nullptr) {
         engine = new tconv::Engine();
+        install_hooks(*engine);
     }
     engine->resize(width, height);
 }
@@ -187,6 +360,7 @@ EMSCRIPTEN_KEEPALIVE void tp_set(int key, double value) {
     case 26: e.show_interior = value != 0; break;
     case 36: e.side = int(value); break;
     case 37: e.joins = value != 0; e.rebuild(); break;
+    case 41: e.use_hooks = value != 0; e.rebuild(); break;
     case 40: e.rows_outside = value != 0; if (e.version == Version::v2026_unified) { e.rebuild(); } break;
     default: break;
     }
@@ -356,6 +530,30 @@ EMSCRIPTEN_KEEPALIVE void tp_rows(int body_rows, int lid_rows) {
     }
     engine->rebuild();
 }
+// What a hook lays out for the page (0 nodes, 1 shapes, 2 lattices, 3 data: floats; 4 arguments, 5 the result, 6 a sheet: doubles).
+EMSCRIPTEN_KEEPALIVE const void* tp_hook_buffer(int kind) {
+    switch (kind) {
+    case 0: return hook_nodes.data();
+    case 1: return hook_shapes.data();
+    case 2: return hook_meta.data();
+    case 3: return hook_data.data();
+    case 4: return hook_args.data();
+    case 5: return hook_out.data();
+    default: return hook_sheet.data();
+    }
+}
+EMSCRIPTEN_KEEPALIVE int tp_hook_length(int kind) {
+    switch (kind) {
+    case 0: return int(hook_nodes.size());
+    case 1: return int(hook_shapes.size());
+    case 2: return int(hook_meta.size());
+    case 3: return int(hook_data.size());
+    case 4: return int(hook_args.size());
+    case 5: return int(hook_out.size());
+    case 7: return int(hook_cells);
+    default: return int(hook_sheet.size());
+    }
+}
 EMSCRIPTEN_KEEPALIVE const double* tp_sheet(int which, int compare) {
     using namespace tconv;
     body.assign(1, 0.0);
@@ -402,7 +600,13 @@ EMSCRIPTEN_KEEPALIVE const double* tp_sheet(int which, int compare) {
     body.push_back(double(first.row_arc.size()));
     body.insert(body.end(), first.row_arc.begin(), first.row_arc.end());
     // The error, measured here, of the rows the page gave (0 if it gave none).
-    body.push_back(engine->rows_given() ? plan_error(coarse, engine->given_rows[engine->blinn_scale ? 1 : 0][which], true) : 0.0);
+    {
+        const TeapotPart& part = *engine->teapot().parts[std::size_t(which)];
+        SheetPlan used;
+        used.row_arc = part.row_param;
+        used.row_seam = part.conv.lattice.seams_v;
+        body.push_back(plan_error(coarse, used, true));
+    }
     return body.data();
 }
 // The pose from that simulation: rotation by rows, then translation.

@@ -32,7 +32,7 @@ precision highp float;
 precision highp int;
 precision highp sampler2D;
 uniform sampler2D uState;      // position; quaternion; velocity; spin; rolling impulse and whether it is held; quiet time, asleep
-uniform sampler2D uSolved;     // mode 1: the state this frame's solve wrote, with the twist after each of its passes
+uniform sampler2D uSolvedInfo, uSolvedV, uSolvedW;   // mode 1: what this frame's solve wrote for the vertices
 uniform sampler2D uWarm;       // per hull vertex two texels: (normal impulse, tangent impulses, 0); (rebound owed, in contact, 0, 0)
 uniform sampler2D uVertices;   // hull vertices in the body's frame
 uniform int uCount, uMode;     // mode 0: the body's state; 1: the vertices' retained impulses
@@ -40,7 +40,12 @@ uniform float uMass, uRadius, uFriction, uRestitution, uRolling, uH;
 uniform mat3 uInertia, uInverseInertia;
 uniform int uGrab;
 uniform vec3 uGrabLocal, uGrabTarget;
-out vec4 outValue;
+// The state goes out through four targets, so that six fragments write it all:
+// the state's texels; passes run and the last vertex taken as a row; the twist after each pass (linear, angular).
+layout(location = 0) out vec4 outValue;
+layout(location = 1) out vec4 outInfo;
+layout(location = 2) out vec4 outPassV;
+layout(location = 3) out vec4 outPassW;
 
 const float kGravity = 9.81;
 const float kLinearDamping = 0.02, kAngularDamping = 0.05;
@@ -297,6 +302,9 @@ void main() {
   vec4 rollMemory = texelFetch(uState, ivec2(4, 0), 0);
   vec4 rest = texelFetch(uState, ivec2(5, 0), 0);   // quiet time, asleep
   int texel = int(gl_FragCoord.y) * 2048 + int(gl_FragCoord.x);
+  outInfo = vec4(0.0);
+  outPassV = vec4(0.0);
+  outPassW = vec4(0.0);
   if (rest.y > 0.5) {
     // Asleep: nothing moves and what the contacts retain is kept.
     outValue = uMode == 0 ? texelFetch(uState, ivec2(texel, 0), 0) : texelFetch(uWarm, ivec2(gl_FragCoord.xy), 0);
@@ -335,7 +343,7 @@ void main() {
     // impulse before the pass and the body's twist after it, so the vertex follows its
     // own row through the passes from the twists the solve wrote; it does not solve again.
     int own = texel / 2;
-    vec4 solved = texelFetch(uSolved, ivec2(8, 0), 0);   // passes run, the last vertex taken as a row
+    vec4 solved = texelFetch(uSolvedInfo, ivec2(0, 0), 0);   // passes run, the last vertex taken as a row
     vec3 arm = R * vertexAt(own).xyz;
     float separation = position.z + arm.z;
     if (own >= uCount || !(separation < margin) || float(own) > solved.y) { outValue = vec4(0.0); return; }
@@ -366,7 +374,7 @@ void main() {
     rowGamma[0] = vec3(0.0);
     int passes = int(solved.x);
     for (int pass = 0; pass < passes; ++pass) {
-      vec3 v = texelFetch(uSolved, ivec2(9 + 2 * pass, 0), 0).xyz, w = texelFetch(uSolved, ivec2(10 + 2 * pass, 0), 0).xyz;
+      vec3 v = texelFetch(uSolvedV, ivec2(pass, 0), 0).xyz, w = texelFetch(uSolvedW, ivec2(pass, 0), 0).xyz;
       c = contactVelocity(arm, v, w);
       evaluateContact(0, c);
       rowLambda[0] = rowGamma[0];
@@ -473,12 +481,11 @@ void main() {
     accuracy = min(kLoose, max(kTight, 0.1 * relative));
   }
 
-  if (texel >= 8) {
-    // For the vertices: how many passes ran and which vertex was the last row, then the twist after each pass.
-    int slot = texel - 9;
-    outValue = texel == 8 ? vec4(float(passes), rowCount == kRows ? float(rowVertex[kRows - 1]) : float(uCount), 0.0, 0.0)
-             : slot / 2 >= passes ? vec4(0.0) : slot % 2 == 0 ? vec4(passV[slot / 2], 0.0) : vec4(passW[slot / 2], 0.0);
-    return;
+  // For the vertices: how many passes ran and which vertex was the last row, then the twist after each pass.
+  outInfo = vec4(float(passes), rowCount == kRows ? float(rowVertex[kRows - 1]) : float(uCount), 0.0, 0.0);
+  if (texel < passes) {
+    outPassV = vec4(passV[texel], 0.0);
+    outPassW = vec4(passW[texel], 0.0);
   }
 
   // The body moves with the twist found.
@@ -556,7 +563,22 @@ class WrenchPhysics {
       return { texture, framebuffer, width, height };
     };
     this.make = make;
-    this.states = [make(24, 1), make(24, 1)];   // 8 texels of state, then what the solve leaves for the vertices
+    // The state: its own texels, and three more targets for what the solve leaves for the vertices.
+    const state = () => {
+      const made = make(8, 1);
+      made.more = [1, 2, 3].map((k) => {
+        const texture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, 8, 1);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0 + k, gl.TEXTURE_2D, texture, 0);
+        return texture;
+      });
+      gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1, gl.COLOR_ATTACHMENT2, gl.COLOR_ATTACHMENT3]);
+      return made;
+    };
+    this.states = [state(), state()];
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     this.state = new Float32Array(32);
     this.state[7] = 1;
@@ -752,15 +774,15 @@ class WrenchPhysics {
       gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.warm[0].texture); gl.uniform1i(u.uWarm, 1);
       // The body's new state, then what each contact point retains; both from the state before.
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.states[1].framebuffer);
-      gl.viewport(0, 0, 24, 1);
+      gl.viewport(0, 0, 6, 1);
       gl.uniform1i(u.uMode, 0);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
-      gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, this.states[1].texture); gl.uniform1i(u.uSolved, 3);
+      ['uSolvedInfo', 'uSolvedV', 'uSolvedW'].forEach((name, k) => { gl.activeTexture(gl.TEXTURE3 + k); gl.bindTexture(gl.TEXTURE_2D, this.states[1].more[k]); gl.uniform1i(u[name], 3 + k); });
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.warm[1].framebuffer);
       gl.viewport(0, 0, this.warm[1].width, this.warm[1].height);
       gl.uniform1i(u.uMode, 1);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
-      gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, null);
+      for (let k = 0; k < 3; ++k) { gl.activeTexture(gl.TEXTURE3 + k); gl.bindTexture(gl.TEXTURE_2D, null); }
       this.states.reverse();
       this.warm.reverse();
       this.accumulator -= this.h;

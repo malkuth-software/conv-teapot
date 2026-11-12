@@ -88,6 +88,8 @@ struct BodyBranch {
     }
 };
 
+inline void round_trim_outlines(JoinResult& result);
+
 // Join the end of `tube` at row `end_row` (0 or its last row) to the body.
 // `across` is the number of rows across the band. The band's edge tangent is
 // taken from its first four rows, over which the blend weight must still be
@@ -219,10 +221,16 @@ inline JoinResult make_join(const Surface& body, const BodyBranch& branch, bool 
         result.tube_trim.cut_exact.push_back(on_tube_at(width));
         result.body_trim.loop_exact.push_back(on_body_at(width));
     }
-    // The cut on the body is a smooth closed curve through those points, not
-    // the polygon with straight sides between them: where the body's rows
-    // are dense a straight side in (u, v) bows out past the band's edge and
-    // leaves a sliver of the body cut away with nothing over it.
+    round_trim_outlines(result);
+    result.ok = true;
+    return result;
+}
+
+// The cut on the body is a smooth closed curve through its corner points, not
+// the polygon with straight sides between them: where the body's rows
+// are dense a straight side in (u, v) bows out past the band's edge and
+// leaves a sliver of the body cut away with nothing over it.
+inline void round_trim_outlines(JoinResult& result) {
     for (std::vector<std::array<double, 2>>* outline : {&result.body_trim.loop, &result.body_trim.loop_exact}) {
         const std::vector<std::array<double, 2>> corner = *outline;
         const std::size_t n = corner.size();
@@ -239,8 +247,6 @@ inline JoinResult make_join(const Surface& body, const BodyBranch& branch, bool 
             }
         }
     }
-    result.ok = true;
-    return result;
 }
 
 } // namespace tconv

@@ -15,6 +15,7 @@
 #include "blend.hpp"
 #include "unified.hpp"
 #include <array>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -47,7 +48,26 @@ namespace utah {
 #include "utah_dense.inc"
 }
 
+// Work that may be done outside the engine: the GPU page does each of these in
+// a shader and hands the result back. Each returns false to leave the work to
+// the engine. `begin` is called when a teapot starts to be built.
+struct BuildHooks {
+    std::function<void()> begin;
+    // The nodes of a lattice sampled from Bezier patches (revolved: from the first meridian, turned).
+    std::function<bool(const BezierSurface&, bool, Lattice&)> bezier_nodes;
+    // The rows of a tube's seam, and the tube's nodes on them.
+    RowsOutside rows;
+    // The nodes of a sheet of revolution on its rows.
+    SheetNodesOutside sheet_nodes;
+    TubeNodesOutside tube_nodes;
+    // The two sides of a join's band and its trims (two-sided joins only).
+    std::function<bool(const ConvSurface&, const BodyBranch&, const ConvSurface&, bool, double, std::size_t, int, JoinResult&)> join;
+    // Points of a surface at a list of (u, v).
+    std::function<bool(const ConvSurface&, const std::vector<std::array<double, 2>>&, std::vector<Vec3>&)> positions;
+};
+
 struct TeapotOptions {
+    const BuildHooks* hooks = nullptr;
     Version version = Version::v1976;
     // Blinn's vertical scale of 3/4. Off gives Newell's taller proportions.
     bool blinn_scale = true;
@@ -250,8 +270,10 @@ inline std::unique_ptr<TeapotPart> make_part(const char* name, std::size_t first
     for (std::size_t v = 0; v < lattice.nv; ++v) { part->row_param[v] = double(v); }
     if (!options.smooth) {
         part->revolved = options.circular && around == 4;
-        for (std::size_t v = 0; v < lattice.nv; ++v) {
-            for (std::size_t u = 0; u < lattice.nu; ++u) { lattice.at(u, v) = part->reference(double(u), double(v)); }
+        if (!(options.hooks != nullptr && options.hooks->bezier_nodes && options.hooks->bezier_nodes(bezier, part->revolved, lattice))) {
+            for (std::size_t v = 0; v < lattice.nv; ++v) {
+                for (std::size_t u = 0; u < lattice.nu; ++u) { lattice.at(u, v) = part->reference(double(u), double(v)); }
+            }
         }
         if (options.seams) {
             lattice.seams_v.assign(lattice.nv, 0);
@@ -368,15 +390,18 @@ inline Teapot make_teapot(const TeapotOptions& options) {
             const ProfileCurve profile = chain_runs(runs);
             const std::size_t rows = std::string(group) == "body" ? options.sheet_rows : options.sheet_rows * 3 / 4;
             const SheetPlan* given = options.given_rows[is_body ? 0 : 1];
-            const SheetPlan plan = given != nullptr ? *given
-                                   : options.rows_by_error ? plan_rows_by_error(profile, rows, true)
-                                                           : plan_rows(profile, rows, profile.length / 3000.0, profile.length / 30.0);
+            SheetPlan plan;
+            if (given != nullptr) {
+                plan = *given;
+            } else if (!(options.rows_by_error && options.hooks != nullptr && options.hooks->rows && options.hooks->rows(profile, rows, true, plan))) {
+                plan = options.rows_by_error ? plan_rows_by_error(profile, rows, true) : plan_rows(profile, rows, profile.length / 3000.0, profile.length / 30.0);
+            }
             auto part = std::make_unique<TeapotPart>();
             part->name = group;
             part->group = group;
             part->sampled = true;
             part->hull = std::string(group) == "body" ? 0 : 1;
-            revolve_sheet(profile, plan, options.sheet_around, part->conv.lattice);
+            revolve_sheet(profile, plan, options.sheet_around, part->conv.lattice, options.hooks != nullptr ? &options.hooks->sheet_nodes : nullptr);
             part->per_u = part->per_v = 0; // no patch outlines inside a sheet
             part->row_param.assign(plan.row_arc.begin(), plan.row_arc.end());
             {
@@ -407,7 +432,8 @@ inline Teapot make_teapot(const TeapotOptions& options) {
             part->sampled = true;
             part->hull = is_handle ? 2 : 3;
             tube_sheet(patches.data(), count, utah::dense_tube_points, is_handle ? options.sheet_rows / 3 : options.sheet_rows / 2,
-                       std::max<std::size_t>(8, (options.tube_around + 1) / 2 * 2), part->conv.lattice, part->row_param, options.rows_by_error);
+                       std::max<std::size_t>(8, (options.tube_around + 1) / 2 * 2), part->conv.lattice, part->row_param, options.rows_by_error,
+                       options.hooks != nullptr ? &options.hooks->rows : nullptr, options.hooks != nullptr ? &options.hooks->tube_nodes : nullptr);
             for (Vec3& node : part->conv.lattice.nodes) { node.y *= y_scale; }
             if (!is_handle) {
                 // The spout turns into its channel at the lip, its furthest row from the axis.
@@ -457,8 +483,12 @@ inline Teapot make_teapot(const TeapotOptions& options) {
                     // axis than the wall it meets: inside the body at the spout's base,
                     // inside the cavity at the end of its channel. The channel is cut where
                     // it crosses the inner wall and blended to that wall there.
-                    JoinResult made = make_join(body, exterior_end ? exterior : interior, true, tube, at_first, width, body_lattice.nu, 
-                                                options.join_two_sided ? options.join_rows : exterior_end ? options.join_rows_sampled : options.join_rows_interior, options.join_two_sided);
+                    const int across = options.join_two_sided ? options.join_rows : exterior_end ? options.join_rows_sampled : options.join_rows_interior;
+                    JoinResult made;
+                    if (!(options.join_two_sided && options.hooks != nullptr && options.hooks->join &&
+                          options.hooks->join(teapot.parts[0]->conv, exterior_end ? exterior : interior, teapot.parts[index]->conv, at_first, width, body_lattice.nu, across, made))) {
+                        made = make_join(body, exterior_end ? exterior : interior, true, tube, at_first, width, body_lattice.nu, across, options.join_two_sided);
+                    }
                     if (!made.ok) { continue; }
                     auto part = std::make_unique<TeapotPart>();
                     part->name = group + "_join";
