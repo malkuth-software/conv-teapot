@@ -190,7 +190,14 @@ public:
         // samples per node interval so the transported lattice stays the same.
         RenderOptions options = render;
         // One visibility sample per pixel while the picture is changing; the full count when it rests.
-        const bool moving = running || sim.grabbing() || orbiting_;
+        const bool moving = running || sim.grabbing() || orbiting_ || flying_;
+        flying_ = false;
+        if (!moving && render.method == Method::raster && render.baked_light && mesh.lit && mesh.lit_diffuse_only) {
+            // At rest after turning: the baked lit fraction is found again for the new rotation.
+            bool turned = false;
+            for (int k = 0; k < 9; ++k) { turned = turned || std::fabs(mesh.light_turn[k] - pose_now_.a[k]) > 1e-7; }
+            if (turned) { renderer.bake_light(scene, camera(), render, frame.width, frame.height, light_texel, true); }
+        }
         if (moving) {
             options.supersample = 1;
             options.shadow_size = 512;
@@ -232,6 +239,19 @@ public:
             sim.grab(point);
             running = true;
             orbiting_ = false;
+        } else if (flown_) {
+            // After a flight the orbit turns about what is at the centre of the picture, the eye staying where it is.
+            const Hit* centre = hit_at(frame.width * 0.5, frame.height * 0.5);
+            if (centre != nullptr) {
+                const Camera now = camera();
+                const Vec3 point = pose_now_.point(teapot_.parts[scene_parts_[centre->part]]->conv.position(centre->u, centre->v));
+                const double away = length(point - now.eye);
+                if (away > 0.05) {
+                    target = now.eye + (target - now.eye) * (away / distance);
+                    distance = away;
+                }
+            }
+            flown_ = false;
         }
     }
     void pointer_move(double x, double y) {
@@ -252,7 +272,28 @@ public:
     }
     void zoom(double factor) {
         distance *= factor;
-        distance = distance < 3.5 ? 3.5 : distance > 40.0 ? 40.0 : distance;
+        distance = distance < 0.3 ? 0.3 : distance > 40.0 ? 40.0 : distance;
+    }
+    // Fly: the eye and what it looks at move together, by these distances
+    // along the view direction, to its right, and up.
+    void fly(double forward, double right, double up) {
+        const Camera now = camera();
+        const Vec3 ahead = normalize(now.target - now.eye);
+        const Vec3 side = normalize(cross(ahead, Vec3{0.0, 1.0, 0.0}));
+        Vec3 step = ahead * forward + side * right + Vec3{0.0, 1.0, 0.0} * up;
+        // The eye stays above the floor.
+        const double floor = 0.05 - now.eye.y;
+        if (step.y < floor) { step.y = floor; }
+        target = target + step;
+        flying_ = true;
+        flown_ = true;
+    }
+    void home() {
+        azimuth = 1.2;
+        elevation = 0.36;
+        distance = 11.0;
+        target = Vec3{0.1, 1.3, 0.0};
+        flown_ = false;
     }
     void poke(double x, double y) {
         const Hit* hit = hit_at(x, y);
@@ -310,6 +351,7 @@ private:
         }
         for (const auto& texture : textures_) { scene.textures.push_back(texture.get()); }
         scene.axis = pose_now_.direction({0.0, 1.0, 0.0});
+        scene.pose = pose_now_;
         scene.open_top = !show_lid;
         // The surfaces and where they are: the renderer keeps what depends only on these.
         scene.stamp = (build_count_ * 1000003ull + pose_) * 1099511628211ull + signature();
@@ -340,7 +382,8 @@ private:
             mesh.vertices[k].p = pose_now_.point(rest_p_[k]);
             mesh.vertices[k].n = pose_now_.direction(rest_n_[k]);
         }
-        mesh.lit = mesh.lit && mesh_pose_ == pose_;
+        // A bake of the body's own colour and lit fraction goes with the body; one that holds the view's light does not.
+        mesh.lit = mesh.lit && (mesh.lit_diffuse_only || mesh_pose_ == pose_);
         ++mesh.version;
         mesh_pose_ = pose_;
     }
@@ -370,7 +413,7 @@ private:
     int hit_scale_ = 1;
     std::vector<PosedSurface> posed_; // one per teapot part
     double last_x_ = 0.0, last_y_ = 0.0, grab_depth_ = 0.0;
-    bool orbiting_ = false;
+    bool orbiting_ = false, flying_ = false, flown_ = false;
 };
 
 } // namespace tconv

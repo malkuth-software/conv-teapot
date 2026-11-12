@@ -128,7 +128,7 @@ void budget() {
         o.tube_around = c.tube;
         const Teapot teapot = make_teapot(o);
         std::size_t nodes = 0;
-        for (const auto& part : teapot.parts) { nodes += part->conv.lattice.nodes.size(); }
+        for (const auto& part : teapot.parts) { nodes += part->conv.node_count(); }
         double d[4], a[4];
         revolved_error(*teapot.parts[0], body_profile, d[0], a[0]);
         revolved_error(*teapot.parts[1], lid_profile, d[1], a[1]);
@@ -136,7 +136,7 @@ void budget() {
         spout.compare(*teapot.parts[3], d[3], a[3]);
         std::printf("%-9s %4zu %3zu/%-2zu | %6zu |", c.by_error ? "error" : "radius", c.rows, c.around, c.tube, nodes);
         for (int k = 0; k < 4; ++k) {
-            std::printf(" %4zu: %8.2e %6.2f |", teapot.parts[std::size_t(k)]->conv.lattice.nodes.size(), d[k], a[k]);
+            std::printf(" %4zu: %8.2e %6.2f |", teapot.parts[std::size_t(k)]->conv.node_count(), d[k], a[k]);
         }
         std::printf("\n");
     }
@@ -243,11 +243,11 @@ int main(int argc, char** argv) {
             if (lattice.at(0, v).y > lattice.at(0, top).y) { top = v; }
         }
         std::size_t total = 0;
-        for (const auto& part : teapot.parts) { total += part->conv.lattice.nodes.size(); }
+        for (const auto& part : teapot.parts) { total += part->conv.node_count(); }
         std::printf("   parts %zu, nodes %zu (body %zu, lid %zu, handle %zu, spout %zu, joins %zu)\n", teapot.parts.size(), total,
-                    teapot.parts[0]->conv.lattice.nodes.size(), teapot.parts[1]->conv.lattice.nodes.size(), teapot.parts[2]->conv.lattice.nodes.size(),
-                    teapot.parts[3]->conv.lattice.nodes.size(), total - teapot.parts[0]->conv.lattice.nodes.size() - teapot.parts[1]->conv.lattice.nodes.size() -
-                    teapot.parts[2]->conv.lattice.nodes.size() - teapot.parts[3]->conv.lattice.nodes.size());
+                    teapot.parts[0]->conv.node_count(), teapot.parts[1]->conv.node_count(), teapot.parts[2]->conv.node_count(),
+                    teapot.parts[3]->conv.node_count(), total - teapot.parts[0]->conv.node_count() - teapot.parts[1]->conv.node_count() -
+                    teapot.parts[2]->conv.node_count() - teapot.parts[3]->conv.node_count());
         for (std::size_t index = 4; index < teapot.parts.size(); ++index) {
             const TeapotPart& join = *teapot.parts[index];
             // Is this join on the exterior or the interior branch? Compare with both.

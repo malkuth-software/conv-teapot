@@ -12,19 +12,8 @@ rows  96  body  runs 9  length 8.511  lattice 12x97 = 1164 nodes, 1 crease rows 
 rows  96  lid   runs 5  length 3.366  lattice 12x73 = 876 nodes, 1 crease rows | distance from profile max 1.26e-04 rms 4.98e-05 | along profile: tangent turn max 0.0411 deg, curvature jump max 2.011e-02, mean relative 0.0024
 
 Joins (unified version, default sizes): the band's edge on the body
-   parts 8, nodes 3104 (body 876, lid 660, handle 400, spout 592, joins 576)
-   handle_join  edge on the body: gap max 3.69e-04, normal mismatch max 1.668 deg; the join turns the normal by up to 89.5 deg across the band
-   handle_join  edge on the body: gap max 1.66e-04, normal mismatch max 4.019 deg; the join turns the normal by up to 88.4 deg across the band
-   spout_join   edge on the body: gap max 8.57e-04, normal mismatch max 1.705 deg; the join turns the normal by up to 89.8 deg across the band
-   spout_join   edge on the body: gap max 1.49e-04, normal mismatch max 17.366 deg; the join turns the normal by up to 89.9 deg across the band
-Unified sheets, node count against deviation (distance max in model units / normal max in degrees)
-rows by   rows around |  nodes | body                   | lid                    | handle                 | spout                 
-radius      96  24/16 |   5392 | 2328: 2.56e-03   6.69 | 1752: 5.52e-04   5.17 |  528: 2.61e-04   1.92 |  784: 8.08e-04  38.74 |
-error       96  24/16 |   5392 | 2328: 2.49e-04   3.07 | 1752: 7.91e-05   1.01 |  528: 2.71e-04   1.91 |  784: 8.02e-04  37.48 |
-error       96  16/16 |   4032 | 1552: 2.58e-04   3.07 | 1168: 7.56e-05   1.01 |  528: 2.71e-04   1.91 |  784: 8.02e-04  37.48 |
-error       96  12/16 |   3352 | 1164: 4.06e-04   3.07 |  876: 1.26e-04   1.16 |  528: 2.71e-04   1.91 |  784: 8.02e-04  37.48 |
-error       72  12/16 |   2528 |  876: 6.53e-04   6.81 |  660: 3.08e-04   2.40 |  400: 3.43e-04   1.92 |  592: 7.47e-04  33.69 |
-error       72  12/12 |   2280 |  876: 6.53e-04   6.81 |  660: 3.08e-04   2.40 |  300: 6.18e-04   2.49 |  444: 1.36e-03  29.45 |
-error       64  12/16 |   2248 |  780: 1.03e-03   6.78 |  588: 3.37e-04   2.62 |  352: 3.68e-04   1.91 |  528: 9.17e-04  28.32 |
-error       48  12/12 |   1536 |  588: 2.96e-03  20.93 |  444: 1.62e-03   6.43 |  204: 7.18e-04   2.47 |  300: 2.53e-03  38.95 |
-error       32   8/8  |    688 |  264: 1.28e-02  31.18 |  200: 5.36e-03  20.62 |   88: 2.13e-03   3.73 |  136: 5.06e-03  51.78 |
+   parts 8, nodes 2912 (body 876, lid 660, handle 400, spout 592, joins 384)
+   handle_join  edge on the body: gap max 3.72e-04, normal mismatch max 0.818 deg; the join turns the normal by up to 89.7 deg across the band
+   handle_join  edge on the body: gap max 1.62e-04, normal mismatch max 1.088 deg; the join turns the normal by up to 88.9 deg across the band
+   spout_join   edge on the body: gap max 7.94e-04, normal mismatch max 0.833 deg; the join turns the normal by up to 89.6 deg across the band
+   spout_join   edge on the body: gap max 2.28e-04, normal mismatch max 0.422 deg; the join turns the normal by up to 84.0 deg across the band

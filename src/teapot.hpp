@@ -75,6 +75,14 @@ struct TeapotOptions {
     // Unified sheets: place rows by CONV's own error (plan_rows_by_error)
     // instead of by the profile's radius of curvature.
     bool rows_by_error = true;
+    // Unified sheets: node rows across a join's band, where it meets the outer
+    // wall and where the spout's channel meets the inner wall.
+    // join_two_sided: the band's two sides are stored as separate lattices of
+    // join_rows rows each and blended in closed form at evaluation. Otherwise
+    // the blended band itself is sampled, with join_rows_sampled rows where
+    // it meets the outer wall and join_rows_interior at the inner wall.
+    bool join_two_sided = true;
+    int join_rows = 3, join_rows_sampled = 9, join_rows_interior = 17;
 };
 
 struct TeapotPart {
@@ -82,6 +90,7 @@ struct TeapotPart {
     BezierSurface bezier;  // the reference surface
     ConvSurface conv;      // CONV geometry through nodes of the reference
     LinearSurface linear;  // the same nodes, joined bilinearly
+    Lattice control;       // a two-sided band has no one mesh of nodes: samples of it, for `linear`
     double orientation = 1.0; // sign making (du x dv) point outward
     std::size_t per_u = 1, per_v = 1;
     std::string group = "body"; // body, lid, handle or spout: what the part toggles act on
@@ -147,7 +156,7 @@ struct Teapot {
     std::vector<TeapotJoin> joins;
     std::size_t node_count() const {
         std::size_t total = 0;
-        for (const auto& part : parts) { total += part->conv.lattice.nodes.size(); }
+        for (const auto& part : parts) { total += part->conv.node_count(); }
         return total;
     }
 };
@@ -443,7 +452,8 @@ inline Teapot make_teapot(const TeapotOptions& options) {
                     // axis than the wall it meets: inside the body at the spout's base,
                     // inside the cavity at the end of its channel. The channel is cut where
                     // it crosses the inner wall and blended to that wall there.
-                    JoinResult made = make_join(body, exterior_end ? exterior : interior, true, tube, at_first, width, body_lattice.nu, exterior_end ? 9 : 17);
+                    JoinResult made = make_join(body, exterior_end ? exterior : interior, true, tube, at_first, width, body_lattice.nu, 
+                                                options.join_two_sided ? options.join_rows : exterior_end ? options.join_rows_sampled : options.join_rows_interior, options.join_two_sided);
                     if (!made.ok) { continue; }
                     auto part = std::make_unique<TeapotPart>();
                     part->name = group + "_join";
@@ -452,11 +462,28 @@ inline Teapot make_teapot(const TeapotOptions& options) {
                     part->sampled = true;
                     part->hull = -1;
                     part->conv.lattice = made.blend;
+                    if (options.join_two_sided) {
+                        part->conv.toward = std::make_shared<ConvSurface>();
+                        part->conv.toward->lattice = made.toward;
+                        part->conv.toward->bubble = options.bubble;
+                        part->conv.spread = 4;
+                    }
                     part->per_u = part->per_v = 0;
                     part->row_param.assign(part->conv.lattice.nv, 0.0);
                     part->conv.bubble = options.bubble;
                     part->conv.compile();
                     part->linear.lattice = &part->conv.lattice;
+                    if (options.join_two_sided) {
+                        part->control = made.blend;
+                        part->control.nv = 9;
+                        part->control.nodes.resize(part->control.nu * 9);
+                        for (std::size_t j = 0; j < 9; ++j) {
+                            for (std::size_t k = 0; k < part->control.nu; ++k) {
+                                part->control.at(k, j) = part->conv.position(double(k), double(part->conv.cells_v()) * double(j) / 8.0);
+                            }
+                        }
+                        part->linear.lattice = &part->control;
+                    }
                     teapot.parts.push_back(std::move(part));
                     TeapotJoin join;
                     join.group = group;

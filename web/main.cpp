@@ -71,11 +71,13 @@ EMSCRIPTEN_KEEPALIVE void tp_pointer(int kind, double x, double y, int orbit) {
     if (kind == 3) { engine->poke(x, y); }
 }
 EMSCRIPTEN_KEEPALIVE void tp_zoom(double factor) { engine->zoom(factor); }
+EMSCRIPTEN_KEEPALIVE void tp_fly(double forward, double right, double up) { engine->fly(forward, right, up); }
 EMSCRIPTEN_KEEPALIVE void tp_action(int action) {
     if (action == 0) { engine->drop(); }
     if (action == 1) { engine->reset(); }
     if (action == 2) { engine->bake_vertices(); }
     if (action == 3) { engine->bake_light(); }
+    if (action == 4) { engine->home(); }
 }
 
 // The baked mesh as OBJ text: returns its length; tp_export_data points at it.

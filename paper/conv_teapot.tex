@@ -50,7 +50,7 @@ that interpolate between the two surfaces. These joins are ours, not the
 2026 model's chamfers, and we report how closely they meet the body. Given the same
 nodes on targets native to no method, CONV needs as few as the globally
 solved $C^2$ spline and a half to a quarter of what a local bicubic
-needs; the whole 2026 teapot is 3232 nodes. Finally the surface can be
+needs; the whole 2026 teapot is 2912 nodes. Finally the surface can be
 baked: sampled once to vertices chosen by its own error, drawn by a CPU
 rasterizer with no evaluation per frame, and lit from a texture that the
 ray tracer paints, with reflections that follow the camera taken from
@@ -571,8 +571,10 @@ arrives on the tube with their tangent and curvature. On $\Gamma$ the two
 surfaces are in unison, so the convex combination is taken between points
 that approach each other. The buried part of the tube and the covered
 part of the body are trimmed in their parameter domains, by a cut around
-the tube and a polygon on the body, and the join itself is sampled as a
-small lattice, 16 by 9 nodes, like any other part. The intersection curve
+the tube and a polygon on the body. The join is stored as its two sides:
+a lattice of 16 by 3 nodes for $A$ and another for $B$, with $\beta$
+evaluated in closed form (the comparison with sampling $C$ itself follows
+Table~\ref{tab:joinedges}). The intersection curve
 is found by bisection along each column of the tube against the body's
 radius at that height, which the body's being a surface of revolution
 makes a one-dimensional search.
@@ -594,26 +596,65 @@ replaces.
 \hline
 Join & Gap max & Normal mismatch max\\
 \hline
-Handle, upper & $3.7\times10^{-4}$ & $1.5^\circ$\\
-Handle, lower & $1.6\times10^{-4}$ & $3.2^\circ$\\
-Spout base & $7.9\times10^{-4}$ & $1.6^\circ$\\
-Spout channel, interior & $2.3\times10^{-4}$ & $0.6^\circ$\\
+Handle, upper & $3.7\times10^{-4}$ & $0.8^\circ$\\
+Handle, lower & $1.6\times10^{-4}$ & $1.1^\circ$\\
+Spout base & $7.9\times10^{-4}$ & $0.8^\circ$\\
+Spout channel, interior & $2.3\times10^{-4}$ & $0.4^\circ$\\
 \hline
 \end{tabular}
 \end{table}
 
-The joins agree with the body to a few degrees; the mismatch comes from
-sampling \eqref{eq:join} at only sixteen columns around. Two details of
-the sampling matter. The band's points are found by walking the given
-distance along each surface in short steps that read the surface's own
-speed, not by one step from the speed at the start, which is wrong where
-rows are graded. And the band's edge tangent is taken by CONV from its
-first four rows, over which the blend weight $\beta$ must still be
-small. With nine rows across, the fourth row has $\beta=0.28$, and the
-tangent is off by about $0.11\,\Delta/w$ radians, $\Delta$ the distance
-between the two surfaces and $w$ the band's width. On the exterior
-joins that is a degree or two, and the interior join is given seventeen
-rows. The interior join was at first built at the wrong place. The
+The joins agree with the body to about a degree. The band's points are
+found by walking the given distance along each surface in short steps
+that read the surface's own speed, not by one step from the speed at the
+start, which is wrong where rows are graded.
+
+How the band is stored decides how many nodes it needs. If $C$ itself is
+sampled as a lattice of rows across the band, CONV takes the tangent at
+each edge from the first four rows by a one-sided stencil, and over
+those rows $\beta$ is already rising: the error is all at the two edges
+(Table~\ref{tab:joinstore}), and it took nine rows on the exterior joins
+and seventeen on the interior one to hold them to a few degrees. But
+$\beta$ is known in closed form, and $A$ and $B$ are short walks on
+smooth surfaces. Stored as two lattices of three rows each and blended
+at evaluation, the band has exactly the weight of \eqref{eq:join}, its
+edges have the tangent plane and curvature of the three-row lattice
+they lie on, and that lattice is a quadratic through points of the
+surface over a distance $w$. The four joins take 384 nodes in place of
+704 and are closer to the reference at every join. To whoever samples
+the surface by its cells the band presents four cells for each interval
+between its rows, since it turns the normal through $90^\circ$ across
+two intervals.
+
+\begin{table}[H]
+\caption{The four joins against how they are stored. Distance and normal
+are the largest deviations from the two-sided band with 65 rows a side;
+the normal's largest deviation is at the band's edges in every case.}
+\label{tab:joinstore}
+\centering
+\scriptsize
+\begin{tabular}{l|c|cc}
+\hline
+Stored as & Nodes & Distance & Normal\\
+\hline
+$C$ sampled, 7 rows & 448 & $1.2\times10^{-3}$ & $9.6^\circ$\\
+$C$ sampled, 9 rows (17 interior) & 704 & $4.5\times10^{-4}$ & $3.1^\circ$\\
+$C$ sampled, 17 rows & 1088 & $4.4\times10^{-5}$ & $0.5^\circ$\\
+$A$ and $B$, 2 rows each & 256 & $2.3\times10^{-3}$ & $5.2^\circ$\\
+$A$ and $B$, 3 rows each & 384 & $2.5\times10^{-4}$ & $0.9^\circ$\\
+$A$ and $B$, 4 rows each & 512 & $1.4\times10^{-4}$ & $0.3^\circ$\\
+\hline
+\end{tabular}
+\end{table}
+
+Before this change the joins held 22\% of the teapot's nodes on 1.6\% of
+its surface; they now hold 13\%. Creases cost less than that: rows
+within 0.1 of a crease or an end of a sheet are 11\% of the body's rows
+on 5\% of its length and 18\% of the lid's on 12\%. In the baked mesh
+of Section~\ref{sec:baked} the joins have 1051 of 13\,663 vertices; the
+count there is set by the angle the band turns through, not by its rows.
+
+The interior join was at first built at the wrong place. The
 spout's channel continues past the body's inner wall into the cavity,
 and the join was made at the end of that stub, which left a lip standing
 in the cavity that the 2026 model does not have. The part of a tube to
@@ -621,7 +662,7 @@ remove is the part nearer the axis than the wall it meets, at both ends:
 inside the body at the spout's base, inside the cavity at the end of the
 channel. Cut where it crosses the inner wall and blended to the wall
 there, the channel opens flush into the cavity and meets the wall within
-$0.6^\circ$.
+$0.4^\circ$.
 Fig.~\ref{fig:unified} shows reflection lines running from the body
 through the join onto the spout without a break.
 
@@ -631,9 +672,9 @@ spout differs from the official one. What they show is that a join needs
 no new kind of surface: it is the same blend between two continuous
 surfaces that CONV already uses between its two factor orders.
 
-The unified teapot has 3232 nodes in eight lattices (3104 before the
-interior join was given seventeen rows; the layout measurements of
-Section~\ref{sec:baked} were made on that model), against 5346 in 66,
+The unified teapot has 2912 nodes: 2528 in its four sheets and 384 in
+the joins (the layout measurements of Section~\ref{sec:baked} were made
+with the joins sampled, on 3104 nodes), against 5346 in 66,
 and every sheet lies within $7.5\times10^{-4}$ of its source. (Placed by
 radius of curvature the same sheets took 5392 nodes and strayed by up to
 $1.1\times10^{-2}$.) A $640\times400$ frame of it takes 44\,ms by
@@ -1224,22 +1265,63 @@ rasterizer in PlaySuite's fish tank; the code is our own.
 
 Each part has a light map in its own chart: around the part one way,
 arc length along it the other, so texels are spread evenly over the
-surface however its rows are graded. To bake, every texel is shaded
-exactly as the ray tracer shades a hit at that point seen from the
-camera, with its shadow, texture and traced reflection, and stored
+surface however its rows are graded. To bake whole, every texel is
+shaded exactly as the ray tracer shades a hit at that point seen from
+the camera, with its shadow, texture and traced reflection, and stored
 with a chain of half-size levels; a texel facing away from the camera
 is shaded for the mirrored view direction, so the far side holds its own
 outward lighting. A frame then reads the map between the two levels
 that match each triangle's size on screen. 601\,808 texels of 0.016
-units bake in about 130\,ms.
+units bake in about 130\,ms. A map baked whole holds for one camera and
+one pose.
+
+\subsection{A bake that goes with the body}
+\label{sec:posefree}
+
+The light of this scene has three parts with different dependences. The
+sky's diffuse light and the sun's cosine factor depend only on the
+normal as it is turned now, and are closed forms. The surface's own
+colour belongs to the body. The fraction of the sun that reaches a point
+past the body itself depends on the direction of the sun in the body's
+frame, so it changes when the body turns and not when the body or the
+camera is moved. The map therefore keeps the colour in its three colour
+channels and the lit fraction in the fourth, and a pixel is
+\[
+ \text{colour}\times\bigl(\text{ambient}(n)+\max(0,n\cdot l)\,\text{lit}\bigr)
+\]
+with $n$ the interpolated normal carried by the pose. The shadow on the
+floor is treated the same way: it is baked once as a lit fraction over a
+square of the floor, kept relative to the body's origin, and looked up
+at a floor point moved back along the light by however far the body has
+moved since. A body lifted off the floor leaves its shadow where the
+light puts it. The drawn floor reads this texture too, so no shadow ray
+is traced in any frame.
+
+While the body turns, the lit fraction and the floor's shadow are read
+from the shadow map, drawn from the mesh at $512^2$, with no traced
+edges. When it comes to rest the lit fraction is found again with exact
+edges. The first bake keeps every texel's point and normal in the body's
+frame, so this pass evaluates no surface: 207\,ms on one thread against
+571 for the first bake (about 290\,ms against 1090 in the browser).
+Against the same poses shaded per pixel with no bake, the picture after
+a shift of the body differs by more than 8 of 255 in 651 of 576\,000
+pixels, and after a turn of $40^\circ$ in 385 before the lit fraction is
+found again and 816 after. In the browser at $960\times600$ the shading
+of a moving frame takes 8\,ms with the bake and 13 without (frames of 21
+and 25\,ms), and a frame at rest 51\,ms against 65, or 50 against 71
+with gloss and the floor's reflection on.
+
+This scene's room light is a closed form of the normal. A room with
+content would need it tabulated by direction, and the body's own
+blocking of that light stored per texel; neither is done here.
 
 \subsection{Reflections from emitters}
 
 A light map baked whole freezes whatever depends on the view: turn the
 camera and the highlights and the floor's reflection stay painted where
-they were (Fig.~\ref{fig:emitter}, right). So the map keeps only what
-does not depend on the view, the diffuse light and the lit fraction, and
-the rest is added at every frame. Each pixel has an interpolated normal,
+they were (Fig.~\ref{fig:emitter}, right). With the map holding only
+the colour and the lit fraction, what depends on the view is added at
+every frame. Each pixel has an interpolated normal,
 hence a mirror direction, and that direction is answered by emitters and
 not by tracing. Above the horizon it is the sky and its window. Below,
 it is a stand-in for the floor: an object that is never drawn, whose
@@ -1303,6 +1385,18 @@ they differ. A texel that saw the receiving surface's own neighbourhood
 is not counted as disagreement, which keeps the wide band of doubt along
 a terminator from being traced. The edge is then as sharp as the surface
 makes it at any zoom, for 0.1 to 0.6 evaluations per surface pixel.
+
+Where the light grazes the surface a traced ray meets the surface's own
+neighbourhood at a glancing angle, so the traced answer is weighted by
+how squarely the surface faces the light and the depth image's answer
+takes over toward the terminator. That is wrong where another part's
+shadow falls across a terminator, as the body's does across the base of
+the spout: the depth image's one-texel ramp is drawn out by the grazing
+angle into streaks. When a texel near the point holds something more
+than 0.3 nearer the light, the traced ray is used in full; it meets that
+occluder squarely. The streaks go, and a frame at rest costs 4\% more.
+In the light map the same edge is limited by the texel, 0.016 units,
+which shows as steps when the camera is flown close.
 
 \begin{figure*}[t]
 \centering
@@ -1384,7 +1478,14 @@ can be taken from the lattice with no separate model: the convex hull of
 a group of nodes is a convex piece of the teapot. For the 1975 to 1987
 versions we use eleven hulls, one for the body, two for the lid, and four
 each along the handle and spout; for the 2026 version, one hull per
-group of exterior lattices. We hand them to the rigid-body engine of a rock-stacking game,
+group of exterior lattices. The hull of a round part is not taken
+through its nodes: with 12 nodes to a ring that hull lies inside the
+surface by 3\% of the radius, and a teapot resting on its side showed
+the floor through its inner wall. The hull is
+taken from 24 points of each ring, moved out from the axis so that its
+flat sides touch the ring, and from the 13 rows of the profile's convex
+outline that leave the least of it outside. The resting surface is then
+within 0.002 of the floor. We hand the hulls to the rigid-body engine of a rock-stacking game,
 whose wrench-transport solver resolves contact, friction and rolling
 resistance in one solve per frame. One model unit is taken as 7\,cm. The
 engine returns a pose. The lattice stays at rest and the pose is applied
@@ -1476,7 +1577,7 @@ lattices. Across their seams those lattices do not carry curvature
 continuity. Whole sheets reduce the curvature jump from 0.16 to 0.003: the body with its interior is one
 lattice, the lid another, with rows placed by a projective warp, and the
 handle and spout meet the body in joins that are blends of the two
-surfaces. With rows placed by CONV's own error the whole teapot is 3232
+surfaces. With rows placed by CONV's own error the whole teapot is 2912
 nodes, and on targets native to no method a CONV lattice needs as few
 nodes as the globally solved $C^2$ spline while reading only the nodes
 around a cell. When speed matters more than exactness the lattice bakes

@@ -141,12 +141,12 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
         <label class="row">Download
           <select id="objUp"><option value="0">y-up</option><option value="1">z-up</option></select></label>
         <button id="objSave">Download mesh (.obj)</button>
-        <p class="hint">Bake vertices samples the CONV surfaces once to a triangle mesh, drawn by a CPU rasterizer with no surface evaluation per frame. Bake light then has the ray tracer shade every texel of a light map as seen from the camera now; with moving reflections on, the map keeps only light that does not depend on the view, and highlights and the floor’s reflection are added each frame from emitters along the mirror direction: the sky and window above, and below an invisible stand-in for the floor that carries its baked shadow.</p>
+        <p class="hint">Bake vertices samples the CONV surfaces once to a triangle mesh, drawn by a CPU rasterizer with no surface evaluation per frame. Bake light then stores, for every texel of a light map, the surface’s own colour and how much of the light reaches it past the teapot itself; light is computed per pixel from the normal as it is turned now, and highlights and the floor’s reflection are added each frame from emitters along the mirror direction. The bake goes with the teapot: moving it without turning it, or moving the camera, changes nothing in it, and the shadow on the floor is carried along. While the teapot turns, shadows come from the shadow map; when it rests, the lit fraction is found again. With moving reflections off, the map holds the whole picture as seen from the camera and is dropped when the teapot moves.</p>
       </fieldset>
       <fieldset>
         <legend>Simulation</legend>
         <button class="primary" id="drop">Drop</button><button id="pause">Run</button><button id="reset">Reset</button>
-        <p class="hint">The drop is a rigid-body simulation shown at half speed. Drag the teapot: it is held at the point you picked and swings from there. Drag the background, or hold <kbd>Shift</kbd>, to orbit. Scroll to zoom. Double-click to poke.</p>
+        <p class="hint">The drop is a rigid-body simulation shown at half speed. Drag the teapot: it is held at the point you picked and swings from there. Drag the background, or hold <kbd>Shift</kbd>, to orbit. Scroll to zoom. Double-click to poke. Arrow keys fly the camera forward, back and sideways, <kbd>Page Up</kbd> and <kbd>Page Down</kbd> raise and lower it, <kbd>Shift</kbd> slows it, <kbd>Home</kbd> returns it.</p>
       </fieldset>
     </div>
   </div>
@@ -171,10 +171,21 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
   };
   resize(width, height);
   const running = () => engine._tp_stat(10) !== 0;
+  const held = new Set();
+  const flightKeys = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown'];
+  let slow = false, wasFlying = false;
   const pauseButton = document.getElementById('pause');
   const frame = (now) => {
     const dt = Math.min(0.05, (now - last) / 1000);
     last = now;
+    // Held arrow keys fly the camera: 1.5 units a second, a fifth of that with Shift.
+    if (held.size > 0) {
+      const axis = (plus, minus) => (held.has(plus) ? 1 : 0) - (held.has(minus) ? 1 : 0);
+      const reach = (slow ? 0.3 : 1.5) * dt;
+      engine._tp_fly(axis('ArrowUp', 'ArrowDown') * reach, axis('ArrowRight', 'ArrowLeft') * reach, axis('PageUp', 'PageDown') * reach);
+      dirty = true;
+      wasFlying = true;
+    } else if (wasFlying) { wasFlying = false; dirty = true; }
     if (dirty || running()) {
       const pointer = engine._tp_draw(dt);
       image.data.set(engine.HEAPU8.subarray(pointer, pointer + width * height * 4));
@@ -270,6 +281,15 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
   canvas.addEventListener('dblclick', (event) => { const [x, y] = place(event); engine._tp_pointer(3, x, y, 0); dirty = true; });
   canvas.addEventListener('contextmenu', (event) => event.preventDefault());
   canvas.addEventListener('wheel', (event) => { event.preventDefault(); engine._tp_zoom(Math.exp(event.deltaY * 0.0012)); dirty = true; }, { passive: false });
+  const typing = (event) => ['INPUT', 'SELECT', 'TEXTAREA'].includes(event.target.tagName) && event.target.type !== 'checkbox';
+  window.addEventListener('keydown', (event) => {
+    slow = event.shiftKey;
+    if (typing(event)) { return; }
+    if (flightKeys.includes(event.key)) { held.add(event.key); event.preventDefault(); }
+    if (event.key === 'Home') { engine._tp_action(4); dirty = true; event.preventDefault(); }
+  });
+  window.addEventListener('keyup', (event) => { slow = event.shiftKey; held.delete(event.key); });
+  window.addEventListener('blur', () => held.clear());
   window.teapot = { engine, redraw: () => { dirty = true; } };
 })();
 </script>

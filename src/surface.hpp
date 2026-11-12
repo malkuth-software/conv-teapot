@@ -9,6 +9,7 @@
 #include "conv_line.hpp"
 #include <cmath>
 #include <cstddef>
+#include <memory>
 #include <vector>
 
 namespace tconv {
@@ -120,8 +121,22 @@ class ConvSurface final : public Surface {
 public:
     Lattice lattice;
     Bubble bubble = Bubble::continuous;
+    // A band between two surfaces. `lattice` is then the side the band leaves
+    // and `toward` the side it arrives at, both with the same cells, and the
+    // surface is  A + beta(tau) (B - A),  tau = v / cells_v,
+    // beta = tau^3 (10 - 15 tau + 6 tau^2). The weight is evaluated in closed
+    // form: its first and second derivatives vanish at both edges, so the band
+    // has there the tangent plane and curvature of the side it lies on.
+    std::shared_ptr<ConvSurface> toward;
+    // A band's few rows carry a surface that turns far across it. To whoever
+    // samples the surface by its cells (the renderers' lattices, the mesh) it
+    // presents `spread` cells for each interval between its rows.
+    std::size_t spread = 1;
+
+    std::size_t node_count() const { return lattice.nodes.size() + (toward ? toward->lattice.nodes.size() : 0); }
 
     void compile() {
+        if (toward) { toward->compile(); }
         const std::size_t cu = lattice.cells_u();
         const LineLayout layout_u = lattice.layout_u();
         const LineLayout layout_v = lattice.layout_v();
@@ -163,10 +178,37 @@ public:
     }
 
     std::size_t cells_u() const override { return lattice.cells_u(); }
-    std::size_t cells_v() const override { return lattice.cells_v(); }
+    std::size_t cells_v() const override { return lattice.cells_v() * spread; }
     bool periodic_u() const override { return lattice.wrap_u; }
 
     SurfacePoint eval(double u, double v) const override {
+        if (!toward) { return eval_own(u, v); }
+        const double scale = 1.0 / double(spread);
+        SurfacePoint a = eval_own(u, v * scale), b = toward->eval_own(u, v * scale);
+        a.dv = a.dv * scale;
+        b.dv = b.dv * scale;
+        const double rows = double(cells_v());
+        const double tau = v <= 0.0 ? 0.0 : v >= rows ? 1.0 : v / rows;
+        const double beta = tau * tau * tau * (10.0 + tau * (6.0 * tau - 15.0));
+        const double slope = 30.0 * tau * tau * (1.0 - tau) * (1.0 - tau) / rows;
+        SurfacePoint point;
+        point.p = a.p + (b.p - a.p) * beta;
+        point.du = a.du + (b.du - a.du) * beta;
+        point.dv = a.dv + (b.dv - a.dv) * beta + (b.p - a.p) * slope;
+        return point;
+    }
+
+    Vec3 position(double u, double v) const override {
+        if (!toward) { return position_own(u, v); }
+        const double scale = 1.0 / double(spread);
+        const Vec3 a = position_own(u, v * scale);
+        const double rows = double(cells_v());
+        const double tau = v <= 0.0 ? 0.0 : v >= rows ? 1.0 : v / rows;
+        return a + (toward->position_own(u, v * scale) - a) * (tau * tau * tau * (10.0 + tau * (6.0 * tau - 15.0)));
+    }
+
+private:
+    SurfacePoint eval_own(double u, double v) const {
         const Dual ds_seed(0.0, 1.0, 0.0), dt_seed(0.0, 0.0, 1.0);
         Dual out[3];
         evaluate<Dual>(u, v, ds_seed, dt_seed, out);
@@ -177,18 +219,17 @@ public:
         return point;
     }
 
-    Vec3 position(double u, double v) const override {
+    Vec3 position_own(double u, double v) const {
         double out[3];
         evaluate<double>(u, v, 0.0, 0.0, out);
         return {out[0], out[1], out[2]};
     }
 
-private:
     template<class T> void evaluate(double u, double v, const T& s_seed, const T& t_seed, T* out) const {
         std::size_t cell_u = 0, cell_v = 0;
         double s = 0.0, t = 0.0;
         locate(u, cells_u(), lattice.wrap_u, cell_u, s);
-        locate(v, cells_v(), false, cell_v, t);
+        locate(v, lattice.cells_v(), false, cell_v, t);
         const Basis<T> basis_s = make_basis(T(s) + s_seed);
         const Basis<T> basis_t = make_basis(T(t) + t_seed);
         T w[3][8];

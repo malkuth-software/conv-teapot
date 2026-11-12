@@ -38,6 +38,7 @@ int main(int argc, char** argv) {
     teapot_options.sheet_rows = std::size_t(number("rows", 72));
     teapot_options.sheet_around = std::size_t(number("around", 12));
     teapot_options.joins = number("joins", 1) != 0;
+    teapot_options.join_two_sided = number("twosided", 1) != 0;
     teapot_options.blinn_scale = number("blinn", version == "1975" ? 0 : 1) != 0;
     const std::string hide = get("hide", "");
     teapot_options.smooth = number("smooth", 0) != 0;
@@ -112,7 +113,7 @@ int main(int argc, char** argv) {
         render_part.surface = geometry == "bezier" && !part->sampled ? static_cast<const Surface*>(&part->bezier)
                               : geometry == "linear" ? static_cast<const Surface*>(&part->linear)
                                                      : static_cast<const Surface*>(&part->conv);
-        if (!pose.identity()) {
+        if (!pose.identity() || args.count("shift") != 0 || args.count("turn") != 0) {
             posed[part_index].base = render_part.surface;
             posed[part_index].pose = &pose;
             render_part.surface = &posed[part_index];
@@ -140,6 +141,19 @@ int main(int argc, char** argv) {
         scene.cut_offset = dot(scene.cut_normal, pose.b);
     }
     scene.axis = pose.direction({0.0, 1.0, 0.0});
+    scene.pose = pose;
+    if (args.count("tip") != 0 || args.count("drop") != 0) {
+        // How far the surface itself is from the floor where the body rests.
+        double low = 1e30;
+        for (const auto& part : teapot.parts) {
+            for (int j = 0; j <= 200; ++j) {
+                for (int i = 0; i < 96; ++i) {
+                    low = std::min(low, pose.point(part->conv.position(double(part->conv.cells_u()) * i / 96.0, double(part->conv.cells_v()) * j / 200.0)).y);
+                }
+            }
+        }
+        std::printf("lowest point of the surface: y = %.4f\n", low);
+    }
     scene.stamp = number("cache", 1) != 0 ? 1 : 0; // the scene does not change between repeats
     scene.open_top = hide.find("lid") != std::string::npos;
     RenderOptions options;
@@ -208,6 +222,35 @@ int main(int argc, char** argv) {
             }
             renderer.bake_light(scene, bake_camera, options, width, height, number("texel", 0.016));
             std::printf("light: %zu texels, %.2f ms\n", mesh.texels, mesh.ms_light);
+        }
+    }
+    if (args.count("shift") != 0 || args.count("turn") != 0) {
+        // Move the body after the bake: shift=X,Y,Z, and turn=DEG about the vertical through its origin.
+        // relight=1 then finds the baked lit fraction again, as the demo does when the body comes to rest.
+        double dx = 0, dy = 0, dz = 0;
+        if (args.count("shift") != 0) { std::sscanf(args["shift"].c_str(), "%lf,%lf,%lf", &dx, &dy, &dz); }
+        const double angle = number("turn", 0.0) * M_PI / 180.0;
+        Rigid turn;
+        turn.a[0] = std::cos(angle); turn.a[2] = std::sin(angle);
+        turn.a[6] = -std::sin(angle); turn.a[8] = std::cos(angle);
+        Rigid next;
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 3; ++c) { next.a[r * 3 + c] = turn.a[r * 3] * pose.a[c] + turn.a[r * 3 + 1] * pose.a[3 + c] + turn.a[r * 3 + 2] * pose.a[6 + c]; }
+        }
+        next.b = turn.direction(pose.b) + Vec3{dx, dy, dz};
+        pose = next;
+        scene.pose = pose;
+        scene.axis = pose.direction({0.0, 1.0, 0.0});
+        scene.stamp += 1;
+        if (scene.mesh != nullptr) {
+            std::vector<const Surface*> surfaces;
+            for (const RenderPart& part : scene.parts) { surfaces.push_back(part.surface); }
+            refresh_mesh(mesh, surfaces);
+            if (number("relight", 0) != 0) {
+                const double before = mesh.ms_light;
+                renderer.bake_light(scene, camera, options, width, height, number("texel", 0.016), true);
+                std::printf("relight: %.2f ms (first bake %.2f ms)\n", mesh.ms_light, before);
+            }
         }
     }
     const int repeat = int(number("repeat", 1));

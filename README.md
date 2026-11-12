@@ -75,7 +75,7 @@ engine of PlaySuite's rock-stacking game (wrench-transport solver).
 - **Rows by CONV's own error.** The unified sheets place their rows by
   equidistributing the CONV line's own error (`plan_rows_by_error` in
   `src/unified.hpp`). The 2026 teapot went from 5392 nodes within 1.1e-2 of
-  its source to 3104 nodes within 7.5e-4.
+  its source to 2528 nodes in four sheets within 7.5e-4 (2912 with the joins).
 - **Baked mesh and CPU rasterizer** (`src/raster.hpp`). *Bake vertices*
   samples the surfaces once to triangles; three layouts are offered and a
   fourth (k-means clustering, with e-means updates) was tried and lost
@@ -119,10 +119,28 @@ engine of PlaySuite's rock-stacking game (wrench-transport solver).
   direction, and a download of the baked mesh as OBJ in y-up or z-up.
 - **Interior join.** The spout's channel is cut where it crosses the body's
   inner wall and blended to the wall there, so it opens flush into the cavity
-  and meets the wall within 0.6 degrees. (It was first joined at the end of
-  the stub that runs on into the cavity, which left a lip.) Its band has
-  seventeen rows across, and band points are found by walking true distances
-  along each surface.
+  and meets the wall within 0.4 degrees. (It was first joined at the end of
+  the stub that runs on into the cavity, which left a lip.) Band points are
+  found by walking true distances along each surface.
+- **Joins stored as two sides.** A join's band is a blend between a strip of
+  the body and a strip of the tube with a known quintic weight. Storing the
+  two strips as lattices of three rows each and evaluating the weight in
+  closed form takes 384 nodes for the four joins in place of 704, and the
+  band is closer to its definition at every join (`tools/seam_study.cpp`,
+  `results/seam_study.txt`). The teapot is 2912 nodes.
+- **A light bake that goes with the body.** The light map holds the surface's
+  own colour and, in alpha, the fraction of the sun that reaches each texel
+  past the teapot itself; light is computed per pixel from the normal as it
+  is turned now. The bake holds when the teapot or the camera moves; the
+  floor's shadow is kept relative to the body and carried along the light.
+  While the teapot turns, shadows come from the shadow map, and the lit
+  fraction is found again when it rests.
+- **Arrow keys** fly the camera; Page Up and Page Down raise and lower it,
+  Shift slows it, Home returns it.
+- **Collision hulls enclose round parts.** A hull through 12 nodes of a ring
+  lies inside the surface by 3% of the radius, so a teapot on its side sank
+  its wall into the floor. Hulls of the body and lid are now taken from 24
+  points per ring, moved out so the hull's sides touch the ring.
 - **Speed in the browser.** While the picture is changing it is drawn at
   half size with one visibility sample per pixel, and the mesh is carried by
   the pose. At 960 x 600 a moving frame takes about 21 ms with the mesh and

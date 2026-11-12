@@ -24,6 +24,9 @@
 #include <thread>
 #include <vector>
 
+#ifndef TCONV_FAR_OCCLUDER
+#define TCONV_FAR_OCCLUDER 0.3
+#endif
 namespace tconv {
 
 struct Camera {
@@ -138,6 +141,7 @@ struct Scene {
     // tree for incoherent rays) is kept from frame to frame while it holds.
     std::uint64_t stamp = 0;
     Mesh* mesh = nullptr; // baked geometry, for Method::raster and for light baking
+    Rigid pose;           // the body's motion from rest, as its surfaces have it
     // Cutaway: everything with dot(cut_normal, p) > cut_offset is removed,
     // and where the cut passes through solid material the cut face is filled.
     bool cut = false;
@@ -1228,7 +1232,10 @@ private:
         const Vec3 base = checker(p, width);
         double light = 1.0;
         if (options.lighting) {
+            const bool baked = options.method == Method::raster && options.baked_light && scene.mesh != nullptr && scene.mesh->lit && scene.mesh->lit_diffuse_only &&
+                               scene.mesh->floor.size != 0;
             const double lit = !options.shadows ? 1.0
+                               : baked ? floor_lit_baked(scene, p)
                                : primary != nullptr ? shadow_lit(scene, options, *primary, p + Vec3{0.0, 0.004, 0.0}, 0.02, t / primary->focal, Vec3{1, 0, 0}, Vec3{0, 0, 1}, std::uint16_t(0xffff), 0.0, 0.0, *work)
                                                     : shadow_.lit(p, 0.02);
             light = 0.55 + 0.45 * lit * std::fmax(0.0, scene.light.y);
@@ -1242,6 +1249,86 @@ private:
     // nothing toward the terminator; a step there would outline every
     // shadowed strip that happens to face the light.
     static double mirror_dim(double lit, double n_l) { return 1.0 - 0.5 * (1.0 - lit) * detail::smoothstep(0.0, 0.3, n_l); }
+
+    // The surface's own colour at a hit, before any light.
+    static Vec3 base_colour(const Scene& scene, const RenderOptions& options, const RenderPart& part, const detail::Solve& solve) {
+        const Surface& surface = *part.surface;
+        Vec3 base{0.93, 0.92, 0.89};
+        if (options.texture > 0 && std::size_t(options.texture) <= scene.textures.size()) {
+            const Texture& texture = *scene.textures[std::size_t(options.texture - 1)];
+            double tx, ty;
+            if (options.mapping == TextureMap::patch) {
+                tx = -solve.u / double(std::max<std::size_t>(1, part.per_u));
+                ty = solve.v / double(std::max<std::size_t>(1, part.per_v));
+                ty = ty - std::floor(ty);
+            } else {
+                // Around the part (three times for the round parts), reading
+                // left to right from outside; along it from top to bottom.
+                tx = 0.70 - solve.u / double(surface.cells_u()) * (surface.cells_u() >= 16 ? 3.0 : 1.0);
+                ty = solve.v / double(surface.cells_v());
+            }
+            base = texture.sample(tx, ty, options.filter);
+        }
+        return base;
+    }
+
+    // The depth allowance of a shadow map lookup on a surface whose normal makes n_l with the light.
+    // The shadow map is drawn from flat pieces, which stray from the surface
+    // by more along the light the more the light grazes it: the allowance
+    // grows with the tangent of that angle.
+    static double shadow_bias(double n_l) { return 0.02 + 0.02 * std::fmin(12.0, std::sqrt(std::fmax(0.0, 1.0 - n_l * n_l)) / n_l); }
+
+    // The fraction of the light that reaches a hit on a surface: 1 where it
+    // faces away (no light to block). `footprint` is the size on the surface
+    // of what the answer is for (a pixel, or a texel of a bake).
+    double surface_lit(const Scene& scene, const RenderOptions& options, const detail::View& primary, const detail::Solve& solve, Vec3 normal,
+                       std::uint16_t part_index, int depth, double footprint, Work& work) const {
+        const double n_l = dot(normal, scene.light);
+        if (!options.shadows || !(n_l > 0.0)) { return 1.0; }
+        const double lu = length(solve.point.du), lv = length(solve.point.dv);
+        // Where the light only grazes the surface a traced light ray meets it
+        // at a glancing angle and its answer is unreliable, so the traced
+        // edge is used in proportion to how squarely the surface faces the
+        // light, and the shadow map's own smooth answer takes over toward
+        // the terminator.
+        const double bias = shadow_bias(n_l);
+        const double coarse = shadow_.lit(solve.point.p + normal * 0.02, bias);
+        double trust = detail::smoothstep(0.2, 0.5, n_l);
+        // That doubt is about the surface's own neighbourhood. Where something
+        // well clear of the surface along the light is in the way (another
+        // part's shadow falling across a terminator), the traced ray meets
+        // that occluder squarely and is used in full; the map's answer there
+        // is one texel drawn out into a streak by the grazing angle.
+        if (trust < 1.0 && depth == 0 && options.exact_shadows && shadow_.size != 0 && !shadow_.beyond(solve.point.p) &&
+            shadow_.settled(solve.point.p + normal * 0.02, TCONV_FAR_OCCLUDER, [](std::uint16_t, float, float) { return false; }) != 1) {
+            trust = 1.0;
+        }
+        if (!(depth == 0 && trust > 0.0 && lu > 1e-9 && lv > 1e-9)) { return coarse; }
+        const double traced = shadow_lit(scene, options, primary, solve.point.p + normal * 0.02, bias, footprint, solve.point.du * (1.0 / lu),
+                                         solve.point.dv * (1.0 / lv), part_index, solve.u, solve.v, work);
+        return coarse + (traced - coarse) * trust;
+    }
+
+    // Does the baked lit fraction hold for the scene as it is now? It does
+    // while the body has the rotation it was baked at.
+    static bool light_holds(const Scene& scene) {
+        if (scene.mesh == nullptr || !scene.mesh->lit || !scene.mesh->lit_diffuse_only) { return false; }
+        for (int k = 0; k < 9; ++k) {
+            if (std::fabs(scene.mesh->light_turn[k] - scene.pose.a[k]) > 1e-7) { return false; }
+        }
+        return true;
+    }
+
+    // The lit fraction of a point of the floor from the bake: the body's
+    // shadow, kept relative to the body and carried along the light to
+    // wherever the body is now. While the body is turned from the rotation
+    // it was baked at, the shadow map answers instead.
+    double floor_lit_baked(const Scene& scene, Vec3 q) const {
+        if (!light_holds(scene)) { return shadow_.size != 0 && !shadow_.beyond(q) ? shadow_.lit(q + Vec3{0.0, 0.004, 0.0}, 0.02) : 1.0; }
+        const Vec3 moved = scene.pose.b - scene.mesh->light_origin;
+        const double along = scene.light.y > 1e-6 ? moved.y / scene.light.y : 0.0;
+        return scene.mesh->floor.lit_at(q.x - (moved.x - scene.light.x * along), q.z - (moved.z - scene.light.z * along));
+    }
 
     Vec3 shade_surface(const Scene& scene, const RenderOptions& options, const detail::View& primary, Vec3 dir, const detail::Solve& solve,
                        std::uint16_t part_index, int depth, Work& work, double* lit_out = nullptr) const {
@@ -1265,23 +1352,7 @@ private:
         if (back) { normal = normal * -1.0; }
         const bool inside = back && !part.two_sided;
 
-        // Base colour.
-        Vec3 base{0.93, 0.92, 0.89};
-        if (options.texture > 0 && std::size_t(options.texture) <= scene.textures.size()) {
-            const Texture& texture = *scene.textures[std::size_t(options.texture - 1)];
-            double tx, ty;
-            if (options.mapping == TextureMap::patch) {
-                tx = -solve.u / double(std::max<std::size_t>(1, part.per_u));
-                ty = solve.v / double(std::max<std::size_t>(1, part.per_v));
-                ty = ty - std::floor(ty);
-            } else {
-                // Around the part (three times for the round parts), reading
-                // left to right from outside; along it from top to bottom.
-                tx = 0.70 - solve.u / double(surface.cells_u()) * (surface.cells_u() >= 16 ? 3.0 : 1.0);
-                ty = solve.v / double(surface.cells_v());
-            }
-            base = texture.sample(tx, ty, options.filter);
-        }
+        Vec3 base = base_colour(scene, options, part, solve);
         const bool chrome = options.material == 1 && options.texture == 0;
         if (options.material == 2 && options.texture == 0 && options.wire != Wire::only) {
             // Reflection lines: stripes of the mirror direction, the standard
@@ -1299,9 +1370,7 @@ private:
         Vec3 colour = base;
         if (options.lighting) {
             const double n_l = dot(normal, scene.light);
-            double lit = 1.0;
-            if (options.shadows && n_l > 0.0) {
-                const double lu = length(solve.point.du), lv = length(solve.point.dv);
+            const double lit = surface_lit(scene, options, primary, solve, normal, part_index, depth, solve.t / primary.focal, work);
                 // Where the light only grazes the surface a traced light ray
                 // meets it at a glancing angle and its answer is unreliable,
                 // so the traced edge is used in proportion to how squarely
@@ -1310,19 +1379,6 @@ private:
                 // The shadow map is drawn from flat pieces, which stray from the
                 // surface by more along the light the more the light grazes
                 // it: the depth allowance grows with the tangent of that angle.
-                const double bias = 0.02 + 0.02 * std::fmin(12.0, std::sqrt(std::fmax(0.0, 1.0 - n_l * n_l)) / n_l);
-                const double coarse = shadow_.lit(solve.point.p + normal * 0.02, bias);
-                const double trust = detail::smoothstep(0.2, 0.5, n_l);
-                lit = coarse;
-                if (depth == 0 && trust > 0.0 && lu > 1e-9 && lv > 1e-9) {
-                    const double traced = shadow_lit(scene, options, primary, solve.point.p + normal * 0.02, bias, solve.t / primary.focal,
-                                                     solve.point.du * (1.0 / lu), solve.point.dv * (1.0 / lv), part_index, solve.u, solve.v, work);
-                    lit = coarse + (traced - coarse) * trust;
-#ifdef TCONV_SHADOW_DEBUG
-                    if (std::fabs(traced - coarse) > 0.5) { std::fprintf(stderr, "part %d u %.3f v %.3f n_l %.3f coarse %.2f traced %.2f\n", int(part_index), solve.u, solve.v, n_l, coarse, traced); }
-#endif
-                }
-            }
             const double diffuse = std::fmax(0.0, n_l) * lit;
             const double up = 0.5 * (normal.y + 1.0);
             const Vec3 ambient = Vec3{0.30, 0.28, 0.26} * (1.0 - up) + Vec3{0.46, 0.50, 0.56} * up;
@@ -1592,55 +1648,111 @@ public:
     // camera is shaded for the mirror image of the view direction, so the
     // far side holds its own outward lighting. `texel` is the texel size in
     // model units.
-    void bake_light(const Scene& scene, const Camera& camera, const RenderOptions& options, int width, int height, double texel = 0.016) {
+    // `relight`: the body has turned since the bake. Its colour still holds;
+    // only the lit fraction is found again, at the texels' own points, which
+    // the first bake kept in the body's frame.
+    void bake_light(const Scene& scene, const Camera& camera, const RenderOptions& options, int width, int height, double texel = 0.016, bool relight = false) {
         using namespace detail;
         Mesh& mesh = *scene.mesh;
         const double start = now_ms();
         const View view(camera, width, height);
         RenderOptions bake = options;
         bake.diffuse_only = options.live_reflection && options.material != 2 && options.wire != Wire::only && options.lighting;
+        relight = relight && mesh.lit && mesh.lit_diffuse_only && bake.diffuse_only;
+        for (std::size_t k = 0; relight && k < mesh.parts.size() && k < scene.parts.size(); ++k) {
+            relight = !mesh.parts[k].light.levels.empty() &&
+                      mesh.parts[k].texel_point.size() == mesh.parts[k].light.levels[0].texel.size() * 3;
+        }
         mesh.lit_diffuse_only = bake.diffuse_only;
         transport_lattices(scene, view, nullptr, options);
         build_shadow_map(scene, options);
-        need_bvh(scene, options.gloss && options.lighting);
+        need_bvh(scene, options.gloss && options.lighting && !bake.diffuse_only);
         mesh.texels = 0;
+        const Rigid& pose = scene.pose;
+        const auto to_body = [&](Vec3 d) { return Vec3{pose.a[0] * d.x + pose.a[3] * d.y + pose.a[6] * d.z, pose.a[1] * d.x + pose.a[4] * d.y + pose.a[7] * d.z, pose.a[2] * d.x + pose.a[5] * d.y + pose.a[8] * d.z}; };
         for (std::size_t k = 0; k < mesh.parts.size() && k < scene.parts.size(); ++k) {
             MeshPart& part = mesh.parts[k];
             const Surface& surface = *scene.parts[k].surface;
             // Both sides of every part are baked, each as it is seen from its
             // own side: which side a pixel shows is known only when it is drawn.
             LightMap::Level level, back;
-            level.width = std::min(2048, std::max(32, int(part.world_around / texel + 15.0) / 16 * 16));
-            level.height = std::min(2048, std::max(16, int(part.world_along / texel + 0.5)));
-            level.texel.resize(std::size_t(level.width) * std::size_t(level.height));
-            back = level;
+            if (relight) {
+                level = std::move(part.light.levels[0]);
+                back = std::move(part.light_back.levels[0]);
+            } else {
+                level.width = std::min(2048, std::max(32, int(part.world_around / texel + 15.0) / 16 * 16));
+                level.height = std::min(2048, std::max(16, int(part.world_along / texel + 0.5)));
+                level.texel.resize(std::size_t(level.width) * std::size_t(level.height));
+                back = level;
+                if (bake.diffuse_only) {
+                    part.texel_point.resize(level.texel.size() * 3);
+                    part.texel_normal.resize(level.texel.size() * 3);
+                } else {
+                    part.texel_point.clear();
+                    part.texel_normal.clear();
+                }
+            }
             const double cu = double(surface.cells_u()), cv = double(surface.cells_v());
             parallel_rows(level.height, options.threads, [&](int begin, int end, int) {
                 Work work;
                 for (int y = begin; y < end; ++y) {
                     const double v = part.v_of((y + 0.5) / double(level.height));
                     for (int x = 0; x < level.width; ++x) {
+                        const std::size_t index = std::size_t(y) * std::size_t(level.width) + std::size_t(x);
                         Solve solve;
                         solve.u = (x + 0.5) / double(level.width) * cu;
                         solve.v = v;
-                        solve.point = surface.eval(solve.u, solve.v);
+                        Vec3 raw;
+                        if (relight) {
+                            // The texel's point and normal as the body carries them now.
+                            const float* kept = &part.texel_point[index * 3];
+                            const float* kept_normal = &part.texel_normal[index * 3];
+                            solve.point.p = pose.point({double(kept[0]), double(kept[1]), double(kept[2])});
+                            raw = pose.direction({double(kept_normal[0]), double(kept_normal[1]), double(kept_normal[2])});
+                            const Vec3 helper = std::fabs(raw.y) < 0.9 ? Vec3{0, 1, 0} : Vec3{1, 0, 0};
+                            solve.point.du = normalize(cross(helper, raw));
+                            solve.point.dv = cross(raw, solve.point.du);
+                        } else {
+                            solve.point = surface.eval(solve.u, solve.v);
+                            raw = cross(solve.point.du, solve.point.dv);
+                            raw = length(raw) > 1e-12 ? normalize(raw) : Vec3{};
+                            if (bake.diffuse_only) {
+                                const Vec3 p = to_body(solve.point.p - pose.b), n = to_body(raw);
+                                float* keep = &part.texel_point[index * 3];
+                                float* keep_normal = &part.texel_normal[index * 3];
+                                keep[0] = float(p.x); keep[1] = float(p.y); keep[2] = float(p.z);
+                                keep_normal[0] = float(n.x); keep_normal[1] = float(n.y); keep_normal[2] = float(n.z);
+                            }
+                        }
                         solve.grad_u = cu / double(level.width);
                         solve.grad_v = cv / double(level.height);
                         const Vec3 towards_point = solve.point.p - view.eye;
                         solve.t = dot(towards_point, view.forward);
-                        const Vec3 raw = normalize(cross(solve.point.du, solve.point.dv));
                         for (int side = 0; side < 2; ++side) {
                             // This side seen from the camera, or, when it faces
                             // away, from the camera's mirror image in the surface.
                             const Vec3 facing = raw * (side == 0 ? 1.0 : -1.0);
-                            Vec3 dir = towards_point;
-                            const double away = dot(facing, dir);
-                            if (away > 0.0) { dir = dir - facing * (2.0 * away); }
+                            std::uint32_t& out = (side == 0 ? level : back).texel[index];
                             double lit = 1.0;
-                            const Vec3 colour = shade_surface(scene, bake, view, dir, solve, std::uint16_t(k), 0, work, &lit);
-                            (side == 0 ? level : back).texel[std::size_t(y) * std::size_t(level.width) + std::size_t(x)] =
-                                std::uint32_t(to_byte(colour.x)) | std::uint32_t(to_byte(colour.y)) << 8 | std::uint32_t(to_byte(colour.z)) << 16 |
-                                std::uint32_t(lit * 255.0 + 0.5) << 24;
+                            Vec3 colour;
+                            if (bake.diffuse_only) {
+                                // The body's own colour and how much of the light reaches the texel past the body.
+                                lit = length(raw) > 0.5 ? surface_lit(scene, bake, view, solve, facing, std::uint16_t(k), 0, texel, work) : 1.0;
+                                if (relight) {
+                                    out = (out & 0x00ffffffu) | std::uint32_t(lit * 255.0 + 0.5) << 24;
+                                    continue;
+                                }
+                                const RenderPart& shown = scene.parts[k];
+                                const bool inside = (side == 0 ? 1.0 : -1.0) * shown.orientation < 0.0 && !shown.two_sided;
+                                colour = base_colour(scene, bake, shown, solve) * (inside ? 0.55 : 1.0);
+                            } else {
+                                Vec3 dir = towards_point;
+                                const double away = dot(facing, dir);
+                                if (away > 0.0) { dir = dir - facing * (2.0 * away); }
+                                colour = shade_surface(scene, bake, view, dir, solve, std::uint16_t(k), 0, work, &lit);
+                            }
+                            out = std::uint32_t(to_byte(colour.x)) | std::uint32_t(to_byte(colour.y)) << 8 | std::uint32_t(to_byte(colour.z)) << 16 |
+                                  std::uint32_t(lit * 255.0 + 0.5) << 24;
                         }
                     }
                 }
@@ -1659,7 +1771,7 @@ public:
             FloorEmitter& floor = mesh.floor;
             const Vec3 foot = shadow_.centre - scene.light * ((shadow_.centre.y - scene.ground_y) / scene.light.y);
             const double half = shadow_.radius / scene.light.y + 0.25;
-            floor.size = 384;
+            floor.size = 1024;
             floor.extent = 2.0 * half;
             floor.x0 = foot.x - half;
             floor.z0 = foot.z - half;
@@ -1678,6 +1790,8 @@ public:
             mesh.texels += floor.lit.size();
         }
         mesh.lit = true;
+        for (int k = 0; k < 9; ++k) { mesh.light_turn[k] = scene.pose.a[k]; }
+        mesh.light_origin = scene.pose.b;
         mesh.ms_light = now_ms() - start;
     }
 
@@ -1776,12 +1890,24 @@ private:
             // Stored display-encoded (gamma 2): back to linear.
             colour = {double(rgb[0] * rgb[0]) / 65025.0, double(rgb[1] * rgb[1]) / 65025.0, double(rgb[2] * rgb[2]) / 65025.0};
             if (mesh.lit_diffuse_only) {
-                // What depends on the view, as shade_surface has it, with the
-                // mirror direction answered by emitters instead of traced.
-                const double lit = double(rgb[3]) / 255.0;
+                // The texel is the body's own colour. Light is computed here
+                // from the normal as it is turned now, as shade_surface has
+                // it, with the mirror direction answered by emitters instead
+                // of traced.
                 Vec3 normal = normalize(a.n * double(w[0]) + b.n * double(w[1]) + c.n * double(w[2])) * scene.parts[part].orientation;
                 const Vec3 incoming = normalize(dir), to_eye = incoming * -1.0;
                 if (dot(normal, to_eye) < 0.0) { normal = normal * -1.0; }
+                const double n_l = dot(normal, scene.light);
+                // The baked lit fraction while it holds; the shadow map while the body is turned from it.
+                double lit = double(rgb[3]) / 255.0;
+                if (!light_holds(scene)) {
+                    lit = options.shadows && n_l > 0.0 && shadow_.size != 0
+                              ? shadow_.lit(a.p * double(w[0]) + b.p * double(w[1]) + c.p * double(w[2]) + normal * 0.02, shadow_bias(n_l)) : 1.0;
+                }
+                const double diffuse = std::fmax(0.0, n_l) * lit;
+                const double up = 0.5 * (normal.y + 1.0);
+                const Vec3 ambient = Vec3{0.30, 0.28, 0.26} * (1.0 - up) + Vec3{0.46, 0.50, 0.56} * up;
+                colour = Vec3{colour.x * (ambient.x + 0.80 * diffuse), colour.y * (ambient.y + 0.78 * diffuse), colour.z * (ambient.z + 0.74 * diffuse)};
                 const bool chrome = options.material == 1 && options.texture == 0;
                 const double f0 = chrome ? 0.86 : 0.05;
                 const double fresnel = f0 + (1.0 - f0) * detail::fifth(1.0 - std::fmax(0.0, dot(normal, to_eye)));
@@ -1797,7 +1923,7 @@ private:
                         const double reach = (scene.ground_y - p.y) / reflected.y;
                         const Vec3 q = p + reflected * reach;
                         const Vec3 base = checker(q, work.footprint(q, 4.0 * reach / view.focal / std::fmax(0.1, -reflected.y)));
-                        const double light = 0.55 + 0.45 * mesh.floor.lit_at(q.x, q.z) * std::fmax(0.0, scene.light.y);
+                        const double light = 0.55 + 0.45 * floor_lit_baked(scene, q) * std::fmax(0.0, scene.light.y);
                         const double fade = smoothstep(18.0, 60.0, reach);
                         mirror = base * light * (1.0 - fade) + Vec3{0.80, 0.84, 0.90} * fade;
                     } else {

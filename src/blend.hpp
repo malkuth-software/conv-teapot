@@ -61,6 +61,7 @@ struct Trim {
 struct JoinResult {
     bool ok = false;
     Lattice blend;   // the join surface: closed around, `across` rows across the band
+    Lattice toward;  // with `two_sided`: `blend` holds the body's side of the band and this the tube's
     Trim body_trim;  // the part of the body under the join
     Trim tube_trim;  // the buried part of the tube
 };
@@ -96,7 +97,7 @@ struct BodyBranch {
 // `inside_is_smaller_radius` is true for the exterior branch (the tube is
 // buried where its radius is below the body's) and false for the interior.
 inline JoinResult make_join(const Surface& body, const BodyBranch& branch, bool inside_is_smaller_radius, const Surface& tube,
-                            bool at_first_row, double width, std::size_t body_nu, int across = 9) {
+                            bool at_first_row, double width, std::size_t body_nu, int across = 9, bool two_sided = false) {
     JoinResult result;
     const std::size_t columns = tube.cells_u();
     const double rows = double(tube.cells_v());
@@ -155,6 +156,7 @@ inline JoinResult make_join(const Surface& body, const BodyBranch& branch, bool 
     result.blend.nu = columns;
     result.blend.nv = std::size_t(across);
     result.blend.nodes.resize(columns * std::size_t(across));
+    if (two_sided) { result.toward = result.blend; }
     result.tube_trim.cut.resize(columns);
     result.tube_trim.below = at_first_row;
     result.body_trim.centre_u = centre_u;
@@ -197,7 +199,13 @@ inline JoinResult make_join(const Surface& body, const BodyBranch& branch, bool 
             const std::array<double, 2> q = on_body_at(width * (1.0 - tau));
             const Vec3 a = body.position(q[0], q[1]);
             const Vec3 b = tube.position(u, on_tube_at(width * tau));
-            result.blend.at(k, std::size_t(j)) = a * (1.0 - beta(tau)) + b * beta(tau);
+            if (two_sided) {
+                // The two sides are kept apart and blended at evaluation (ConvSurface::toward).
+                result.blend.at(k, std::size_t(j)) = a;
+                result.toward.at(k, std::size_t(j)) = b;
+            } else {
+                result.blend.at(k, std::size_t(j)) = a * (1.0 - beta(tau)) + b * beta(tau);
+            }
         }
         // Trims stop inside the band so that no gap shows at its edges. The
         // band begins tangent to the surface it leaves, so the overlap is two

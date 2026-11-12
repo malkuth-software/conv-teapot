@@ -14,6 +14,7 @@
 // The engine works in metres with z up; the model is in teapot units with
 // y up. One model unit is taken as 7 cm, which makes the body 28 cm across.
 #pragma once
+#include <algorithm>
 #include "teapot.hpp"
 #include "../third_party/zc_phys/physics.hpp"
 #include <array>
@@ -56,13 +57,76 @@ public:
             }
             // The body is one hull; the other parts are cut along their length
             // into short convex pieces.
-            const std::size_t stride = part->name == "body" ? lattice.nv - 1 : part->name == "lid" ? part->per_v : std::max<std::size_t>(1, part->per_v / 2);
+            const bool round = part->name == "body" || part->name == "lid";
+            // A round part's hull is taken from points of its surface, 24 to a
+            // ring, each moved out from the axis so that the hull's flat sides
+            // touch the ring instead of cutting inside it. A hull through the
+            // nodes themselves lies inside the surface by the ring's sagitta
+            // (3% of the radius at 12 nodes), and a teapot resting on such a
+            // side has its wall that far below the floor.
+            const std::size_t around = round ? 24 : lattice.nu;
+            const double out = round ? 1.0 / std::cos(3.141592653589793 / double(around)) : 1.0;
+            const auto ring = [&](zc::phys::HullDesc& hull, std::size_t v) {
+                for (std::size_t k = 0; k < around; ++k) {
+                    Vec3 p = round ? part->conv.position(double(lattice.nu) * double(k) / double(around), double(v)) : lattice.at(k, v);
+                    p.x *= out;
+                    p.z *= out;
+                    hull.points.push_back(to_physics(p));
+                }
+            };
+            if (part->name == "body") {
+                // One hull. Only rows on the convex outline of the profile can
+                // touch it; of those, the 13 that leave the least of the
+                // outline outside the polygon through them.
+                std::vector<double> r(lattice.nv), y(lattice.nv);
+                for (std::size_t v = 0; v < lattice.nv; ++v) {
+                    r[v] = std::hypot(lattice.at(0, v).x, lattice.at(0, v).z);
+                    y[v] = lattice.at(0, v).y;
+                }
+                std::vector<std::size_t> outline;
+                for (std::size_t v = 0; v < lattice.nv; ++v) {
+                    // On the outline: no other row, nor the axis, lies outside the tangent there.
+                    bool on = true;
+                    for (int k = 0; k < 64 && on; ++k) {
+                        const double angle = 3.141592653589793 * (k + 0.5) / 64.0 - 1.5707963267948966; // outward directions with r >= 0
+                        const double c = std::cos(angle), d = std::sin(angle);
+                        double most = -1e30;
+                        for (std::size_t w = 0; w < lattice.nv; ++w) { most = std::max(most, r[w] * c + y[w] * d); }
+                        on = r[v] * c + y[v] * d < most - 1e-9;
+                    }
+                    if (!on) { outline.push_back(v); }
+                }
+                if (outline.size() < 2) { outline = {0, lattice.nv - 1}; }
+                std::vector<std::size_t> kept{outline.front(), outline.back()};
+                while (kept.size() < 13 && kept.size() < outline.size()) {
+                    double worst = -1.0;
+                    std::size_t add = outline.front();
+                    for (std::size_t v : outline) {
+                        double nearest = 1e30;
+                        for (std::size_t k = 0; k + 1 < kept.size(); ++k) {
+                            const double ax = r[kept[k]], ay = y[kept[k]], bx = r[kept[k + 1]] - ax, by = y[kept[k + 1]] - ay;
+                            const double t = std::min(1.0, std::max(0.0, ((r[v] - ax) * bx + (y[v] - ay) * by) / std::max(1e-12, bx * bx + by * by)));
+                            nearest = std::min(nearest, std::hypot(r[v] - ax - t * bx, y[v] - ay - t * by));
+                        }
+                        if (nearest > worst) {
+                            worst = nearest;
+                            add = v;
+                        }
+                    }
+                    if (worst <= 0.0) { break; }
+                    kept.push_back(add);
+                    std::sort(kept.begin(), kept.end());
+                }
+                zc::phys::HullDesc hull;
+                for (std::size_t v : kept) { ring(hull, v); }
+                desc.hulls.push_back(std::move(hull));
+                continue;
+            }
+            const std::size_t stride = part->name == "lid" ? part->per_v : std::max<std::size_t>(1, part->per_v / 2);
             for (std::size_t first = 0; first + 1 < lattice.nv; first += stride) {
                 zc::phys::HullDesc hull;
                 const std::size_t last = std::min(lattice.nv - 1, first + stride);
-                for (std::size_t v = first; v <= last; ++v) {
-                    for (std::size_t u = 0; u < lattice.nu; ++u) { hull.points.push_back(to_physics(lattice.at(u, v))); }
-                }
+                for (std::size_t v = first; v <= last; ++v) { ring(hull, v); }
                 desc.hulls.push_back(std::move(hull));
             }
         }

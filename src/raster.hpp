@@ -139,6 +139,7 @@ struct MeshPart {
     std::vector<float> arc;                 // light map t at every node row
     double world_around = 0, world_along = 0; // sizes in model units, for the light map's resolution
     LightMap light, light_back;             // the side the normal points to, and the other
+    std::vector<float> texel_point, texel_normal; // every texel's point and normal in the body's frame, for finding its light again
     double t_of(double v) const {
         const double x = v < 0.0 ? 0.0 : v > double(arc.size() - 1) ? double(arc.size() - 1) : v;
         const std::size_t k = std::min(arc.size() - 2, std::size_t(x));
@@ -177,7 +178,17 @@ struct Mesh {
     std::vector<std::uint8_t> triangle_trimmed; // crosses the edge of a trim: tested per sample
     std::vector<MeshPart> parts;
     bool lit = false;            // the light maps hold a bake
-    bool lit_diffuse_only = false; // the bake left out what depends on the view; reflections are added per frame
+    // The bake holds only what belongs to the body: its colour, and in alpha
+    // the fraction of each texel the light reaches past the body itself.
+    // Light is then computed per pixel from the normal as it is turned now,
+    // and reflections are added per frame. The colour holds for any motion.
+    // The lit fraction holds while the body has the rotation it was baked
+    // at (light_turn): moving it without turning it, or moving the camera,
+    // changes nothing in it. So does the shadow on the floor, which is kept
+    // relative to where the body was (light_origin) and moves with it.
+    bool lit_diffuse_only = false;
+    double light_turn[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    Vec3 light_origin;
     FloorEmitter floor;
     std::uint64_t version = 0;   // changes whenever positions change
     std::size_t evaluations = 0; // surface evaluations spent building it
@@ -586,7 +597,7 @@ inline void refresh_mesh(Mesh& mesh, const std::vector<const Surface*>& surfaces
             vertex.n = vertex.side == 0.0f ? point.du : detail::mesh_point(*surfaces[k], u, double(vertex.v) + double(vertex.side) * 1e-4).du;
         }
     }
-    mesh.lit = false;
+    mesh.lit = mesh.lit && mesh.lit_diffuse_only; // a bake of the body's own colour and lit fraction goes with it
     ++mesh.version;
 }
 
