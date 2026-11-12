@@ -4172,6 +4172,8 @@ class RowPlanner {
     if (dirty || running) {
       const state = stateNow(onGpu() ? 0 : dt);
       running = onGpu() ? sim().running : state[27] > 0.5;
+      // The renderer finds the light the body throws on itself again only at rest: tell it the body is moving.
+      state[27] = running ? 1 : 0;
       try {
         if (gpu.upload()) { remeasure = true; }
         if (bodyFor !== gpu.vertexCount + state[30] * 1e6) {
