@@ -256,6 +256,13 @@ EMSCRIPTEN_KEEPALIVE void tp_pointer(int kind, double x, double y, int orbit, in
     if (kind == 3) { engine->poke_at(x, y, part, u, v); }
 }
 EMSCRIPTEN_KEEPALIVE void tp_zoom(double factor) { engine->zoom(factor); }
+// Place the camera: angles in radians about the point looked at.
+EMSCRIPTEN_KEEPALIVE void tp_camera(double azimuth, double elevation, double distance, double x, double y, double z) {
+    engine->azimuth = azimuth;
+    engine->elevation = elevation;
+    engine->distance = distance;
+    engine->target = tconv::Vec3{x, y, z};
+}
 EMSCRIPTEN_KEEPALIVE void tp_fly(double forward, double right, double up) { engine->fly(forward, right, up); }
 EMSCRIPTEN_KEEPALIVE void tp_action(int action) {
     if (action == 0) { engine->drop(); }

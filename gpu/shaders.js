@@ -494,7 +494,20 @@ uniform vec2 uPer;          // node intervals per source patch
 uniform vec2 uCellCount;    // the part's cells as presented
 uniform vec3 uAxis;
 uniform int uOpenTop;
+uniform int uRoomLight;     // 0: by the normal alone; 1: through what each point sees of the room
+uniform sampler2D uOpenFront, uOpenBack;   // per texel: mean open direction (unnormalised) and open weight
+uniform vec4 uRect;
+uniform float uOpenScale;   // 1 / (the weight a fully open texel has)
+uniform sampler2D uThrownFront, uThrownBack;   // the light the body throws on each texel (gathered)
+uniform sampler2D uDirectFront, uDirectBack;   // the light each texel has from the room and the sun
+uniform sampler2D uPrevLayer;                  // peeling: the layer taken last
+uniform int uPeel;                             // peeling: how many layers are taken
 out vec4 outColour;
+
+// Where this point is in the maps laid over the parts.
+vec2 mapAt() {
+  return (clamp(vec2(vUvs.x - floor(vUvs.x / uCellCount.x) * uCellCount.x, vUvs.y) / uCellCount * uRect.zw, vec2(0.5), uRect.zw - 0.5) + uRect.xy) / vec2(textureSize(uOpenFront, 0));
+}
 
 bool facesCavity(float v) { return uInteriorFrom >= 0.0 ? v >= uInteriorFrom : v <= -uInteriorFrom - 1.0; }
 bool leavesCavity(vec3 d) { return (uCut != 0 && dot(d, uCutPlane.xyz) > 0.15) || (uOpenTop != 0 && dot(d, uAxis) > 0.6); }
@@ -510,6 +523,16 @@ void main() {
   if (uMode == 4) { outColour = vec4(vNormal, 1.0); return; }
   if (hidden(vWorld, vUvs.x, vUvs.y)) { discard; }
   if (uMode == 5) { outColour = vec4(1.0); return; }   // counted, not drawn
+  if (uMode == 6) {
+    // Peeling along uLight: the next layer of the body behind those already
+    // taken, with the light of the side that faces away from the direction.
+    float sz = -dot(vWorld - uShadowCentre, uLight);
+    if (uPeel > 0 && sz <= texelFetch(uPrevLayer, ivec2(gl_FragCoord.xy), 0).r + 2e-3) { discard; }
+    vec2 at = mapAt();
+    vec3 light = dot(vNormal, uLight) < 0.0 ? texture(uDirectFront, at).rgb + texture(uThrownFront, at).rgb : texture(uDirectBack, at).rgb + texture(uThrownBack, at).rgb;
+    outColour = vec4(sz, light);
+    return;
+  }
   if (uMode == 1) {
     outColour = vec4(-dot(vWorld - uShadowCentre, uLight), 0.0, 0.0, 1.0);
     return;
@@ -558,7 +581,7 @@ void main() {
     outColour = encode(mix(vec3(0.06, 0.07, 0.09), vec3(0.96, 0.96, 0.94), ink) * shade);
     return;
   }
-  if (inside) { base *= 0.55; }
+  if (inside && uRoomLight == 0) { base *= 0.55; }
   if (uWire == 2) { base = vec3(0.97, 0.97, 0.96); }
 
   vec3 colour = base;
@@ -567,6 +590,17 @@ void main() {
     float lit = nl > 0.0 ? litAt(vWorld + normal * 0.02, shadowBias(nl)) : 1.0;
     float diffuse = max(0.0, nl) * lit;
     vec3 ambient = ambientOf(normal);
+    if (uRoomLight != 0) {
+      // The room's light through what this point sees of it, from the mean open direction.
+      vec2 at = mapAt();
+      bool backSide = dot(normalize(vNormal), toEye) < 0.0;
+      vec4 seen = backSide ? texture(uOpenBack, at) : texture(uOpenFront, at);
+      float open = clamp(seen.a * uOpenScale, 0.0, 1.0);
+      vec3 bent = dot(seen.xyz, seen.xyz) > 1e-8 ? uPose * normalize(seen.xyz) : normal;
+      ambient = ambientOf(bent) * open;
+      // And what the body itself throws on the point.
+      if (uRoomLight > 1) { ambient += backSide ? texture(uThrownBack, at).rgb : texture(uThrownFront, at).rgb; }
+    }
     colour = base * (ambient + vec3(0.80, 0.78, 0.74) * diffuse);
     if (uWire != 2) {
       float nv = max(0.0, dot(normal, toEye));
@@ -669,5 +703,223 @@ out vec3 vWorld;
 void main() {
   vWorld = aPoint;
   gl_Position = uViewProj * vec4(aPoint, 1.0);
+}
+`;
+
+// The teapot from points the GPU has already evaluated (TeapotGpu.evaluateVertices):
+// the surface at every vertex is computed once, by VERTEX_GLSL, and kept in a
+// buffer on the GPU; a frame only carries it by the pose.
+const CARRIED_VERTEX_GLSL = `#version 300 es
+precision highp float;
+layout(location = 0) in vec3 aUvs;
+layout(location = 2) in vec3 aPoint;
+layout(location = 3) in vec3 aSurfaceNormal;
+uniform mat3 uPose;
+uniform vec3 uShift;
+uniform mat4 uViewProj;
+uniform vec3 uEyeAt;
+uniform float uNearer;
+out vec3 vWorld;
+out vec3 vNormal;
+out vec3 vUvs;
+void main() {
+  vWorld = uPose * aPoint + uShift;
+  vNormal = uPose * aSurfaceNormal;
+  vUvs = aUvs;
+  gl_Position = uViewProj * vec4(vWorld + (uEyeAt - vWorld) * uNearer, 1.0);
+}
+`;
+
+// A rectangle of a map laid over a part's (u, v): one texel per place on the part.
+const MAP_VERTEX_GLSL = `#version 300 es
+uniform vec4 uRect;      // x, y, width, height in texels
+uniform vec2 uMapSize;
+void main() {
+  vec2 corner = vec2(gl_VertexID == 1 || gl_VertexID == 2 || gl_VertexID == 4 ? 1.0 : 0.0, gl_VertexID == 2 || gl_VertexID == 4 || gl_VertexID == 5 ? 1.0 : 0.0);
+  gl_Position = vec4((uRect.xy + corner * uRect.zw) / uMapSize * 2.0 - 1.0, 0.0, 1.0);
+}
+`;
+// The surface at every texel of a part's map: its point and its unit normal, at rest.
+const MAP_SURFACE_GLSL = `#version 300 es
+${CONV_GLSL}
+uniform vec4 uRect;
+uniform vec2 uCellCount;
+layout(location = 0) out vec4 outPoint;
+layout(location = 1) out vec4 outNormal;
+void main() {
+  vec2 at = (gl_FragCoord.xy - uRect.xy) / uRect.zw;
+  float u = at.x * uCellCount.x, v = at.y * uCellCount.y;
+  vec3 p, du, dv;
+  evalSurface(u, v, p, du, dv);
+  vec3 n = cross(du, dv);
+  if (dot(n, n) < 1e-16) {
+    // Next to a pole: the normal a little way along the part.
+    vec3 q;
+    evalSurface(u, v < 0.5 * uCellCount.y ? v + 0.05 : v - 0.05, q, du, dv);
+    n = cross(du, dv);
+  }
+  outPoint = vec4(p, 1.0);
+  outNormal = vec4(normalize(n), 1.0);
+}
+`;
+// One direction of the room. Every texel, on each of its two sides, adds what
+// that direction contributes if nothing of the body is in the way: the
+// direction weighted by its cosine, and the cosine. Summed over directions
+// spread evenly over the sphere this is the open fraction of the texel's
+// cosine-weighted hemisphere and its mean open direction. Where the CPU
+// casts rays from each texel, here the body is drawn once from the
+// direction and every texel looks itself up in that picture.
+const MAP_OPEN_GLSL = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+uniform sampler2D uPoints, uNormals, uDepth;
+uniform vec3 uDirection, uDepthX, uDepthY, uDepthCentre;
+uniform float uDepthRadius, uDepthSize;
+layout(location = 0) out vec4 outFront;
+layout(location = 1) out vec4 outBack;
+float seen(vec3 p) {
+  vec3 d = p - uDepthCentre;
+  vec2 at = (vec2(dot(d, uDepthX), dot(d, uDepthY)) / uDepthRadius * 0.5 + 0.5) * uDepthSize - 0.5;
+  float sz = -dot(d, uDirection);
+  // The four texels around the point, each tested, blended by where the point lies between them.
+  ivec2 base = ivec2(floor(at));
+  vec2 f = at - floor(at);
+  float open[4];
+  for (int k = 0; k < 4; ++k) { open[k] = sz - 0.03 <= texelFetch(uDepth, base + ivec2(k & 1, k >> 1), 0).r ? 1.0 : 0.0; }
+  return mix(mix(open[0], open[1], f.x), mix(open[2], open[3], f.x), f.y);
+}
+void main() {
+  ivec2 texel = ivec2(gl_FragCoord.xy);
+  vec4 point = texelFetch(uPoints, texel, 0);
+  if (point.a < 0.5) { discard; }
+  vec3 n = texelFetch(uNormals, texel, 0).xyz;
+  float cosine = dot(n, uDirection);
+  outFront = vec4(0.0);
+  outBack = vec4(0.0);
+  if (cosine > 0.0) {
+    float w = cosine * seen(point.xyz + n * 0.02);
+    outFront = vec4(uDirection * w, w);
+  } else if (cosine < 0.0) {
+    float w = -cosine * seen(point.xyz - n * 0.02);
+    outBack = vec4(uDirection * w, w);
+  }
+}
+`;
+
+// The light every texel has from the room and the sun, before the body's own:
+// the room through the open fraction, from the mean open direction, and the
+// sun where the shadow map (drawn in the teapot's frame) lets it through.
+const MAP_DIRECT_GLSL = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+uniform sampler2D uPoints, uNormals, uOpenFront, uOpenBack, uDepth;
+uniform vec3 uDirection, uDepthX, uDepthY, uDepthCentre;   // the sun, in the teapot's frame
+uniform float uDepthRadius, uDepthSize, uOpenScale;
+uniform mat3 uPose;
+uniform int uSun;
+layout(location = 0) out vec4 outFront;
+layout(location = 1) out vec4 outBack;
+vec3 ambientOf(vec3 n) {
+  float up = 0.5 * (n.y + 1.0);
+  return mix(vec3(0.30, 0.28, 0.26), vec3(0.46, 0.50, 0.56), up);
+}
+float seen(vec3 p, float cosine) {
+  vec3 d = p - uDepthCentre;
+  vec2 at = (vec2(dot(d, uDepthX), dot(d, uDepthY)) / uDepthRadius * 0.5 + 0.5) * uDepthSize;
+  float bias = 0.02 + 0.02 * min(12.0, sqrt(max(0.0, 1.0 - cosine * cosine)) / cosine);
+  return -dot(d, uDirection) - bias <= texelFetch(uDepth, ivec2(at), 0).r ? 1.0 : 0.0;
+}
+vec4 side(vec3 p, vec3 n, vec4 open) {
+  vec3 bent = dot(open.xyz, open.xyz) > 1e-8 ? normalize(open.xyz) : n;
+  vec3 light = ambientOf(uPose * bent) * clamp(open.a * uOpenScale, 0.0, 1.0);
+  float cosine = dot(n, uDirection);
+  if (cosine > 0.0) { light += vec3(0.80, 0.78, 0.74) * cosine * (uSun != 0 ? seen(p + n * 0.02, cosine) : 1.0); }
+  return vec4(light, 1.0);
+}
+void main() {
+  ivec2 texel = ivec2(gl_FragCoord.xy);
+  vec4 point = texelFetch(uPoints, texel, 0);
+  if (point.a < 0.5) { discard; }
+  vec3 n = texelFetch(uNormals, texel, 0).xyz;
+  outFront = side(point.xyz, n, texelFetch(uOpenFront, texel, 0));
+  outBack = side(point.xyz, -n, texelFetch(uOpenBack, texel, 0));
+}
+`;
+// One direction of one gather. A texel side that faces the direction and
+// has the body in the way receives the light of what it faces: the layer of
+// the body just in front of it along the direction. Summed over directions,
+// times the albedo, this is the CPU's gather through its transfer; the
+// transfer is not stored here but found again by peeling each time.
+const MAP_GATHER_GLSL = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+precision highp sampler2DArray;
+uniform sampler2D uPoints, uNormals;
+uniform sampler2DArray uLayers;
+uniform int uLayerCount;
+uniform vec3 uDirection, uDepthX, uDepthY, uDepthCentre;
+uniform float uDepthRadius, uDepthSize, uWeight;   // albedo / (the weight of a whole hemisphere)
+layout(location = 0) out vec4 outFront;
+layout(location = 1) out vec4 outBack;
+vec3 facedAt(ivec2 at, float sz) {
+  float nearest = -1e30;
+  vec3 light = vec3(0.0);
+  for (int k = 0; k < uLayerCount; ++k) {
+    vec4 layer = texelFetch(uLayers, ivec3(at, k), 0);
+    if (layer.r < sz - 0.03 && layer.r > nearest) {
+      nearest = layer.r;
+      light = layer.gba;
+    }
+  }
+  return light;
+}
+vec3 faced(vec3 p) {
+  vec3 d = p - uDepthCentre;
+  vec2 at = (vec2(dot(d, uDepthX), dot(d, uDepthY)) / uDepthRadius * 0.5 + 0.5) * uDepthSize - 0.5;
+  float sz = -dot(d, uDirection);
+  ivec2 base = ivec2(floor(at));
+  vec2 f = at - floor(at);
+  return mix(mix(facedAt(base, sz), facedAt(base + ivec2(1, 0), sz), f.x), mix(facedAt(base + ivec2(0, 1), sz), facedAt(base + ivec2(1, 1), sz), f.x), f.y);
+}
+void main() {
+  ivec2 texel = ivec2(gl_FragCoord.xy);
+  vec4 point = texelFetch(uPoints, texel, 0);
+  if (point.a < 0.5) { discard; }
+  vec3 n = texelFetch(uNormals, texel, 0).xyz;
+  float cosine = dot(n, uDirection);
+  outFront = vec4(0.0);
+  outBack = vec4(0.0);
+  if (cosine > 0.0) {
+    outFront = vec4(faced(point.xyz + n * 0.02) * (cosine * uWeight), 0.0);
+  } else if (cosine < 0.0) {
+    outBack = vec4(faced(point.xyz - n * 0.02) * (-cosine * uWeight), 0.0);
+  }
+}
+`;
+
+// A 1-2-1 average each way over a pair of maps, among texels that belong to a part.
+const MAP_SMOOTH_GLSL = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+uniform sampler2D uPoints, uFront, uBack;
+layout(location = 0) out vec4 outFront;
+layout(location = 1) out vec4 outBack;
+void main() {
+  ivec2 texel = ivec2(gl_FragCoord.xy);
+  if (texelFetch(uPoints, texel, 0).a < 0.5) { discard; }
+  vec4 front = vec4(0.0), back = vec4(0.0);
+  float total = 0.0;
+  for (int j = -1; j <= 1; ++j) {
+    for (int i = -1; i <= 1; ++i) {
+      ivec2 at = texel + ivec2(i, j);
+      if (texelFetch(uPoints, at, 0).a < 0.5) { continue; }
+      float w = float((2 - abs(i)) * (2 - abs(j)));
+      front += texelFetch(uFront, at, 0) * w;
+      back += texelFetch(uBack, at, 0) * w;
+      total += w;
+    }
+  }
+  outFront = front / total;
+  outBack = back / total;
 }
 `;
