@@ -1617,9 +1617,10 @@ computed for a frame is computed in shaders.
 
 \subsection{CONV in a shader}
 
-The admitted $u$-cells of every lattice row are compiled on the CPU, as
-the CPU evaluator compiles them, and read from a texture: seven numbers
-per coordinate per cell. The $v$-cell through the eight row values at
+The engine hands over the lattice nodes and the shape of every cell
+(which difference stencil each node takes, decided by its place in the
+line). A shader admits the $u$-cells of every row from the nodes, once
+per teapot, into a texture: seven numbers per coordinate per cell. The $v$-cell through the eight row values at
 the query has to be admitted at the query, because its inputs depend on
 $u$. Admission is piecewise linear in its
 inputs: every step is a sum, a multiple by a constant, or a choice
@@ -1633,7 +1634,10 @@ evaluated at every vertex once, the points being kept on the GPU by
 transform feedback and carried by the pose in each frame, and again at
 every pixel for the normal. Numbers are 32-bit floats. At 12\,000
 points spread over the parts the shader's surface is within
-$2.3\times10^{-6}$ of the CPU's and its normal within $0.027^\circ$.
+$2.3\times10^{-6}$ of the CPU's and its normal within $0.027^\circ$. The
+B\'ezier patches and the control mesh are evaluated in the shader too,
+within $1.1\times10^{-6}$ and $4\times10^{-7}$ of the CPU's, and a
+texture's lattice of colours by CONV, bilinearly or by the nearest node.
 
 \subsection{The picture}
 

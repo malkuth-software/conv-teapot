@@ -158,6 +158,7 @@ public:
     // shape of every v-cell with whether it reads the rows three below and four above.
     const std::vector<Cell<double>>& compiled_rows() const { return rows_; }
     const std::vector<CellShape>& shapes_along() const { return shapes_v_; }
+    const std::vector<CellShape>& shapes_around() const { return shapes_u_; }
     bool reads_low(std::size_t cell) const { return outer_low_[cell] != 0; }
     bool reads_high(std::size_t cell) const { return outer_high_[cell] != 0; }
 

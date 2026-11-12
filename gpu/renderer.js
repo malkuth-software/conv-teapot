@@ -8,7 +8,7 @@ class TeapotGpu {
     if (!gl) { throw new Error('WebGL 2 is not available'); }
     if (!gl.getExtension('EXT_color_buffer_float')) { throw new Error('rendering to float textures (EXT_color_buffer_float) is not available'); }
     this.gl = gl;
-    this.options = { material: 0, gloss: 0, lighting: 1, shadows: 1, ground: 1, wire: 0, texture: 0, mapping: 0, perPixel: 1, shadowSize: 2048, polished: 0, trace: 1, roomLight: 2, directions: 256, gatherDirections: 48, gathers: 5, layers: 6 };
+    this.options = { material: 0, gloss: 0, lighting: 1, shadows: 1, ground: 1, wire: 0, texture: 0, mapping: 0, perPixel: 1, shadowSize: 2048, polished: 0, trace: 1, filter: 2, roomLight: 2, directions: 256, gatherDirections: 48, gathers: 5, layers: 6 };
     // The surface from the lattice at every vertex (used once, to evaluate them, and to check against the CPU);
     // the teapot from those evaluated vertices; the maps of what each point sees of the room.
     this.conv = this.program(VERTEX_GLSL, PROBE_FRAGMENT_GLSL, ['vWorld', 'vNormal']);
@@ -18,6 +18,7 @@ class TeapotGpu {
     this.mapDirect = this.program(MAP_VERTEX_GLSL, MAP_DIRECT_GLSL);
     this.mapGather = this.program(MAP_VERTEX_GLSL, MAP_GATHER_GLSL);
     this.mapSmooth = this.program(MAP_VERTEX_GLSL, MAP_SMOOTH_GLSL);
+    this.compiler = this.program(ROOM_VERTEX_GLSL, COMPILE_FRAGMENT_GLSL);
     this.thrownKey = '';
     this.carriedVao = gl.createVertexArray();
     this.carriedBuffer = gl.createBuffer();
@@ -72,6 +73,7 @@ class TeapotGpu {
     const padded = new Float32Array(rows * perRow);
     padded.set(data);
     if (!this.textures[key]) { this.textures[key] = gl.createTexture(); }
+    if (key === 'cells') { this.cellRows = rows; }
     gl.bindTexture(gl.TEXTURE_2D, this.textures[key]);
     gl.texImage2D(gl.TEXTURE_2D, 0, channels === 4 ? gl.RGBA32F : gl.R32F, 2048, rows, 0, channels === 4 ? gl.RGBA : gl.RED, gl.FLOAT, padded);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
@@ -90,9 +92,14 @@ class TeapotGpu {
     this.floatTexture('trims', floats(7), 1);
     this.floatTexture('treeNodes', floats(10), 4);
     this.floatTexture('treeTriangles', floats(11), 4);
-    const lattices = floats(2), meta = floats(3), table = floats(6), exact = floats(9);
-    this.lattice = (index) => index < 0 ? { cells: 0, shapes: 0, cu: 1, cv: 1, nv: 2, wrap: 0 }
-      : { cells: lattices[index * 8], shapes: lattices[index * 8 + 1], cu: lattices[index * 8 + 2], cv: lattices[index * 8 + 3], nv: lattices[index * 8 + 4], wrap: lattices[index * 8 + 5] };
+    this.floatTexture('nodes', floats(12), 4);
+    this.floatTexture('patches', floats(13), 4);
+    const lattices = floats(2), meta = floats(3), table = floats(6), exact = floats(9), other = floats(14);
+    this.lattice = (index) => index < 0 ? { cells: 0, shapes: 0, cu: 1, cv: 1, nv: 2, wrap: 0, nu: 2, nodes: 0, shapesAround: 0 }
+      : { cells: lattices[index * 12], shapes: lattices[index * 12 + 1], cu: lattices[index * 12 + 2], cv: lattices[index * 12 + 3], nv: lattices[index * 12 + 4], wrap: lattices[index * 12 + 5],
+          nu: lattices[index * 12 + 6], nodes: lattices[index * 12 + 7], shapesAround: lattices[index * 12 + 8] };
+    // The admitted u-cells of every lattice, made here from its nodes.
+    this.compileCells(lattices);
     const count = e._tp_length(8);
     this.parts = [];
     const trims = (source, first, n) => {
@@ -111,6 +118,7 @@ class TeapotGpu {
         own: this.lattice(m[0]), toward: this.lattice(m[1]), on: this.lattice(m[2]), tube: this.lattice(m[3]), band: m[17] > 0.5 ? 1 : 0,
         spread: m[4], orientation: m[5], interiorFrom: m[6], first: m[7], count: m[8], trims: trims(table, m[9], m[10]), exact: trims(exact, m[9], m[10]),
         group: m[11], per: [m[12], m[13]], twoSided: m[14] > 0.5 ? 1 : 0, cells: [m[15], m[16]], firstVertex: m[18], vertexCount: m[19],
+        kind: other[m[21] * 8], other: Array.from(other.subarray(m[21] * 8 + 1, m[21] * 8 + 8)),
       });
     }
     this.textureLattices = [0, 1, 2].map((k) => this.lattice(meta[count * 24 + k]));
@@ -153,6 +161,39 @@ class TeapotGpu {
     return true;
   }
 
+  // The CPU's compile() on the GPU: every lattice's admitted u-cells from its nodes, drawn into the cell texture.
+  compileCells(lattices) {
+    const gl = this.gl, u = this.compiler.uniforms;
+    if (!this.cellFramebuffer) { this.cellFramebuffer = gl.createFramebuffer(); }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.cellFramebuffer);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.textures.cells, 0);
+    gl.viewport(0, 0, 2048, this.cellRows);
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.BLEND);
+    gl.useProgram(this.compiler.program);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, null);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.textures.shapes); gl.uniform1i(u.uShapes, 1);
+    gl.activeTexture(gl.TEXTURE15); gl.bindTexture(gl.TEXTURE_2D, this.textures.nodes); gl.uniform1i(u.uNodes, 15);
+    gl.bindVertexArray(this.emptyVao);
+    gl.enable(gl.SCISSOR_TEST);
+    for (let k = 0; k * 12 < lattices.length; ++k) {
+      const l = this.lattice(k), count = l.nv * l.cu * 6;
+      gl.uniform1i(u.uCellsBase, l.cells);
+      gl.uniform1i(u.uNodesBase, l.nodes);
+      gl.uniform1i(u.uShapesBase, l.shapesAround);
+      gl.uniform1i(u.uCu, l.cu);
+      gl.uniform1i(u.uNu, l.nu);
+      gl.uniform1i(u.uNv, l.nv);
+      gl.uniform1i(u.uWrap, l.wrap);
+      const first = Math.floor(l.cells / 2048), last = Math.floor((l.cells + count - 1) / 2048);
+      gl.scissor(0, first, 2048, last - first + 1);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+    gl.disable(gl.SCISSOR_TEST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.enable(gl.DEPTH_TEST);
+  }
+
   // Evaluate the surface at every vertex, once, on the GPU, and keep the
   // points and normals there (transform feedback).
   evaluateVertices() {
@@ -163,6 +204,8 @@ class TeapotGpu {
     gl.useProgram(this.conv.program);
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.textures.cells); gl.uniform1i(u.uCells, 0);
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.textures.shapes); gl.uniform1i(u.uShapes, 1);
+    gl.activeTexture(gl.TEXTURE15); gl.bindTexture(gl.TEXTURE_2D, this.textures.nodes); gl.uniform1i(u.uNodes, 15);
+    gl.activeTexture(gl.TEXTURE11); gl.bindTexture(gl.TEXTURE_2D, this.textures.patches); gl.uniform1i(u.uPatches, 11);
     gl.uniformMatrix3fv(u.uPose, false, [1, 0, 0, 0, 1, 0, 0, 0, 1]);
     gl.uniform3f(u.uShift, 0, 0, 0);
     gl.uniform1i(u.uProbe, 1);
@@ -400,6 +443,8 @@ class TeapotGpu {
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.textures.cells); gl.uniform1i(u.uCells, 0);
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.textures.shapes); gl.uniform1i(u.uShapes, 1);
     gl.uniform2f(u.uMapSize, size, size);
+    gl.activeTexture(gl.TEXTURE15); gl.bindTexture(gl.TEXTURE_2D, this.textures.nodes); gl.uniform1i(u.uNodes, 15);
+    gl.activeTexture(gl.TEXTURE11); gl.bindTexture(gl.TEXTURE_2D, this.textures.patches); gl.uniform1i(u.uPatches, 11);
     gl.bindVertexArray(this.emptyVao);
     this.parts.forEach((part, index) => {
       this.setPart(part, index, false, u);
@@ -508,6 +553,16 @@ class TeapotGpu {
     gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.textures.cells); gl.uniform1i(u.uCells, 0);
     gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.textures.shapes); gl.uniform1i(u.uShapes, 1);
     gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this.textures.trims); gl.uniform1i(u.uTrimData, 2);
+    gl.activeTexture(gl.TEXTURE15); gl.bindTexture(gl.TEXTURE_2D, this.textures.nodes); gl.uniform1i(u.uNodes, 15);
+    gl.activeTexture(gl.TEXTURE11); gl.bindTexture(gl.TEXTURE_2D, this.textures.patches); gl.uniform1i(u.uPatches, 11);
+    gl.uniform1i(u.uFilter, o.filter);
+    const flat = this.textureLattices[Math.max(0, o.texture - 1)];
+    if (u['uTextureFlat.base']) {
+      gl.uniform1i(u['uTextureFlat.base'], flat.nodes);
+      gl.uniform1i(u['uTextureFlat.nu'], flat.nu);
+      gl.uniform1i(u['uTextureFlat.nv'], flat.nv);
+      gl.uniform1i(u['uTextureFlat.wrap'], flat.wrap);
+    }
     gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, mode === 1 ? null : this.targets.shadow.texture); gl.uniform1i(u.uShadowMap, 3);
     gl.uniformMatrix3fv(u.uPose, false, view.pose);
     gl.uniform3fv(u.uShift, view.shift);
@@ -581,6 +636,12 @@ class TeapotGpu {
     this.setLattice(u, 'uTube', part.tube);
     gl.uniform1i(u.uBand, part.band);
     gl.uniform1f(u.uSpread, part.spread);
+    gl.uniform1i(u.uKind, part.kind);
+    if (part.kind === 1) {
+      ['base', 'pu', 'pv', 'peru', 'perv', 'wrap'].forEach((field, k) => { if (u['uBezier.' + field]) { gl.uniform1i(u['uBezier.' + field], part.other[k]); } });
+    } else if (part.kind === 2) {
+      ['base', 'nu', 'nv', 'wrap'].forEach((field, k) => { if (u['uFlat.' + field]) { gl.uniform1i(u['uFlat.' + field], part.other[k]); } });
+    }
     gl.uniform1f(u.uNearer, part.band && this.current !== this.conv ? 0.0015 : 0.0);
     gl.uniform1f(u.uPartIndex, index);
     gl.uniform1f(u.uOrientation, part.orientation);

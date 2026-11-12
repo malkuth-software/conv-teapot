@@ -72,6 +72,10 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
         <label class="check"><input type="checkbox" data-engine="25" checked> body</label>
         <label class="check"><input type="checkbox" data-engine="26" checked> show interior</label>
         <label class="check"><input type="checkbox" data-engine="37" checked> joins</label>
+        <label class="row">Surface
+          <select data-engine="0"><option value="0" selected>CONV, seamed</option><option value="4">CONV, round</option><option value="1">CONV, seamless</option><option value="2">B&eacute;zier patches</option><option value="3">control mesh</option></select></label>
+        <label class="row">Nodes / patch
+          <select data-engine="1"><option value="1">1</option><option value="2">2</option><option value="4" selected>4</option><option value="8">8</option></select></label>
         <label class="row">Side
           <select data-engine="36"><option value="0">both</option><option value="1">left (cutaway)</option><option value="2">right (cutaway)</option></select></label>
       </fieldset>
@@ -83,6 +87,8 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
           <select data-option="material"><option value="0">porcelain</option><option value="1">chrome</option><option value="2">reflection lines</option></select></label>
         <label class="row">Texture
           <select data-option="texture"><option value="0">none</option><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></label>
+        <label class="row">Filter
+          <select data-option="filter"><option value="2" selected>CONV</option><option value="1">bilinear</option><option value="0">nearest</option></select></label>
         <label class="row">Mapping
           <select data-option="mapping"><option value="0">per part</option><option value="1">per patch</option></select></label>
         <label class="check"><input type="checkbox" data-option="lighting" checked> lighting</label>

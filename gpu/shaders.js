@@ -123,9 +123,9 @@ vec2 capacityThreshold(vec2 w[5], vec2 mass) {
   return result;
 }
 
-// One v-cell from its window w[0..7] of row values (each with its derivative
-// along u), evaluated with the basis bt: value, derivative along u, derivative along v.
-vec3 cellAlong(vec2 w[8], vec4 sa, vec4 sb, Basis bt) {
+// Admission: one cell of a CONV line from its window w[0..7] (each value with
+// a derivative carried beside it): the five admitted currents and the bubble.
+void admit(vec2 w[8], vec4 sa, vec4 sb, out vec2 c[5], out vec2 bubble) {
   int left = int(sa.x), right = int(sa.y), prev = int(sa.z), next = int(sa.w);
   bool hasPrev = sb.x > 0.5, hasNext = sb.y > 0.5, six = sb.z > 0.5;
   vec2 cl[7], cr[7];
@@ -194,7 +194,6 @@ vec3 cellAlong(vec2 w[8], vec4 sa, vec4 sb, Basis bt) {
   for (int j = 0; j < 5; ++j) { capacity[j] = lower ? down[j] : up[j]; }
   vec2 mass = lower ? residual : -residual;
   vec2 threshold = capacityThreshold(capacity, mass);
-  vec2 c[5];
   for (int j = 0; j < 5; ++j) {
     vec2 shift = tmin(threshold, capacity[j]);
     c[j] = lower ? q[j] - shift : q[j] + shift;
@@ -210,7 +209,14 @@ vec3 cellAlong(vec2 w[8], vec4 sa, vec4 sb, Basis bt) {
   vec2 d3 = c[1] + 3.0 * c[2] + c[3];
   vec2 d4 = (6.0 * c[2] + 8.0 * c[3] + c[4]) / 3.0;
   vec2 bound = tmin(tmin(5.0 * tmax(d2, -d2), 2.5 * tmax(d3, -d3)), 5.0 * tmax(d4, -d4));
-  vec2 bubble = tmin(bound, tmax(-bound, fit));
+  bubble = tmin(bound, tmax(-bound, fit));
+}
+
+// One v-cell from its window of row values (each with its derivative along
+// u), evaluated with the basis bt: value, derivative along u, derivative along v.
+vec3 cellAlong(vec2 w[8], vec4 sa, vec4 sb, Basis bt) {
+  vec2 c[5], bubble;
+  admit(w, sa, sb, c, bubble);
   vec2 value = w[3] + bubble * bt.psi;
   float along = bubble.x * bt.dpsi;
   for (int j = 0; j < 5; ++j) {
@@ -265,12 +271,58 @@ void evalLat(Lat L, float u, float v, out vec3 p, out vec3 du, out vec3 dv) {
   dv = vec3(x.z, y.z, z.z);
 }
 
+// The two other surfaces the page offers through the same nodes: the nodes
+// joined bilinearly, and the original bicubic Bezier patches.
+uniform sampler2D uNodes, uPatches;
+struct Flat { int base; int nu; int nv; int wrap; };
+struct Bezier { int base; int pu; int pv; int peru; int perv; int wrap; };
+vec3 nodeAt(Flat f, int i, int j) { return lin(uNodes, f.base + j * f.nu + i).xyz; }
+void evalFlat(Flat f, float u, float v, out vec3 p, out vec3 du, out vec3 dv) {
+  int cu, cv;
+  float s, t;
+  locate(u, f.wrap != 0 ? f.nu : f.nu - 1, f.wrap != 0, cu, s);
+  locate(v, f.nv - 1, false, cv, t);
+  int u1 = f.wrap != 0 ? (cu + 1) % f.nu : cu + 1;
+  vec3 a = nodeAt(f, cu, cv), b = nodeAt(f, u1, cv), c = nodeAt(f, cu, cv + 1), d = nodeAt(f, u1, cv + 1);
+  p = mix(mix(a, b, s), mix(c, d, s), t);
+  du = mix(b - a, d - c, t);
+  dv = mix(c - a, d - b, s);
+}
+void evalBezier(Bezier z, float u, float v, out vec3 p, out vec3 du, out vec3 dv) {
+  int pu, pv;
+  float s, t;
+  locate(u / float(z.peru), z.pu, z.wrap != 0, pu, s);
+  locate(v / float(z.perv), z.pv, false, pv, t);
+  float a = 1.0 - s, b = 1.0 - t;
+  float bs[4] = float[4](a * a * a, 3.0 * a * a * s, 3.0 * a * s * s, s * s * s);
+  float ds[4] = float[4](-3.0 * a * a, 3.0 * a * a - 6.0 * a * s, 6.0 * a * s - 3.0 * s * s, 3.0 * s * s);
+  float bt[4] = float[4](b * b * b, 3.0 * b * b * t, 3.0 * b * t * t, t * t * t);
+  float dt[4] = float[4](-3.0 * b * b, 3.0 * b * b - 6.0 * b * t, 6.0 * b * t - 3.0 * t * t, 3.0 * t * t);
+  int base = z.base + (pv * z.pu + pu) * 16;
+  p = vec3(0.0); du = vec3(0.0); dv = vec3(0.0);
+  for (int i = 0; i < 4; ++i) {
+    for (int j = 0; j < 4; ++j) {
+      vec3 c = lin(uPatches, base + i * 4 + j).xyz;
+      p += c * (bs[i] * bt[j]);
+      du += c * (ds[i] * bt[j]);
+      dv += c * (bs[i] * dt[j]);
+    }
+  }
+  du /= float(z.peru);
+  dv /= float(z.perv);
+}
+
 // A part of the teapot. A band between two parts keeps where its two sides
 // are on those parts, and is the blend of them with a quintic weight.
 uniform Lat uOwn, uToward, uOn, uTube;
 uniform int uBand;
 uniform float uSpread;
+uniform int uKind;        // 0: CONV; 1: the Bezier patches; 2: the nodes joined bilinearly
+uniform Flat uFlat;
+uniform Bezier uBezier;
 void evalSurface(float u, float v, out vec3 p, out vec3 du, out vec3 dv) {
+  if (uKind == 1) { evalBezier(uBezier, u, v, p, du, dv); return; }
+  if (uKind == 2) { evalFlat(uFlat, u, v, p, du, dv); return; }
   if (uBand == 0) {
     evalLat(uOwn, u, v, p, du, dv);
     return;
@@ -619,6 +671,23 @@ vec2 mapAt() {
   return (clamp(vec2(vUvs.x - floor(vUvs.x / uCellCount.x) * uCellCount.x, vUvs.y) / uCellCount * uRect.zw, vec2(0.5), uRect.zw - 0.5) + uRect.xy) / vec2(textureSize(uOpenFront, 0));
 }
 
+// The texture's colour at (x, y): its lattice of colours through CONV, or
+// joined bilinearly, or the nearest node (the page's three filters).
+uniform int uFilter;      // 0 nearest, 1 bilinear, 2 CONV
+uniform Flat uTextureFlat;
+vec3 textureColour(float tx, float ty) {
+  float u = (tx - floor(tx)) * float(uTexture.cu), v = clamp(ty, 0.0, 1.0) * float(uTexture.cv);
+  vec3 c, cu, cv;
+  if (uFilter == 2) {
+    evalLat(uTexture, u, v, c, cu, cv);
+  } else if (uFilter == 1) {
+    evalFlat(uTextureFlat, u, v, c, cu, cv);
+  } else {
+    c = nodeAt(uTextureFlat, int(floor(u + 0.5)) % uTextureFlat.nu, min(uTextureFlat.nv - 1, int(floor(v + 0.5))));
+  }
+  return clamp(c, 0.0, 1.0);
+}
+
 bool facesCavity(float v) { return uInteriorFrom >= 0.0 ? v >= uInteriorFrom : v <= -uInteriorFrom - 1.0; }
 bool leavesCavity(vec3 d) { return (uCut != 0 && dot(d, uCutPlane.xyz) > 0.15) || (uOpenTop != 0 && dot(d, uAxis) > 0.6); }
 float mirrorDim(float lit, float nl) { return 1.0 - 0.5 * (1.0 - lit) * smooth01(0.0, 0.3, nl); }
@@ -657,9 +726,7 @@ vec3 shadeHit(vec3 point, vec3 direction, int triangle, vec2 weights) {
       tx = 0.70 - uv.x / cells.x * (cells.x >= 16.0 ? 3.0 : 1.0);
       ty = uv.y / cells.y;
     }
-    vec3 c, cu, cv;
-    evalLat(uTexture, (tx - floor(tx)) * float(uTexture.cu), clamp(ty, 0.0, 1.0) * float(uTexture.cv), c, cu, cv);
-    base_colour = clamp(c, 0.0, 1.0);
+    base_colour = textureColour(tx, ty);
   }
   if (inside && uRoomLight == 0) { base_colour *= 0.55; }
   if (uLighting == 0) { return base_colour; }
@@ -737,9 +804,7 @@ void main() {
       tx = 0.70 - vUvs.x / uCellCount.x * (uCellCount.x >= 16.0 ? 3.0 : 1.0);
       ty = vUvs.y / uCellCount.y;
     }
-    vec3 c, cu, cv;
-    evalLat(uTexture, (tx - floor(tx)) * float(uTexture.cu), clamp(ty, 0.0, 1.0) * float(uTexture.cv), c, cu, cv);
-    base = clamp(c, 0.0, 1.0);
+    base = textureColour(tx, ty);
   }
   bool chrome = uMaterial == 1 && uTextureOn == 0;
   if (uMaterial == 2 && uTextureOn == 0 && uWire != 2) {
@@ -1136,4 +1201,33 @@ in vec3 vUvs;
 uniform int uMode;
 out vec4 outColour;
 void main() { outColour = vec4(uMode == 4 ? vNormal : vWorld, 1.0); }
+`;
+
+// The CPU's compile(): the admitted u-cells of every row of a lattice, from
+// its nodes. Each texel of the cell texture is one half of one coordinate of
+// one cell; the fragment that owns it admits that cell from the eight nodes
+// around it in its row.
+const COMPILE_FRAGMENT_GLSL = `#version 300 es
+${CONV_GLSL}
+uniform int uCellsBase, uNodesBase, uShapesBase, uCu, uNu, uNv, uWrap;
+out vec4 outCell;
+void main() {
+  int i = int(gl_FragCoord.y) * 2048 + int(gl_FragCoord.x) - uCellsBase;
+  if (i < 0 || i >= uNv * uCu * 6) { discard; }
+  int row = i / (uCu * 6), cell = (i / 6) % uCu, which = i % 6, channel = which / 2;
+  vec2 w[8];
+  for (int k = 0; k < 8; ++k) {
+    int index = cell - 3 + k;
+    if (uWrap != 0) {
+      index = ((index % uNu) + uNu) % uNu;
+    } else if (index < 0 || index >= uNu) {
+      w[k] = vec2(0.0);
+      continue;
+    }
+    w[k] = vec2(lin(uNodes, uNodesBase + row * uNu + index)[channel], 0.0);
+  }
+  vec2 c[5], bubble;
+  admit(w, lin(uShapes, uShapesBase + 2 * cell), lin(uShapes, uShapesBase + 2 * cell + 1), c, bubble);
+  outCell = which % 2 == 0 ? vec4(w[3].x, c[0].x, c[1].x, c[2].x) : vec4(c[3].x, c[4].x, bubble.x, 0.0);
+}
 `;

@@ -13,7 +13,7 @@ static tconv::Engine* engine = nullptr;
 namespace {
 
 constexpr int atlas_width = 2048;
-std::vector<float> cells, shapes, lattice_meta, part_meta, vertices, trim_table, trim_data, trim_table_exact, tree_nodes, tree_triangles;
+std::vector<float> nodes, patches, flat_meta, cells, shapes, lattice_meta, part_meta, vertices, trim_table, trim_data, trim_table_exact, tree_nodes, tree_triangles;
 double rest_bounds[4] = {0, 0, 0, 1};
 std::vector<std::uint32_t> indices;
 std::vector<double> state(64, 0.0), evaluated(9, 0.0), body;
@@ -78,7 +78,7 @@ void build() {
     e.bake_vertices();
     const Scene scene = e.scene_now();
     const Teapot& teapot = e.teapot();
-    cells.clear(); shapes.clear(); lattice_meta.clear(); part_meta.clear(); vertices.clear(); indices.clear(); trim_table.clear(); trim_data.clear(); trim_table_exact.clear();
+    nodes.clear(); patches.clear(); flat_meta.clear(); cells.clear(); shapes.clear(); lattice_meta.clear(); part_meta.clear(); vertices.clear(); indices.clear(); trim_table.clear(); trim_data.clear(); trim_table_exact.clear();
 
     // Every lattice once: the parts', the second side of each band, the textures'.
     std::map<const ConvSurface*, int> index_of;
@@ -89,20 +89,23 @@ void build() {
         index_of[&surface] = id;
         const Lattice& lattice = surface.lattice;
         const std::size_t cu = lattice.cells_u(), cv = lattice.cells_v();
+        // The nodes themselves and the shape of every u-cell: the GPU admits the
+        // u-cells of every row from these (the CPU's compile()), into the place
+        // kept for them in the cell texture.
         lattice_meta.insert(lattice_meta.end(), {float(cells.size() / 4), float(shapes.size() / 4), float(cu), float(cv), float(lattice.nv), lattice.wrap_u ? 1.0f : 0.0f,
-                                                 float(lattice.nu), 0.0f});
-        const std::vector<Cell<double>>& rows = surface.compiled_rows();
-        for (std::size_t k = 0; k < lattice.nv * cu; ++k) {
-            for (int channel = 0; channel < 3; ++channel) {
-                const Cell<double>& cell = rows[k * 3 + std::size_t(channel)];
-                cells.insert(cells.end(), {float(cell.anchor), float(cell.c[0]), float(cell.c[1]), float(cell.c[2]), float(cell.c[3]), float(cell.c[4]), float(cell.bubble), 0.0f});
-            }
-        }
+                                                 float(lattice.nu), float(nodes.size() / 4), 0.0f, 0.0f, 0.0f, 0.0f});
+        for (const Vec3& node : lattice.nodes) { nodes.insert(nodes.end(), {float(node.x), float(node.y), float(node.z), 0.0f}); }
+        cells.resize(cells.size() + lattice.nv * cu * 24, 0.0f);
         const std::vector<CellShape>& along = surface.shapes_along();
         for (std::size_t k = 0; k < cv; ++k) {
             const CellShape& shape = along[k];
             shapes.insert(shapes.end(), {float(int(shape.left)), float(int(shape.right)), float(int(shape.prev)), float(int(shape.next)), shape.has_prev ? 1.0f : 0.0f,
                                          shape.has_next ? 1.0f : 0.0f, shape.six ? 1.0f : 0.0f, float((surface.reads_low(k) ? 1 : 0) + (surface.reads_high(k) ? 2 : 0))});
+        }
+        lattice_meta[lattice_meta.size() - 4] = float(shapes.size() / 4);
+        for (const CellShape& shape : surface.shapes_around()) {
+            shapes.insert(shapes.end(), {float(int(shape.left)), float(int(shape.right)), float(int(shape.prev)), float(int(shape.next)), shape.has_prev ? 1.0f : 0.0f,
+                                         shape.has_next ? 1.0f : 0.0f, shape.six ? 1.0f : 0.0f, 0.0f});
         }
         return id;
     };
@@ -113,6 +116,28 @@ void build() {
     for (const auto& texture : e.textures()) { add(texture->conv); }
     pad(cells);
     pad(shapes);
+    // The other two surfaces the page offers: the original Bezier patches, and
+    // the nodes joined bilinearly. Per part: where its patches or its nodes are.
+    std::vector<std::array<float, 8>> other(teapot.parts.size());
+    for (std::size_t k = 0; k < teapot.parts.size(); ++k) {
+        const TeapotPart& part = *teapot.parts[k];
+        if (e.geometry == Geometry::bezier && !part.sampled) {
+            other[k] = {1.0f, float(patches.size() / 4), float(part.bezier.patches_u), float(part.bezier.patches_v), float(part.bezier.per_u), float(part.bezier.per_v),
+                        part.bezier.wrap_u ? 1.0f : 0.0f, 0.0f};
+            for (const auto& patch : part.bezier.patches) {
+                for (const Vec3& c : patch) { patches.insert(patches.end(), {float(c.x), float(c.y), float(c.z), 0.0f}); }
+            }
+        } else if (e.geometry == Geometry::control_mesh) {
+            const Lattice& lattice = *part.linear.lattice;
+            other[k] = {2.0f, float(nodes.size() / 4), float(lattice.nu), float(lattice.nv), lattice.wrap_u ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f};
+            for (const Vec3& node : lattice.nodes) { nodes.insert(nodes.end(), {float(node.x), float(node.y), float(node.z), 0.0f}); }
+        } else {
+            other[k] = {0.0f, 0, 0, 0, 0, 0, 0, 0};
+        }
+    }
+    pad(nodes);
+    patches.resize(patches.size() + 4, 0.0f);
+    pad(patches);
 
     const Rigid& pose = e.pose();
     const auto to_body = [&](Vec3 d) { return Vec3{pose.a[0] * d.x + pose.a[3] * d.y + pose.a[6] * d.z, pose.a[1] * d.x + pose.a[4] * d.y + pose.a[7] * d.z, pose.a[2] * d.x + pose.a[5] * d.y + pose.a[8] * d.z}; };
@@ -210,10 +235,12 @@ void build() {
             float(part.conv.spread), float(render.orientation), float(std::min(1e9, render.interior_from)), float(baked.first_triangle * 3), float(baked.triangle_count * 3),
             trim_first, float(trim_table.size() / 12) - trim_first, group, float(render.per_u), float(render.per_v), render.two_sided ? 1.0f : 0.0f,
             float(part.conv.cells_u()), float(part.conv.cells_v()), part.conv.toward ? 1.0f : 0.0f, float(baked.first_vertex), float(baked.vertex_count),
-            render.solid ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f});
+            render.solid ? 1.0f : 0.0f, float(flat_meta.size() / 8), 0.0f, 0.0f});
+        flat_meta.insert(flat_meta.end(), other[shown[k]].begin(), other[shown[k]].end());
     }
     // The textures' lattices, in the order of the texture control.
     for (const auto& texture : e.textures()) { part_meta.push_back(float(index_of[&texture->conv])); }
+    flat_meta.resize(flat_meta.size() + 8, 0.0f);
     trim_data.resize((trim_data.size() + 3) / 4 * 4 + 4, 0.0f);
     built_for = e.shown_signature();
 }
@@ -272,6 +299,9 @@ EMSCRIPTEN_KEEPALIVE const void* tp_buffer(int kind) {
     case 7: return trim_data.data();
     case 9: return trim_table_exact.data();
     case 10: return tree_nodes.data();
+    case 12: return nodes.data();
+    case 13: return patches.data();
+    case 14: return flat_meta.data();
     case 11: return tree_triangles.data();
     default: return nullptr;
     }
@@ -288,6 +318,9 @@ EMSCRIPTEN_KEEPALIVE int tp_length(int kind) {
     case 7: return int(trim_data.size());
     case 9: return int(trim_table_exact.size());
     case 10: return int(tree_nodes.size());
+    case 12: return int(nodes.size());
+    case 13: return int(patches.size());
+    case 14: return int(flat_meta.size());
     case 11: return int(tree_triangles.size());
     case 8: return int(engine->scene_parts().size());
     default: return 0;
@@ -328,7 +361,11 @@ EMSCRIPTEN_KEEPALIVE const double* tp_frame(double dt) {
 
 // The CPU's own evaluation of a shown part at rest, for checking the GPU's: point, du, dv.
 EMSCRIPTEN_KEEPALIVE const double* tp_evaluate(int part, double u, double v) {
-    const tconv::SurfacePoint point = engine->teapot().parts[engine->scene_parts()[std::size_t(part)]]->conv.eval(u, v);
+    const tconv::TeapotPart& shown = *engine->teapot().parts[engine->scene_parts()[std::size_t(part)]];
+    const tconv::Surface& surface = engine->geometry == tconv::Geometry::bezier && !shown.sampled ? static_cast<const tconv::Surface&>(shown.bezier)
+                                    : engine->geometry == tconv::Geometry::control_mesh ? static_cast<const tconv::Surface&>(shown.linear)
+                                                                                       : static_cast<const tconv::Surface&>(shown.conv);
+    const tconv::SurfacePoint point = surface.eval(u, v);
     evaluated = {point.p.x, point.p.y, point.p.z, point.du.x, point.du.y, point.du.z, point.dv.x, point.dv.y, point.dv.z};
     return evaluated.data();
 }
