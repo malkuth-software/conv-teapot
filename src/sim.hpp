@@ -43,7 +43,9 @@ public:
         for (const auto& part : teapot.parts) {
             rest_.insert(rest_.end(), part->conv.lattice.nodes.begin(), part->conv.lattice.nodes.end());
         }
-        zc::phys::ShapeDesc desc;
+        desc_ = zc::phys::ShapeDesc{};
+        plain_.clear();
+        zc::phys::ShapeDesc& desc = desc_;
         desc.density = 2400.0;      // porcelain
         desc.friction = 0.5;
         desc.restitution = 0.25;
@@ -193,6 +195,7 @@ public:
             // Rings of a revolved sheet are exactly coplanar, which the hull
             // builder does not handle; move each collision point by about a
             // micron, deterministically. The rendered surface is untouched.
+            plain_.push_back(distinct);
             std::uint32_t state = 12345u;
             for (zc::phys::Vec3& p : distinct) {
                 const auto next = [&] {
@@ -205,6 +208,15 @@ public:
             }
             hull.points = std::move(distinct);
         }
+        cooked_ = false;
+        if (!lazy) { cook_now(); }
+    }
+
+    // The hulls of the point sets, the body's mass and the world it moves in.
+    // With `lazy` this waits until the simulation here is first used: the GPU
+    // page makes its own hulls from the same points and may never need these.
+    void cook_now() {
+        zc::phys::ShapeDesc desc = desc_;
         // A group of nodes that does not span a volume cannot be a hull: keep
         // only those the engine accepts on their own.
         std::vector<zc::phys::HullDesc> accepted;
@@ -233,7 +245,7 @@ public:
                                 (a[3] * a[7] - a[4] * a[6]) / det, (a[1] * a[6] - a[0] * a[7]) / det, (a[0] * a[4] - a[1] * a[3]) / det};
         }
         zc::phys::WorldParams params;
-        params.frame_dt = 1.0 / 120.0;
+        params.frame_dt = frame_dt;
         world_ = std::make_unique<zc::phys::World>(params);
         zc::phys::Pose pose;
         pose.p = shape_.com_offset;
@@ -241,23 +253,33 @@ public:
         moved_ = false;
         accumulator_ = 0.0;
         holding_ = false;
+        cooked_ = true;
     }
+    bool lazy = false;
+    bool cooked() const { return cooked_; }
+    void ensure() const { if (!cooked_) { const_cast<TeapotSim*>(this)->cook_now(); } }
+    // The point sets the hulls are taken of (metres, z up), and the body's material.
+    const zc::phys::ShapeDesc& description() const { return desc_; }
+    // The same sets before their points were moved apart by a micron.
+    const std::vector<std::vector<zc::phys::Vec3>>& plain_points() const { return plain_; }
+    static constexpr double frame_dt = 1.0 / 120.0;
 
-    std::size_t hulls() const { return hulls_; }
-    double mass() const { return shape_.mass; }
+    std::size_t hulls() const { ensure(); return hulls_; }
+    double mass() const { ensure(); return shape_.mass; }
     bool moved() const { return moved_; }
-    bool asleep() const { return world_->all_asleep(); }
+    bool asleep() const { ensure(); return world_->all_asleep(); }
     // For a simulation elsewhere (the GPU's), in the model's axes and length
     // unit: the points of the collision hulls at rest, the centre of mass, the
     // inverse of the inertia about it (per kg unit^2), and the radius the
     // poke turns by.
-    const std::vector<Vec3>& collision_points() const { return collision_points_; }
+    const std::vector<Vec3>& collision_points() const { ensure(); return collision_points_; }
     // The cooked shape and the world's settings, in the engine's own frame and units, for the same solver run elsewhere.
-    const zc::phys::Shape& shape() const { return shape_; }
-    const zc::phys::WorldParams& world_params() const { return world_->params(); }
-    Vec3 centre_of_mass() const { return to_model(shape_.com_offset); }
-    double poke_radius() const { return shape_.radius / metres; }
+    const zc::phys::Shape& shape() const { ensure(); return shape_; }
+    const zc::phys::WorldParams& world_params() const { ensure(); return world_->params(); }
+    Vec3 centre_of_mass() const { ensure(); return to_model(shape_.com_offset); }
+    double poke_radius() const { ensure(); return shape_.radius / metres; }
     std::array<double, 9> inverse_inertia_model() const {
+        ensure();
         // Model to engine axes: (x, y, z) -> (x, -z, y), a rotation P; the tensor in the model's axes is P^T A P.
         static constexpr double p[3][3] = {{1, 0, 0}, {0, 0, -1}, {0, 1, 0}};
         std::array<double, 9> out{};
@@ -272,12 +294,13 @@ public:
         }
         return out;
     }
-    double kinetic() const { return world_->kinetic_energy(); }
-    std::size_t contacts() const { return world_->contacts().size(); }
-    const zc::phys::SolveStats stats() const { return world_->solve_stats(); }
+    double kinetic() const { ensure(); return world_->kinetic_energy(); }
+    std::size_t contacts() const { return cooked_ ? world_->contacts().size() : 0; }
+    const zc::phys::SolveStats stats() const { ensure(); return world_->solve_stats(); }
 
     // Back to the rest pose, optionally lifted (model units) and tilted.
     void reset(double lift = 0.0, double tilt = 0.0) {
+        ensure();
         if (holding_) { release(); }
         zc::phys::Pose pose;
         pose.q = zc::phys::from_axis_angle({0.0, 1.0, 0.0}, tilt);
@@ -293,6 +316,7 @@ public:
     // turns about where it is held instead of being carried by its centre.
     // drag() moves the pointer end.
     void grab(Vec3 point) {
+        ensure();
         const zc::phys::BodyState state = world_->state(body_);
         grab_local_ = zc::phys::rotate(zc::phys::conjugate(state.pose.q), to_physics(point) - state.pose.p);
         grab_target_ = to_physics(point);
@@ -309,6 +333,7 @@ public:
 
     // A push: a change of velocity at a surface point along a direction.
     void poke(Vec3 point, Vec3 direction, double speed = 1.2) {
+        ensure();
         if (holding_) { release(); }
         const zc::phys::BodyState state = world_->state(body_);
         const zc::phys::Vec3 push = to_physics_direction(direction) * speed;
@@ -321,6 +346,7 @@ public:
 
     // Advance by dt seconds in fixed engine frames. Returns the steps taken.
     int step(double dt) {
+        ensure();
         accumulator_ += dt;
         const double frame = world_->params().frame_dt;
         int steps = 0;
@@ -396,6 +422,7 @@ private:
 public:
     // The body's motion from its rest pose, in model coordinates.
     Rigid pose() const {
+        ensure();
         const zc::phys::Pose now = world_->state(body_).pose;
         const auto moved = [&](Vec3 rest) { return to_model(now.p + zc::phys::rotate(now.q, to_physics(rest) - shape_.com_offset)); };
         Rigid out;
@@ -428,6 +455,9 @@ private:
     }
 
     Teapot* teapot_ = nullptr;
+    zc::phys::ShapeDesc desc_;
+    std::vector<std::vector<zc::phys::Vec3>> plain_;
+    bool cooked_ = false;
     std::vector<Vec3> rest_;
     zc::phys::Shape shape_;
     std::unique_ptr<zc::phys::World> world_;

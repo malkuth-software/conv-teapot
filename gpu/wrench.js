@@ -545,12 +545,113 @@ void main() {
 `;
 
 // The solver's body on the GPU: its state, the hull vertices, and what the contacts retain.
+// The convex hull of a set of points, on the GPU, by wrapping. For every
+// ordered pair of points (i, j), one fragment: the plane through the two is
+// turned about their line until no point is outside it. If every point is
+// then on or inside that plane, the two lie on a face of the hull: the points
+// on the plane are the face's corners, a polygon. (i, j) is a side of that
+// polygon if no corner is to its right and none lies between the two. Each
+// side, with the lowest-numbered corner of its face, is a triangle of a fan
+// over the face, counter-clockwise seen from outside; the fans of all faces
+// are the hull's surface.
+//
+// Every fragment must come to the same answer about which points are on a
+// plane, or the fans do not close. So the decisions are exact: the points are
+// put on a grid of whole numbers (16 000 steps across half the set, a few
+// microns), and the side of a plane a point is on is the sign of a
+// determinant worked out in whole numbers, in three parts so that nothing
+// overflows 32 bits. The hull's corners keep their own coordinates.
+const HULL_GLSL = `#version 300 es
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+uniform sampler2D uPoints;
+uniform int uBase, uCount, uMode;
+out vec4 outValue;
+vec3 pointAt(int i) { int at = uBase + i; return texelFetch(uPoints, ivec2(at & 2047, at >> 11), 0).xyz; }
+ivec3 gridAt(int i) { return ivec3(pointAt(i)); }
+// Cross product of two differences of grid points: each below 2^15, so each term is below 2^30 and each component below 2^31.
+ivec3 crossOf(ivec3 a, ivec3 b) { return ivec3(a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x); }
+// The sign of n . d for such a cross product n and a difference d: n in three parts of 12 bits.
+int signOf(ivec3 n, ivec3 d) {
+  ivec3 n0 = n & 4095, n1 = (n >> 12) & 4095, n2 = n >> 24;
+  int s0 = n0.x * d.x + n0.y * d.y + n0.z * d.z;
+  int s1 = n1.x * d.x + n1.y * d.y + n1.z * d.z;
+  int s2 = n2.x * d.x + n2.y * d.y + n2.z * d.z;
+  s1 += s0 >> 12;
+  int r0 = s0 & 4095;
+  s2 += s1 >> 12;
+  int r1 = s1 & 4095;
+  return s2 < 0 ? -1 : (s2 > 0 || r1 != 0 || r0 != 0) ? 1 : 0;
+}
+bool kept[320];
+void main() {
+  int i = int(gl_FragCoord.x), j = int(gl_FragCoord.y);
+  if (uMode == 1) {
+    // Points within a tenth of a millimetre of one kept before them are the same point (the engine's hull builder welds so).
+    for (int a = 0; a <= i && a < 320; ++a) {
+      kept[a] = true;
+      vec3 p = pointAt(a);
+      for (int b = 0; b < a; ++b) {
+        if (kept[b] && distance(p, pointAt(b)) < 1.0e-4) { kept[a] = false; break; }
+      }
+    }
+    outValue = vec4(kept[min(i, 319)] ? 1.0 : 0.0);
+    return;
+  }
+  outValue = vec4(-1.0);
+  if (i == j || i >= uCount || j >= uCount) { return; }
+  ivec3 a = gridAt(i), e = gridAt(j) - a;
+  if (e == ivec3(0)) { return; }
+  // Turn the plane about the line until no point is outside it.
+  int k = -1;
+  ivec3 n = ivec3(0);
+  for (int m = 0; m < uCount; ++m) {
+    if (m == i || m == j) { continue; }
+    ivec3 d = gridAt(m) - a;
+    ivec3 c = crossOf(e, d);
+    if (c == ivec3(0)) { continue; }   // in line with the two: gives no plane
+    if (k < 0 || signOf(n, d) > 0) { k = m; n = c; }
+  }
+  if (k < 0) { return; }
+  // No point may be outside; one that is inside tells the two sides of the line apart.
+  int inside = -1;
+  for (int m = 0; m < uCount; ++m) {
+    if (m == i || m == j) { continue; }
+    int side = signOf(n, gridAt(m) - a);
+    if (side > 0) { return; }
+    if (side < 0) { inside = m; }
+  }
+  if (inside < 0) { return; }          // every point on one plane: no volume
+  ivec3 inward = gridAt(inside) - a;
+  // The face's corners: none to the right of (i, j), none between the two.
+  int apex = i < j ? i : j;
+  int axis = abs(e.x) >= abs(e.y) && abs(e.x) >= abs(e.z) ? 0 : abs(e.y) >= abs(e.z) ? 1 : 2;
+  for (int m = 0; m < uCount; ++m) {
+    if (m == i || m == j) { continue; }
+    ivec3 d = gridAt(m) - a;
+    if (signOf(n, d) != 0) { continue; }
+    ivec3 c = crossOf(e, d);
+    if (c == ivec3(0)) {
+      int along = d[axis], whole = e[axis];
+      if (along != 0 && (along > 0) == (whole > 0) && abs(along) < abs(whole)) { return; }   // between the two: the sides are the two halves
+    } else if (signOf(c, inward) > 0) {
+      return;                           // to the right: (i, j) crosses the face
+    }
+    apex = min(apex, m);
+  }
+  outValue = vec4(float(apex), 0.0, 0.0, 1.0);
+}
+`;
+
 class WrenchPhysics {
   constructor(gpu) {
     this.gpu = gpu;
     const gl = gpu.gl;
     this.program = gpu.program(ROOM_VERTEX_GLSL, WRENCH_GLSL);
     this.massProgram = gpu.program(ROOM_VERTEX_GLSL, MASS_GLSL);
+    this.hullProgram = gpu.program(ROOM_VERTEX_GLSL, HULL_GLSL);
+    this.hullOnGpu = true;
     const make = (width, height) => {
       const texture = gl.createTexture();
       gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -593,7 +694,194 @@ class WrenchPhysics {
   static toEngine(p) { return [p[0] * 0.07, -p[2] * 0.07, p[1] * 0.07]; }
   static toModel(p) { return [p[0] / 0.07, p[2] / 0.07, -p[1] / 0.07]; }
 
+  // The body from the point sets the engine gives: their hulls, by wrapping, on the GPU; the mass,
+  // centre and inertia by integrating over the hulls' faces on the GPU. The engine's own hull
+  // builder is not run for this (setBodyFromEngine uses it, for the other solvers and the checks).
   setBody(engine) {
+    if (!this.hullOnGpu) { return this.setBodyFromEngine(engine); }
+    const gl = this.gpu.gl;
+    const pointer = engine._tp_hull_points();
+    const head = new Float64Array(engine.HEAPF64.buffer, pointer, 6).slice();
+    [this.friction, this.restitution, this.rolling, this.h] = head;
+    this.hullStep = 0;
+    const sets = [], plain = [];   // the points as the engine's hull builder takes them, and before it moved them apart
+    let offset = 6;
+    for (let k = 0; k < head[5]; ++k) {
+      const n = new Float64Array(engine.HEAPF64.buffer, pointer + offset * 8, 1)[0];
+      sets.push(new Float64Array(engine.HEAPF64.buffer, pointer + (offset + 1) * 8, n * 3).slice());
+      plain.push(new Float64Array(engine.HEAPF64.buffer, pointer + (offset + 1 + n * 3) * 8, n * 3).slice());
+      offset += 1 + n * 6;
+    }
+    const started = performance.now();
+    // Welding first: one pass over each set, then only the points kept go on.
+    {
+      const all = plain.reduce((sum, set) => sum + set.length / 3, 0), raw = new Float32Array(all * 4);
+      let at = 0;
+      for (const set of plain) { for (let k = 0; k < set.length / 3; ++k) { raw.set([set[k * 3], set[k * 3 + 1], set[k * 3 + 2], 0], (at + k) * 4); } at += set.length / 3; }
+      this.gpu.floatTexture('hullPoints', raw, 4);
+      if (!this.weldTarget) { this.weldTarget = this.make(320, 1); }
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.weldTarget.framebuffer);
+      gl.disable(gl.DEPTH_TEST);
+      gl.disable(gl.BLEND);
+      gl.useProgram(this.hullProgram.program);
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.gpu.textures.hullPoints); gl.uniform1i(this.hullProgram.uniforms.uPoints, 0);
+      gl.uniform1i(this.hullProgram.uniforms.uMode, 1);
+      gl.bindVertexArray(this.gpu.emptyVao);
+      at = 0;
+      for (let h = 0; h < plain.length; ++h) {
+        const n = plain[h].length / 3;
+        gl.viewport(0, 0, n, 1);
+        gl.uniform1i(this.hullProgram.uniforms.uBase, at);
+        gl.uniform1i(this.hullProgram.uniforms.uCount, n);
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+        const flags = new Float32Array(n * 4);
+        gl.readPixels(0, 0, n, 1, gl.RGBA, gl.FLOAT, flags);
+        const keep = (set) => { const out = []; for (let k = 0; k < n; ++k) { if (flags[k * 4] > 0.5) { out.push(set[k * 3], set[k * 3 + 1], set[k * 3 + 2]); } } return Float64Array.from(out); };
+        plain[h] = keep(plain[h]);
+        sets[h] = keep(sets[h]);
+        at += n;
+      }
+    }
+    // Every set on its own grid of whole numbers about its middle: 16 000 steps to its farthest coordinate.
+    const total = sets.reduce((sum, set) => sum + set.length / 3, 0), texels = new Float32Array(total * 4), middles = [];
+    let base = 0, widest = 0;
+    for (const set of plain) {
+      const n = set.length / 3, middle = [0, 0, 0];
+      for (let k = 0; k < n * 3; ++k) { middle[k % 3] += set[k] / n; }
+      let reach = 1e-12;
+      for (let k = 0; k < n * 3; ++k) { reach = Math.max(reach, Math.abs(set[k] - middle[k % 3])); }
+      const steps = 16000 / reach;
+      for (let k = 0; k < n; ++k) { texels.set([Math.round((set[k * 3] - middle[0]) * steps), Math.round((set[k * 3 + 1] - middle[1]) * steps), Math.round((set[k * 3 + 2] - middle[2]) * steps), 0], (base + k) * 4); }
+      middles.push(middle);
+      this.hullStep = Math.max(this.hullStep, reach / 16000);
+      base += n;
+      widest = Math.max(widest, n);
+    }
+    this.gpu.floatTexture('hullPoints', texels, 4);
+    if (!this.hullTarget || this.hullTarget.width < widest) { this.hullTarget = this.make(Math.max(64, widest), Math.max(64, widest)); }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.hullTarget.framebuffer);
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.BLEND);
+    gl.useProgram(this.hullProgram.program);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.gpu.textures.hullPoints); gl.uniform1i(this.hullProgram.uniforms.uPoints, 0);
+    gl.uniform1i(this.hullProgram.uniforms.uMode, 0);
+    gl.bindVertexArray(this.gpu.emptyVao);
+    this.hullDetail = [];
+    const corners = [], vertices = [];
+    let hulls = 0, faces = 0, closed = true;
+    base = 0;
+    sets.forEach((set, index) => {
+      const n = set.length / 3;
+      gl.viewport(0, 0, n, n);
+      gl.uniform1i(this.hullProgram.uniforms.uBase, base);
+      gl.uniform1i(this.hullProgram.uniforms.uCount, n);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+      const found = new Float32Array(n * n * 4);
+      gl.readPixels(0, 0, n, n, gl.RGBA, gl.FLOAT, found);
+      base += n;
+      // Each face once, from the edge that starts at its lowest corner; the points that are corners.
+      const used = new Uint8Array(n), mine = [];
+      for (let j = 0; j < n; ++j) {
+        for (let i = 0; i < n; ++i) {
+          const k = found[(j * n + i) * 4];
+          if (k < 0) { continue; }
+          used[i] = used[j] = 1;
+          if (k !== i && k !== j) { mine.push(k, i, j); }
+        }
+      }
+      const count = used.reduce((sum, x) => sum + x, 0);
+      if (mine.length / 3 < 4) { this.hullDetail.push([index, n, count, mine.length / 3, 0]); return; }   // the points span no volume: not a hull
+      if (mine.length / 3 !== 2 * count - 4) { closed = false; }
+      { // For the checks: the hull's volume from its fan triangles.
+        let volume = 0;
+        for (let f = 0; f < mine.length; f += 3) {
+          const [p, q, r] = [mine[f], mine[f + 1], mine[f + 2]].map((v) => [set[v * 3], set[v * 3 + 1], set[v * 3 + 2]]);
+          volume += (p[0] * (q[1] * r[2] - q[2] * r[1]) - p[1] * (q[0] * r[2] - q[2] * r[0]) + p[2] * (q[0] * r[1] - q[1] * r[0])) / 6;
+        }
+        this.hullDetail.push([index, n, count, mine.length / 3, volume]);
+      }
+      for (const i of mine) { corners.push(set[i * 3], set[i * 3 + 1], set[i * 3 + 2]); }
+      for (let i = 0; i < n; ++i) { if (used[i]) { vertices.push(set[i * 3], set[i * 3 + 1], set[i * 3 + 2], hulls); } }
+      faces += mine.length / 3;
+      ++hulls;
+    });
+    this.hull = { sets: sets.length, hulls, faces, vertices: vertices.length / 4, closed, ms: 0 };
+    // Mass, centre of mass and inertia, by integrating over the faces.
+    const triangles = corners.length / 9, faceTexels = new Float32Array(triangles * 12);
+    for (let k = 0; k < triangles * 3; ++k) { faceTexels.set([corners[k * 3], corners[k * 3 + 1], corners[k * 3 + 2], 0], k * 4); }
+    this.gpu.floatTexture('hullTriangles', faceTexels, 4);
+    const target = this.make(5, 1);
+    gl.viewport(0, 0, 5, 1);
+    gl.useProgram(this.massProgram.program);
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.gpu.textures.hullTriangles); gl.uniform1i(this.massProgram.uniforms.uTriangles, 0);
+    gl.uniform1i(this.massProgram.uniforms.uCount, triangles);
+    gl.uniform1f(this.massProgram.uniforms.uDensity, head[4]);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    const found = new Float32Array(20);
+    gl.readPixels(0, 0, 5, 1, gl.RGBA, gl.FLOAT, found);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.enable(gl.DEPTH_TEST);
+    this.mass = found[0];
+    this.com = [found[1], found[2], found[3]];
+    const a = [found[8], found[9], found[10], found[12], found[13], found[14], found[16], found[17], found[18]];   // by rows
+    this.inertiaRows = a.slice();
+    this.inertia = new Float32Array([a[0], a[3], a[6], a[1], a[4], a[7], a[2], a[5], a[8]]);
+    const det = a[0] * (a[4] * a[8] - a[5] * a[7]) - a[1] * (a[3] * a[8] - a[5] * a[6]) + a[2] * (a[3] * a[7] - a[4] * a[6]);
+    const inv = [(a[4] * a[8] - a[5] * a[7]) / det, (a[2] * a[7] - a[1] * a[8]) / det, (a[1] * a[5] - a[2] * a[4]) / det,
+                 (a[5] * a[6] - a[3] * a[8]) / det, (a[0] * a[8] - a[2] * a[6]) / det, (a[2] * a[3] - a[0] * a[5]) / det,
+                 (a[3] * a[7] - a[4] * a[6]) / det, (a[1] * a[6] - a[0] * a[7]) / det, (a[0] * a[4] - a[1] * a[3]) / det];
+    this.inverseInertia = new Float32Array([inv[0], inv[3], inv[6], inv[1], inv[4], inv[7], inv[2], inv[5], inv[8]]);
+    // The hulls' corners about the centre of mass; the radius is the farthest of them.
+    this.count = vertices.length / 4;
+    this.radius = 0;
+    const about = new Float32Array(this.count * 4);
+    for (let k = 0; k < this.count; ++k) {
+      const v = [vertices[k * 4] - this.com[0], vertices[k * 4 + 1] - this.com[1], vertices[k * 4 + 2] - this.com[2]];
+      about.set([v[0], v[1], v[2], vertices[k * 4 + 3]], k * 4);
+      this.radius = Math.max(this.radius, Math.hypot(v[0], v[1], v[2]));
+    }
+    this.vertices = about;
+    this.gpu.floatTexture('wrenchVertices', about, 4);
+    const rows = Math.max(1, Math.ceil(this.count * 2 / 2048));
+    this.warm = [this.make(2048, rows), this.make(2048, rows)];
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this.hull.ms = performance.now() - started;
+    this.massCheck = null;
+  }
+
+  // The body made here beside the engine's own (this has the engine build its hulls): the hulls' corners,
+  // how far a corner here is from the nearest there and the other way, mass, centre, inertia and radius.
+  hullCheck(engine) {
+    if (!this.hull) { return null; }
+    const pointer = engine._tp_solver_body();
+    const head = new Float64Array(engine.HEAPF64.buffer, pointer, 19).slice();
+    const theirs = new Float64Array(engine.HEAPF64.buffer, pointer + 19 * 8, head[18] * 4).slice();
+    const far = (from, fromCount, to, toCount) => {
+      let worst = 0;
+      for (let i = 0; i < fromCount; ++i) {
+        let nearest = 1e30;
+        for (let j = 0; j < toCount; ++j) { nearest = Math.min(nearest, Math.hypot(from[i * 4] - to[j * 4], from[i * 4 + 1] - to[j * 4 + 1], from[i * 4 + 2] - to[j * 4 + 2])); }
+        worst = Math.max(worst, nearest);
+      }
+      return worst;
+    };
+    const inertia = Array.from(head.subarray(5, 14));
+    return { corners: this.count, theirs: head[18], hulls: this.hull.hulls, faces: this.hull.faces, closed: this.hull.closed, ms: this.hull.ms,
+             out: far(this.vertices, this.count, theirs, head[18]), back: far(theirs, head[18], this.vertices, this.count),
+             mass: Math.abs(this.mass - head[0]) / head[0], centre: Math.hypot(this.com[0] - head[2], this.com[1] - head[3], this.com[2] - head[4]),
+             inertia: Math.max(...this.inertiaRows.map((x, k) => Math.abs(x - inertia[k]))) / Math.max(...inertia.map(Math.abs)), radius: Math.abs(this.radius - head[1]) };
+  }
+
+  // The model's pose at rest lifted by `lift` and tilted by `tilt` about the centre of mass
+  // (the engine's drop: about its y axis, which is the model's -z): rotation by rows, then translation.
+  restPose(lift, tilt) {
+    const c = WrenchPhysics.toModel(this.com), cos = Math.cos(tilt), sin = Math.sin(tilt);
+    const a = [cos, sin, 0, -sin, cos, 0, 0, 0, 1];   // about (0, 0, -1)
+    const b = [c[0] - (a[0] * c[0] + a[1] * c[1]), c[1] - (a[3] * c[0] + a[4] * c[1]) + lift, 0];
+    return { a, b };
+  }
+
+  setBodyFromEngine(engine) {
     const gl = this.gpu.gl;
     const pointer = engine._tp_solver_body();
     // Copies: the engine reuses the memory these are read from.

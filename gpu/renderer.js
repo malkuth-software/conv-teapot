@@ -758,6 +758,7 @@ class TeapotGpu {
     gl.uniform1f(u.uOrientation, part.orientation);
     gl.uniform1f(u.uInteriorFrom, part.interiorFrom);
     gl.uniform1i(u.uTwoSided, part.twoSided);
+    if (u.uOnBand) { gl.uniform1i(u.uOnBand, part.band); }
     gl.uniform2f(u.uPer, part.per[0], part.per[1]);
     gl.uniform2f(u.uCellCount, part.cells[0], part.cells[1]);
     const trims = exactTrims ? part.exact : part.trims;

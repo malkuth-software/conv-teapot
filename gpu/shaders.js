@@ -668,7 +668,7 @@ uniform mat3 uPose;
 uniform int uMode;          // 0 picture, 1 distance along the light, 2 which part and where, 3 point, 4 normal, 5 presence
 uniform float uPartIndex;
 uniform float uOrientation, uInteriorFrom;
-uniform int uTwoSided, uPerPixel;
+uniform int uTwoSided, uPerPixel, uOnBand;
 uniform int uMaterial, uGloss, uLighting, uWire, uTextureOn, uMapping, uGroundOn;
 uniform Lat uTexture;
 uniform vec2 uPer;          // node intervals per source patch
@@ -872,7 +872,9 @@ void main() {
       if (uGloss != 0) {
         // What the mirror direction shows, answered by emitters: the sky and
         // its window above, the floor below with its pattern and the shadow on it.
-        vec3 origin = vWorld + normal * 2e-3;
+        // A join's band begins on the part it leaves, a hair under it where the tube is inside the wall:
+        // a mirror ray from the band starts clear of that part's sheet.
+        vec3 origin = vWorld + normal * (uOnBand != 0 ? 0.03 : 2e-3);
         vec3 mirror;
         float tHit;
         int triangle;

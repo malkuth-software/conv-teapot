@@ -1787,8 +1787,32 @@ tube, in eight steps that read each surface's speed, and writes the two
 parameter lattices and the trims. The rings of surface points the
 collision hulls are made from are evaluated by a shader as well. The
 engine keeps the bookkeeping: chaining the source patches into a
-meridian, the shape of each cell, the convex hull of each set of points,
-and its own copy of the cells for the checks.
+meridian, the shape of each cell, and its own copy of the cells for the
+checks.
+
+The hulls themselves are made by wrapping. For every ordered pair of
+points of a set, one fragment turns a plane about the line through the
+two until no point is outside it. If every point is then on or inside
+the plane, the two lie on a face; the points on the plane are the
+face's corners; and the pair is a side of the face if no corner is to
+its right and none lies between the two. Each side, with the
+lowest-numbered corner of its face, is a triangle of a fan over the
+face, and the fans are the hull's surface. The fans close only if every
+fragment agrees on which points are on a plane. With 32-bit floats they
+do not: the hulls came out with holes. So the points are put on a grid
+of whole numbers, 16\,000 steps to the set's farthest coordinate, and
+the side of a plane a point is on is the sign of a determinant computed
+exactly in 32-bit integers, the normal in three parts of twelve bits.
+Mass, centre and inertia are then integrated over the fans. Against the
+engine's hull builder, for the five versions, the mass agrees to
+$4\times10^{-6}$ to $3\times10^{-5}$, the centre of mass to
+$7\times10^{-6}$\,m and the inertia to $5\times10^{-5}$; every corner
+of the engine's hulls is within $10^{-6}$\,m of one of the GPU's. The
+GPU keeps a few corners the engine drops when it merges faces within
+half a degree (895 against 892 for the unified teapot). On these hulls
+a drop of the unified teapot differs from the CPU's by up to 0.07 units
+while it bounces and 0.006 at rest; on the engine's hulls the two
+solvers stay within $2\times10^{-3}$.
 
 Against the engine building the teapot alone, on the same rows, the
 nodes agree to $5\times10^{-7}$, the joins' lattices and trims to

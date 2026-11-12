@@ -88,6 +88,7 @@ void fill_sheet(const tconv::ProfileCurve& coarse, std::size_t rows, std::size_t
 void install_hooks(tconv::Engine& e) {
     using namespace tconv;
     e.use_hooks = true;
+    e.lazy_sim = true;
     e.hooks.begin = [] { hook_surface = nullptr; gpu_hook(0); };
     // 1: nodes sampled from Bezier patches.
     e.hooks.bezier_nodes = [](const BezierSurface& bezier, bool revolved, Lattice& lattice) {
@@ -486,6 +487,21 @@ EMSCRIPTEN_KEEPALIVE const double* tp_solver_body() {
 // The faces of the engine's convex hulls as triangles, in the frame the hulls
 // were given in (metres, z up), for integrating the body's mass, centre of
 // mass and inertia elsewhere: the number of triangles, then nine numbers each.
+// The point sets the collision hulls are taken of, for making the hulls elsewhere (metres, z up):
+// friction, restitution, rolling resistance, the frame's length, density, the number of sets; then each set's count and points.
+EMSCRIPTEN_KEEPALIVE const double* tp_hull_points() {
+    const zc::phys::ShapeDesc& desc = engine->sim.description();
+    body = {desc.friction, desc.restitution, desc.rolling_resistance, tconv::TeapotSim::frame_dt, desc.density, double(desc.hulls.size())};
+    // Each set twice: as the engine's hull builder takes it, its points moved apart by a micron, and before that.
+    for (std::size_t h = 0; h < desc.hulls.size(); ++h) {
+        body.push_back(double(desc.hulls[h].points.size()));
+        for (const zc::phys::Vec3& p : desc.hulls[h].points) { body.insert(body.end(), {p.x, p.y, p.z}); }
+        for (const zc::phys::Vec3& p : engine->sim.plain_points()[h]) { body.insert(body.end(), {p.x, p.y, p.z}); }
+    }
+    return body.data();
+}
+// Whether the engine has made its own hulls (it does when its simulation is first used).
+EMSCRIPTEN_KEEPALIVE int tp_cooked() { return engine->sim.cooked() ? 1 : 0; }
 EMSCRIPTEN_KEEPALIVE const double* tp_hull_triangles() {
     const zc::phys::Shape& shape = engine->sim.shape();
     body.assign(1, 0.0);

@@ -163,6 +163,13 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
     const s = new Float64Array(engine.HEAPF64.buffer, engine._tp_frame(0), 12);
     sim().fromPose(Array.from(s.subarray(0, 9)), Array.from(s.subarray(9, 12)));
   };
+  // The wrench solver's body at rest, lifted and tilted: found here, without the engine's simulation.
+  let simpleFor = -1;
+  const rest = (lift, tilt) => {
+    const { a, b } = wrench.restPose(lift, tilt);
+    wrench.fromPose(a, b);
+    engine._tp_pose(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], b[0], b[1], b[2]);
+  };
   const givePose = () => {
     const { a, b } = sim().pose();
     engine._tp_pose(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], b[0], b[1], b[2]);
@@ -193,9 +200,9 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
         if (gpu.upload()) { remeasure = true; }
         if (bodyFor !== gpu.vertexCount + state[30] * 1e6) {
           // A new teapot: its body, at rest where the engine has it.
-          simple.setBody(engine);
           wrench.setBody(engine);
-          takePose();
+          simpleFor = -1;
+          if (physicsChoice.value === 'wrench') { rest(0, 0); sim().running = false; } else { simple.setBody(engine); simpleFor = gpu.vertexCount + state[30] * 1e6; takePose(); }
           bodyFor = gpu.vertexCount + state[30] * 1e6;
         }
         const start = performance.now();
@@ -225,7 +232,9 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
         (gpu.rowsPlaced ? `\nrows placed on the GPU: ` + gpu.rowsPlaced.map((p) => `${['body', 'lid', 'handle', 'spout'][p.which]} ${p.rows} rows in ${p.ms.toFixed(0)} ms, error ${p.error.toExponential(2)}` +
           (rowsChecked && rowsChecked[p.which] ? ` (measured on the CPU ${rowsChecked[p.which].measured.toExponential(2)}; the CPU's own plan ${rowsChecked[p.which].ownError.toExponential(2)})` : '') +
           (p.nodes !== undefined ? `, nodes within ${p.nodes.toExponential(1)} of the CPU's` : '')).join(' · ') : '') +
-        (gpu.options.buildOnGpu && gpu.builder.ms > 0 ? `\nbuilt on the GPU in ${gpu.builder.ms.toFixed(0)} ms: ` + ['', 'Bezier lattices', 'sheets of rows', 'tubes', 'joins', 'sets of hull points', 'sheets of revolution'].map((name, k) => gpu.builder.counts[k] ? `${gpu.builder.counts[k]} ${name}` : '').filter((x) => x).join(', ') + (buildChecked ? ' · against the engine building it alone: ' + buildChecked : '') : '');
+        (gpu.options.buildOnGpu && gpu.builder.ms > 0 ? `\nbuilt on the GPU in ${gpu.builder.ms.toFixed(0)} ms: ` + ['', 'Bezier lattices', 'sheets of rows', 'tubes', 'joins', 'sets of hull points', 'sheets of revolution'].map((name, k) => gpu.builder.counts[k] ? `${gpu.builder.counts[k]} ${name}` : '').filter((x) => x).join(', ') + (buildChecked ? ' · against the engine building it alone: ' + buildChecked : '') : '') +
+        (wrench.hull ? `\nhulls made on the GPU in ${wrench.hull.ms.toFixed(0)} ms: ${wrench.hull.hulls} hulls, ${wrench.hull.vertices} corners, ${wrench.hull.faces} faces` +
+          (hullChecked ? ` · against the engine's hull builder: ${hullChecked.theirs} corners there, corners within ${Math.max(hullChecked.out, hullChecked.back).toExponential(1)} m, mass ${hullChecked.mass.toExponential(1)}, centre ${hullChecked.centre.toExponential(1)} m, inertia ${hullChecked.inertia.toExponential(1)}` : '') : '');
       stats.style.whiteSpace = 'pre-wrap';
       pauseButton.textContent = running ? 'Pause' : 'Run';
       if (wasRunning && !running) { dirty = true; }
@@ -251,23 +260,27 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
     const [w, h] = event.target.value.split('x').map(Number);
     resize(w, h);
   });
-  let rowsChecked = null, buildChecked = '';
+  let rowsChecked = null, buildChecked = '', hullChecked = null;
   document.getElementById('check').addEventListener('click', () => {
     // The check of the build makes the teapot again: it is left at rest.
     buildChecked = gpu.buildCheck();
-    engine._tp_action(1);
     gpu.upload();
-    if (onGpu()) { takePose(); sim().running = false; sim().grab = null; }
+    wrench.setBody(engine);
+    hullChecked = wrench.hullCheck(engine);
+    engine._tp_action(1);
+    if (physicsChoice.value === 'wrench') { rest(0, 0); wrench.running = false; wrench.grab = null; } else if (onGpu()) { takePose(); sim().running = false; sim().grab = null; }
     gpu.compare();
     rowsChecked = gpu.rowsCheck();
     dirty = true;
   });
   document.getElementById('drop').addEventListener('click', () => {
+    if (physicsChoice.value === 'wrench') { rest(6, 1.2); wrench.grab = null; wrench.running = true; dirty = true; return; }
     engine._tp_action(0);
     if (onGpu()) { engine._tp_set(12, 0); takePose(); sim().running = true; }
     dirty = true;
   });
   document.getElementById('reset').addEventListener('click', () => {
+    if (physicsChoice.value === 'wrench') { rest(0, 0); wrench.running = false; wrench.grab = null; dirty = true; return; }
     engine._tp_action(1);
     if (onGpu()) { takePose(); sim().running = false; sim().grab = null; }
     dirty = true;
@@ -276,7 +289,17 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
     if (onGpu()) { sim().running = !sim().running; sim().still = 0; if (sim().wake && sim().running) { sim().wake(); sim().write(); } } else { engine._tp_set(12, running ? 0 : 1); }
     dirty = true;
   });
-  physicsChoice.addEventListener('change', () => { engine._tp_action(1); simple.useSurface(physicsChoice.value === 'gpu'); takePose(); sim().running = false; sim().grab = null; dirty = true; });
+  physicsChoice.addEventListener('change', () => {
+    if (physicsChoice.value === 'wrench') { rest(0, 0); wrench.running = false; wrench.grab = null; dirty = true; return; }
+    // The other solvers take the body from the engine's own hulls.
+    if (simpleFor !== bodyFor) { simple.setBody(engine); simpleFor = bodyFor; }
+    engine._tp_action(1);
+    simple.useSurface(physicsChoice.value === 'gpu');
+    takePose();
+    sim().running = false;
+    sim().grab = null;
+    dirty = true;
+  });
 
   const place = (event) => {
     const box = canvas.getBoundingClientRect();

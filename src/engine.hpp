@@ -33,6 +33,8 @@ public:
     // Work the page does in shaders while a teapot is built (BuildHooks); used when `use_hooks`.
     BuildHooks hooks;
     bool use_hooks = false;
+    // The simulation's hulls are made when it is first used (the GPU page makes its own).
+    bool lazy_sim = false;
     SheetPlan given_rows[2][2];
     bool rows_wanted() const { return rows_outside && !use_hooks && version == Version::v2026_unified && given_rows[blinn_scale ? 1 : 0][0].row_arc.empty(); }
     bool rows_given() const { return rows_outside && !use_hooks && version == Version::v2026_unified && !given_rows[blinn_scale ? 1 : 0][0].row_arc.empty(); }
@@ -95,6 +97,7 @@ public:
         }
         teapot_ = make_teapot(options);
         sim.move_nodes = false; // the lattice stays at rest; the pose carries the motion
+        sim.lazy = lazy_sim;
         sim.build(teapot_);
         pose_now_ = Rigid{};
         ++build_count_;
