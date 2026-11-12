@@ -1705,7 +1705,15 @@ lifted out by position, not by a velocity it would keep. This is not the
 CPU's solver, which solves a frame's contacts together, and the two are
 not expected to agree step for step. The standard drop comes to rest
 upright in both, at the same height, 0.16 units apart and turned
-$4.7^\circ$ about the vertical. For one body the GPU is the slower
+$4.7^\circ$ about the vertical. The points that meet the floor
+need not be the hulls' either. In a second mode every vertex the GPU has
+evaluated is drawn, each step, into a picture of $64\times64$ texels by
+its direction from the centre of mass, with its height as depth, so that
+each texel keeps the lowest point of the surface in its direction, and
+the contact pass goes over those. No hull is used; the teapot then rests
+with its surface on the floor, where the hulls leave it 0.007 in, and
+the standard drop again ends upright. It costs about 15\,ms a frame
+against 4. For one body the GPU is the slower
 place: a frame's steps with the read-back of the state take 6\,ms,
 against 0.13\,ms on the CPU, most of it waiting for the frame being
 drawn to finish.

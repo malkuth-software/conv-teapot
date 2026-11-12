@@ -15,8 +15,8 @@ precision highp float;
 precision highp int;
 precision highp sampler2D;
 uniform sampler2D uState;    // four texels: position, quaternion, velocity, spin
-uniform sampler2D uPoints;   // the hulls' points at rest
-uniform int uCount;
+uniform sampler2D uPoints;   // the points that may meet the floor, at rest; alpha 0: none in this texel
+uniform int uCount, uWide;   // how many texels, and how many across
 uniform vec3 uCom;           // the centre of mass at rest
 uniform float uMass, uStep, uGravity, uGround, uFriction, uRestitution, uPushMost, uBounceFrom, uRollingArm;
 uniform mat3 uInverseInertia;   // about the centre of mass, in the body's axes
@@ -75,7 +75,9 @@ void main() {
     vec3 dv = vec3(0.0), dw = vec3(0.0);
     float count = 0.0, pass_push = 0.0;
     for (int i = 0; i < uCount; ++i) {
-      vec3 r = R * (texelFetch(uPoints, ivec2(i & 2047, i >> 11), 0).xyz - uCom);
+      vec4 point = texelFetch(uPoints, ivec2(i % uWide, i / uWide), 0);
+      if (point.a < 0.5) { continue; }
+      vec3 r = R * (point.xyz - uCom);
       float height = x.y + r.y - uGround;
       if (height > 0.05) { continue; }
       if (pass == 0) { deepest = max(deepest, -height); }
@@ -128,11 +130,45 @@ void main() {
 }
 `;
 
+// Which points of the surface may meet the floor this step. Every vertex the
+// GPU has evaluated is drawn as a point into a small picture, placed by its
+// direction from the centre of mass (an octahedral map) with its height
+// above the floor as depth: what remains in each texel is the lowest point
+// of the surface in that direction. The contact pass goes over those.
+const CANDIDATE_VERTEX_GLSL = `#version 300 es
+precision highp float;
+precision highp sampler2D;
+layout(location = 2) in vec3 aPoint;
+uniform sampler2D uState;
+uniform vec3 uCom;
+uniform float uGround;
+out vec3 vRest;
+vec3 turnBy(vec4 q, vec3 v) { return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v); }
+void main() {
+  vec3 x = texelFetch(uState, ivec2(0, 0), 0).xyz;
+  vec4 q = texelFetch(uState, ivec2(1, 0), 0);
+  vec3 arm = aPoint - uCom;
+  float height = x.y + turnBy(q, arm).y - uGround;
+  vec3 d = arm / max(1e-9, abs(arm.x) + abs(arm.y) + abs(arm.z));
+  vec2 at = d.y >= 0.0 ? d.xz : (1.0 - abs(d.zx)) * vec2(d.x >= 0.0 ? 1.0 : -1.0, d.z >= 0.0 ? 1.0 : -1.0);
+  vRest = aPoint;
+  gl_Position = vec4(at * (63.0 / 64.0), clamp(height / 20.0, -0.99, 0.99), 1.0);
+  gl_PointSize = 1.0;
+}
+`;
+const CANDIDATE_FRAGMENT_GLSL = `#version 300 es
+precision highp float;
+in vec3 vRest;
+out vec4 outPoint;
+void main() { outPoint = vec4(vRest, 1.0); }
+`;
+
 class TeapotPhysics {
   constructor(gpu) {
     this.gpu = gpu;
     const gl = gpu.gl;
     this.step = gpu.program(ROOM_VERTEX_GLSL, PHYSICS_GLSL);
+    this.candidates = gpu.program(CANDIDATE_VERTEX_GLSL, CANDIDATE_FRAGMENT_GLSL);
     this.states = [0, 1].map(() => {
       const texture = gl.createTexture();
       gl.bindTexture(gl.TEXTURE_2D, texture);
@@ -152,6 +188,7 @@ class TeapotPhysics {
     this.still = 0;
     this.running = false;
     this.stepMs = 0;
+    this.onSurface = false;
   }
 
   // The body from the engine: mass, centre of mass, inverse inertia, poke radius, hull points.
@@ -167,6 +204,13 @@ class TeapotPhysics {
     const texels = new Float32Array(this.count * 4);
     for (let k = 0; k < this.count; ++k) { texels.set([points[k * 3], points[k * 3 + 1], points[k * 3 + 2], 1], k * 4); }
     this.gpu.floatTexture('hullPoints', texels, 4);
+    this.hullCount = this.count;
+    this.useSurface(this.onSurface);
+  }
+  // Which points meet the floor: the surface's own, evaluated on the GPU, or the CPU's hull points.
+  useSurface(on) {
+    this.onSurface = on;
+    this.count = on ? 4096 : this.hullCount;
   }
 
   // Take the state from a pose (rotation by rows a, translation b), at rest.
@@ -247,7 +291,9 @@ class TeapotPhysics {
     gl.disable(gl.DEPTH_TEST);
     gl.disable(gl.BLEND);
     gl.viewport(0, 0, 4, 1);
-    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, this.gpu.textures.hullPoints); gl.uniform1i(u.uPoints, 1);
+    const lowest = this.onSurface ? this.gpu.target('lowestPoints', 64, 64, gl.RGBA32F) : null;
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, lowest ? lowest.texture : this.gpu.textures.hullPoints); gl.uniform1i(u.uPoints, 1);
+    gl.uniform1i(u.uWide, lowest ? 64 : 2048);
     gl.uniform1i(u.uCount, this.count);
     gl.uniform3fv(u.uCom, this.com);
     gl.uniform1f(u.uMass, this.mass);
@@ -270,6 +316,27 @@ class TeapotPhysics {
     }
     gl.bindVertexArray(this.gpu.emptyVao);
     while (this.accumulator >= h && steps < 16) {
+      if (lowest) {
+        // The lowest point of the surface in every direction, for the pose as it is.
+        const c = this.candidates.uniforms;
+        gl.useProgram(this.candidates.program);
+        gl.bindFramebuffer(gl.FRAMEBUFFER, lowest.framebuffer);
+        gl.viewport(0, 0, 64, 64);
+        gl.clearBufferfv(gl.COLOR, 0, [0, 0, 0, 0]);
+        gl.clear(gl.DEPTH_BUFFER_BIT);
+        gl.enable(gl.DEPTH_TEST);
+        gl.depthFunc(gl.LESS);
+        gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.states[0].texture); gl.uniform1i(c.uState, 0);
+        gl.uniform3fv(c.uCom, this.com);
+        gl.uniform1f(c.uGround, ground);
+        gl.bindVertexArray(this.gpu.carriedVao);
+        gl.drawArrays(gl.POINTS, 0, this.gpu.vertexCount);
+        gl.disable(gl.DEPTH_TEST);
+        gl.depthFunc(gl.LEQUAL);
+        gl.useProgram(this.step.program);
+        gl.viewport(0, 0, 4, 1);
+        gl.bindVertexArray(this.gpu.emptyVao);
+      }
       gl.bindFramebuffer(gl.FRAMEBUFFER, this.states[1].framebuffer);
       gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, this.states[0].texture); gl.uniform1i(u.uState, 0);
       gl.drawArrays(gl.TRIANGLES, 0, 3);
