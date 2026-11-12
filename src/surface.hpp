@@ -153,6 +153,13 @@ public:
     std::size_t spread = 1;
 
     std::size_t node_count() const { return lattice.nodes.size() + (toward ? toward->lattice.nodes.size() : 0); }
+    // What compile() made, for an evaluator elsewhere (the GPU's): the admitted
+    // u-cells of every row, [(row * cells_u + cell) * 3 + coordinate], and the
+    // shape of every v-cell with whether it reads the rows three below and four above.
+    const std::vector<Cell<double>>& compiled_rows() const { return rows_; }
+    const std::vector<CellShape>& shapes_along() const { return shapes_v_; }
+    bool reads_low(std::size_t cell) const { return outer_low_[cell] != 0; }
+    bool reads_high(std::size_t cell) const { return outer_high_[cell] != 0; }
 
     void compile() {
         if (toward) { toward->compile(); }

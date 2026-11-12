@@ -1,0 +1,673 @@
+// Shaders of the GPU version. The CONV evaluator below is the CPU's
+// (src/conv_line.hpp, src/surface.hpp) written for a shader:
+//
+//  - The admitted u-cells of every lattice row are compiled once on the CPU
+//    and read here from a texture; a row's value at the query is one cell's
+//    quintic and bubble.
+//  - The v-cell through those eight row values is admitted here, at every
+//    query, because its inputs depend on u. Admission is piecewise linear in
+//    its inputs: every step is a sum, a multiple, or a choice of one of two
+//    values by comparing them. So the derivative along u is carried through
+//    it as the second component of a vec2, taking at each choice the
+//    derivative of the value chosen. That is what the CPU's dual numbers do.
+//  - The derivative along v is the derivative of the basis.
+//
+// Numbers are 32-bit floats here and 64-bit on the CPU; the page measures
+// the difference.
+const CONV_GLSL = `
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+
+uniform sampler2D uCells;   // admitted u-cells: per (row, cell) six texels, two per coordinate
+uniform sampler2D uShapes;  // per v-cell two texels: jets (left, right, prev, next); has_prev, has_next, six, rows read
+struct Lat { int cells; int shapes; int cu; int cv; int nv; int wrap; };
+
+vec4 lin(sampler2D t, int i) { return texelFetch(t, ivec2(i & 2047, i >> 11), 0); }
+
+struct Basis { float tau[5]; float psi; float dtau[5]; float dpsi; };
+Basis makeBasis(float t) {
+  Basis b;
+  float s = 1.0 - t;
+  float t2 = t * t, t3 = t2 * t, t4 = t2 * t2;
+  float s2 = s * s, s3 = s2 * s, s4 = s2 * s2;
+  b.tau[4] = t4 * t;
+  b.tau[3] = b.tau[4] + 5.0 * t4 * s;
+  b.tau[2] = b.tau[3] + 10.0 * t3 * s2;
+  b.tau[1] = b.tau[2] + 10.0 * t2 * s3;
+  b.tau[0] = b.tau[1] + 5.0 * t * s4;
+  b.psi = t3 * s3 * (2.0 * t - 1.0);
+  // The derivative of a tail of Bernstein polynomials of degree 5 is 5 times one of degree 4.
+  b.dtau[0] = 5.0 * s4;
+  b.dtau[1] = 20.0 * t * s3;
+  b.dtau[2] = 30.0 * t2 * s2;
+  b.dtau[3] = 20.0 * t3 * s;
+  b.dtau[4] = 5.0 * t4;
+  b.dpsi = 3.0 * t2 * s3 * (2.0 * t - 1.0) - 3.0 * t3 * s2 * (2.0 * t - 1.0) + 2.0 * t3 * s3;
+  return b;
+}
+
+// A value with its derivative along u: choices are made by the value.
+vec2 tmin(vec2 a, vec2 b) { return b.x < a.x ? b : a; }
+vec2 tmax(vec2 a, vec2 b) { return b.x > a.x ? b : a; }
+vec2 pos(vec2 x) { return x.x > 0.0 ? x : vec2(0.0); }
+vec2 neg(vec2 x) { return x.x < 0.0 ? -x : vec2(0.0); }
+
+// Scaled jet (m, q) of the node c[3] from its neighbours c[0..6].
+void jet(int kind, vec2 c[7], out vec2 m, out vec2 q) {
+  if (kind == 0) { // interior
+    m = (c[1] - 8.0 * c[2] + 8.0 * c[4] - c[5]) / 12.0;
+    q = (16.0 * c[4] - c[5] - 30.0 * c[3] + 16.0 * c[2] - c[1]) / 12.0;
+  } else if (kind == 1) { // paper_first
+    m = (4.0 * c[4] - 3.0 * c[3] - c[5]) / 2.0;
+    q = 2.0 * c[3] - 5.0 * c[4] + 4.0 * c[5] - c[6];
+  } else if (kind == 2 || kind == 9) { // paper_central, central3
+    m = (c[4] - c[2]) / 2.0;
+    q = c[2] - 2.0 * c[3] + c[4];
+  } else if (kind == 3) { // paper_last
+    m = (3.0 * c[3] - 4.0 * c[2] + c[1]) / 2.0;
+    q = 2.0 * c[3] - 5.0 * c[2] + 4.0 * c[1] - c[0];
+  } else if (kind == 4) { // first4
+    m = (18.0 * c[4] - 11.0 * c[3] - 9.0 * c[5] + 2.0 * c[6]) / 6.0;
+    q = 2.0 * c[3] - 5.0 * c[4] + 4.0 * c[5] - c[6];
+  } else if (kind == 5) { // second4
+    m = (6.0 * c[4] - 2.0 * c[2] - 3.0 * c[3] - c[5]) / 6.0;
+    q = c[2] - 2.0 * c[3] + c[4];
+  } else if (kind == 6) { // penult4
+    m = (2.0 * c[4] + 3.0 * c[3] - 6.0 * c[2] + c[1]) / 6.0;
+    q = c[2] - 2.0 * c[3] + c[4];
+  } else if (kind == 7) { // last4
+    m = (11.0 * c[3] - 18.0 * c[2] + 9.0 * c[1] - 2.0 * c[0]) / 6.0;
+    q = 2.0 * c[3] - 5.0 * c[2] + 4.0 * c[1] - c[0];
+  } else if (kind == 8) { // first3
+    m = (4.0 * c[4] - 3.0 * c[3] - c[5]) / 2.0;
+    q = c[3] - 2.0 * c[4] + c[5];
+  } else if (kind == 10) { // last3
+    m = (3.0 * c[3] - 4.0 * c[2] + c[1]) / 2.0;
+    q = c[3] - 2.0 * c[2] + c[1];
+  } else if (kind == 11) { // first2
+    m = c[4] - c[3];
+    q = vec2(0.0);
+  } else { // last2
+    m = c[3] - c[2];
+    q = vec2(0.0);
+  }
+}
+
+void order(inout vec2 a, inout vec2 b) {
+  vec2 low = tmin(a, b), high = tmax(a, b);
+  a = low;
+  b = high;
+}
+
+// The largest of five prefix forms after a nine-comparator sort.
+vec2 capacityThreshold(vec2 w[5], vec2 mass) {
+  order(w[0], w[1]);
+  order(w[3], w[4]);
+  order(w[2], w[4]);
+  order(w[2], w[3]);
+  order(w[1], w[4]);
+  order(w[0], w[3]);
+  order(w[0], w[2]);
+  order(w[1], w[3]);
+  order(w[1], w[2]);
+  vec2 result = mass / 5.0;
+  vec2 sum = w[0];
+  result = tmax(result, (mass - sum) / 4.0);
+  sum += w[1];
+  result = tmax(result, (mass - sum) / 3.0);
+  sum += w[2];
+  result = tmax(result, (mass - sum) / 2.0);
+  sum += w[3];
+  result = tmax(result, mass - sum);
+  return result;
+}
+
+// One v-cell from its window w[0..7] of row values (each with its derivative
+// along u), evaluated with the basis bt: value, derivative along u, derivative along v.
+vec3 cellAlong(vec2 w[8], vec4 sa, vec4 sb, Basis bt) {
+  int left = int(sa.x), right = int(sa.y), prev = int(sa.z), next = int(sa.w);
+  bool hasPrev = sb.x > 0.5, hasNext = sb.y > 0.5, six = sb.z > 0.5;
+  vec2 cl[7], cr[7];
+  for (int k = 0; k < 7; ++k) { cl[k] = w[k]; cr[k] = w[k + 1]; }
+  vec2 ml, ql, mr, qr;
+  jet(left, cl, ml, ql);
+  jet(right, cr, mr, qr);
+  vec2 delta = w[4] - w[3];
+  vec2 a[5];
+  a[0] = ml / 5.0;
+  a[1] = ml / 5.0 + ql / 20.0;
+  a[3] = mr / 5.0 - qr / 20.0;
+  a[4] = mr / 5.0;
+  a[2] = delta - a[0] - a[1] - a[3] - a[4];
+  vec2 prevDelta = hasPrev ? w[3] - w[2] : vec2(0.0);
+  vec2 nextDelta = hasNext ? w[5] - w[4] : vec2(0.0);
+  vec2 prevLast = vec2(0.0), nextFirst = vec2(0.0);
+  if (hasPrev) {
+    vec2 m = ml, q;
+    if (prev != left) { jet(prev, cl, m, q); }
+    prevLast = m / 5.0;
+  }
+  if (hasNext) {
+    vec2 m = mr, q;
+    if (next != right) { jet(next, cr, m, q); }
+    nextFirst = m / 5.0;
+  }
+  vec2 roomPos[5], roomNeg[5];
+  vec2 headPos = tmin(pos(prevDelta), pos(pos(a[0]) - neg(prevLast)));
+  vec2 headNeg = tmin(neg(prevDelta), pos(neg(a[0]) - pos(prevLast)));
+  for (int j = 0; j < 5; ++j) {
+    headPos = tmin(headPos, pos(a[j]));
+    headNeg = tmin(headNeg, neg(a[j]));
+    roomPos[j] = headPos;
+    roomNeg[j] = headNeg;
+  }
+  vec2 tailPos = tmin(pos(nextDelta), pos(pos(a[4]) - neg(nextFirst)));
+  vec2 tailNeg = tmin(neg(nextDelta), pos(neg(a[4]) - pos(nextFirst)));
+  for (int j = 4; j >= 0; --j) {
+    tailPos = tmin(tailPos, pos(a[j]));
+    tailNeg = tmin(tailNeg, neg(a[j]));
+    roomPos[j] += tailPos;
+    roomNeg[j] += tailNeg;
+  }
+  vec2 totalPos = vec2(0.0), totalNeg = vec2(0.0);
+  for (int j = 0; j < 5; ++j) {
+    totalPos += roomPos[j];
+    totalNeg += roomNeg[j];
+  }
+  vec2 plus = pos(delta), minus = neg(delta);
+  vec2 upperBase = plus + tmin(totalNeg, 4.0 * plus);
+  vec2 lowerBase = minus + tmin(totalPos, 4.0 * minus);
+  vec2 q[5], down[5], up[5];
+  vec2 sum = vec2(0.0);
+  for (int j = 0; j < 5; ++j) {
+    vec2 high = roomPos[j] + upperBase;
+    vec2 low = -(roomNeg[j] + lowerBase);
+    q[j] = tmin(high, tmax(low, a[j]));
+    down[j] = q[j] - low;
+    up[j] = high - q[j];
+    sum += q[j];
+  }
+  vec2 residual = sum - delta;
+  bool lower = residual.x > 0.0;
+  vec2 capacity[5];
+  for (int j = 0; j < 5; ++j) { capacity[j] = lower ? down[j] : up[j]; }
+  vec2 mass = lower ? residual : -residual;
+  vec2 threshold = capacityThreshold(capacity, mass);
+  vec2 c[5];
+  for (int j = 0; j < 5; ++j) {
+    vec2 shift = tmin(threshold, capacity[j]);
+    c[j] = lower ? q[j] - shift : q[j] + shift;
+  }
+  // The bubble, with the continuous bound.
+  vec2 fit = vec2(0.0);
+  if (six) {
+    vec2 fifth = (w[6] - w[1]) + 5.0 * (w[2] - w[5]) + 10.0 * (w[4] - w[3]);
+    fit = (-41.0 / 30.0) * fifth;
+  }
+  fit += 35.0 * (a[0] - c[0]) + 87.5 * (a[1] - c[1]) + 112.5 * (a[2] - c[2]) + 87.5 * (a[3] - c[3]) + 35.0 * (a[4] - c[4]);
+  vec2 d2 = (c[0] + 8.0 * c[1] + 6.0 * c[2]) / 3.0;
+  vec2 d3 = c[1] + 3.0 * c[2] + c[3];
+  vec2 d4 = (6.0 * c[2] + 8.0 * c[3] + c[4]) / 3.0;
+  vec2 bound = tmin(tmin(5.0 * tmax(d2, -d2), 2.5 * tmax(d3, -d3)), 5.0 * tmax(d4, -d4));
+  vec2 bubble = tmin(bound, tmax(-bound, fit));
+  vec2 value = w[3] + bubble * bt.psi;
+  float along = bubble.x * bt.dpsi;
+  for (int j = 0; j < 5; ++j) {
+    value += c[j] * bt.tau[j];
+    along += c[j].x * bt.dtau[j];
+  }
+  return vec3(value, along);
+}
+
+void locate(float x, int cells, bool periodic, out int cell, out float t) {
+  float n = float(cells);
+  if (periodic) {
+    x = x - floor(x / n) * n;
+    if (x >= n) { x = 0.0; }
+  } else {
+    x = clamp(x, 0.0, n);
+  }
+  float whole = floor(x);
+  if (whole >= n) { whole = n - 1.0; }
+  cell = int(whole);
+  t = x - whole;
+}
+
+// A lattice at (u, v) in node units: point and the two derivatives.
+void evalLat(Lat L, float u, float v, out vec3 p, out vec3 du, out vec3 dv) {
+  int cellU, cellV;
+  float s, t;
+  locate(u, L.cu, L.wrap != 0, cellU, s);
+  locate(v, L.cv, false, cellV, t);
+  Basis bs = makeBasis(s), bt = makeBasis(t);
+  vec4 sa = lin(uShapes, L.shapes + 2 * cellV), sb = lin(uShapes, L.shapes + 2 * cellV + 1);
+  int reads = int(sb.w);
+  vec2 wx[8], wy[8], wz[8];
+  for (int k = 0; k < 8; ++k) {
+    int row = cellV - 3 + k;
+    bool used = row >= 0 && row < L.nv && !(k == 0 && (reads & 1) == 0) && !(k == 7 && (reads & 2) == 0);
+    if (!used) {
+      wx[k] = vec2(0.0); wy[k] = vec2(0.0); wz[k] = vec2(0.0);
+      continue;
+    }
+    int base = L.cells + (row * L.cu + cellU) * 6;
+    for (int channel = 0; channel < 3; ++channel) {
+      vec4 a = lin(uCells, base + 2 * channel), b = lin(uCells, base + 2 * channel + 1);
+      vec2 value = vec2(a.x + a.y * bs.tau[0] + a.z * bs.tau[1] + a.w * bs.tau[2] + b.x * bs.tau[3] + b.y * bs.tau[4] + b.z * bs.psi,
+                        a.y * bs.dtau[0] + a.z * bs.dtau[1] + a.w * bs.dtau[2] + b.x * bs.dtau[3] + b.y * bs.dtau[4] + b.z * bs.dpsi);
+      if (channel == 0) { wx[k] = value; } else if (channel == 1) { wy[k] = value; } else { wz[k] = value; }
+    }
+  }
+  vec3 x = cellAlong(wx, sa, sb, bt), y = cellAlong(wy, sa, sb, bt), z = cellAlong(wz, sa, sb, bt);
+  p = vec3(x.x, y.x, z.x);
+  du = vec3(x.y, y.y, z.y);
+  dv = vec3(x.z, y.z, z.z);
+}
+
+// A part of the teapot. A band between two parts keeps where its two sides
+// are on those parts, and is the blend of them with a quintic weight.
+uniform Lat uOwn, uToward, uOn, uTube;
+uniform int uBand;
+uniform float uSpread;
+void evalSurface(float u, float v, out vec3 p, out vec3 du, out vec3 dv) {
+  if (uBand == 0) {
+    evalLat(uOwn, u, v, p, du, dv);
+    return;
+  }
+  float scale = 1.0 / uSpread;
+  vec3 ap, adu, adv, bp, bdu, bdv;
+  evalLat(uOwn, u, v * scale, ap, adu, adv);
+  evalLat(uToward, u, v * scale, bp, bdu, bdv);
+  adv *= scale;
+  bdv *= scale;
+  vec3 Ap, Adu, Adv, Bp, Bdu, Bdv;
+  evalLat(uOn, ap.x, ap.y, Ap, Adu, Adv);
+  evalLat(uTube, u, bp.x, Bp, Bdu, Bdv);
+  vec3 sideAdu = Adu * adu.x + Adv * adu.y, sideAdv = Adu * adv.x + Adv * adv.y;
+  vec3 sideBdu = Bdu + Bdv * bdu.x, sideBdv = Bdv * bdv.x;
+  float rows = float(uOwn.cv) * uSpread;
+  float tau = clamp(v / rows, 0.0, 1.0);
+  float beta = tau * tau * tau * (10.0 + tau * (6.0 * tau - 15.0));
+  float slope = 30.0 * tau * tau * (1.0 - tau) * (1.0 - tau) / rows;
+  p = Ap + (Bp - Ap) * beta;
+  du = sideAdu + (sideBdu - sideAdu) * beta;
+  dv = sideAdv + (sideBdv - sideAdv) * beta + (Bp - Ap) * slope;
+}
+`;
+
+const VERTEX_GLSL = `#version 300 es
+${CONV_GLSL}
+layout(location = 0) in vec3 aUvs;     // u, v in node units; which side of a crease the vertex belongs to
+layout(location = 1) in vec3 aNormal;  // the baked mesh's normal at rest: used at a pole, where the surface has none
+uniform mat3 uPose;
+uniform vec3 uShift;
+uniform mat4 uViewProj;
+uniform vec3 uEyeAt;
+uniform float uNearer;   // a band is drawn where it and the part it lies on are both there: projected this fraction nearer the eye
+uniform int uProbe;      // > 0: the vertices are written to a row of that many pixels, for reading the surface back
+out vec3 vWorld;
+out vec3 vNormal;
+out vec3 vUvs;
+void main() {
+  vec3 p, du, dv;
+  evalSurface(aUvs.x, aUvs.y, p, du, dv);
+  if (aUvs.z != 0.0) {
+    vec3 q;
+    evalSurface(aUvs.x, aUvs.y + aUvs.z * 1e-4, q, du, dv);
+  }
+  vec3 n = cross(du, dv);
+  n = dot(n, n) > 1e-18 ? normalize(n) : aNormal;
+  vWorld = uPose * p + uShift;
+  vNormal = uPose * n;
+  vUvs = aUvs;
+  if (uProbe > 0) {
+    gl_Position = vec4((float(gl_VertexID) + 0.5) / float(uProbe) * 2.0 - 1.0, 0.0, 0.0, 1.0);
+    gl_PointSize = 1.0;
+    return;
+  }
+  gl_Position = uViewProj * vec4(vWorld + (uEyeAt - vWorld) * uNearer, 1.0);
+}
+`;
+
+// What every pass that draws the teapot decides first: is this point of the part there at all?
+const TRIM_GLSL = `
+uniform sampler2D uTrimData;
+uniform int uTrimCount;
+uniform vec4 uTrimA[6];   // kind (0 loop, 1 cut), offset, count, below
+uniform vec4 uTrimB[6];   // loop: centre u, period u
+uniform vec4 uTrimC[6];   // loop: bounds of u and of v
+uniform int uCut;
+uniform vec4 uCutPlane;
+float trimValue(int i) { return texelFetch(uTrimData, ivec2(i & 2047, i >> 11), 0).r; }
+bool hidden(vec3 world, float u, float v) {
+  if (uCut != 0 && dot(uCutPlane.xyz, world) > uCutPlane.w) { return true; }
+  for (int k = 0; k < uTrimCount; ++k) {
+    int offset = int(uTrimA[k].y), count = int(uTrimA[k].z);
+    if (uTrimA[k].x > 0.5) {
+      float n = float(count);
+      float x = u - floor(u / n) * n;
+      int i = int(x) % count;
+      float f = x - floor(x);
+      float c = mix(trimValue(offset + i), trimValue(offset + (i + 1) % count), f);
+      if (uTrimA[k].w > 0.5 ? v < c : v > c) { return true; }
+      continue;
+    }
+    float x = u;
+    if (uTrimB[k].y > 0.0) { x -= uTrimB[k].y * floor((x - uTrimB[k].x) / uTrimB[k].y + 0.5); }
+    if (x < uTrimC[k].x || x > uTrimC[k].y || v < uTrimC[k].z || v > uTrimC[k].w) { continue; }
+    bool inside = false;
+    vec2 pj = vec2(trimValue(offset + 2 * (count - 1)), trimValue(offset + 2 * (count - 1) + 1));
+    for (int i = 0; i < count; ++i) {
+      vec2 pi = vec2(trimValue(offset + 2 * i), trimValue(offset + 2 * i + 1));
+      if ((pi.y > v) != (pj.y > v) && x < (pj.x - pi.x) * (v - pi.y) / (pj.y - pi.y) + pi.x) { inside = !inside; }
+      pj = pi;
+    }
+    if (inside) { return true; }
+  }
+  return false;
+}
+`;
+
+// The room, as the CPU renderer has it (src/render.hpp): sky and window,
+// floor pattern averaged over a pixel, shadow map lookup.
+const ROOM_GLSL = `
+uniform vec3 uLight;        // direction towards the light
+uniform vec3 uEye;
+uniform float uGround;
+uniform int uShadows;
+uniform sampler2D uShadowMap;   // distance along the light, nearest the light
+uniform vec3 uShadowX, uShadowY, uShadowCentre;
+uniform float uShadowRadius, uShadowSize;
+
+float smooth01(float a, float b, float x) {
+  float t = clamp((x - a) / (b - a), 0.0, 1.0);
+  return t * t * (3.0 - 2.0 * t);
+}
+float fifth(float x) { float x2 = x * x; return x2 * x2 * x; }
+float ninetieth(float x) {
+  float x2 = x * x, x4 = x2 * x2, x8 = x4 * x4, x16 = x8 * x8, x32 = x16 * x16, x64 = x32 * x32;
+  return x64 * x16 * x8 * x2;
+}
+vec3 ambientOf(vec3 n) {
+  float up = 0.5 * (n.y + 1.0);
+  return mix(vec3(0.30, 0.28, 0.26), vec3(0.46, 0.50, 0.56), up);
+}
+vec3 backgroundOf(vec3 dir) {
+  float t = 0.5 * (normalize(dir).y + 1.0);
+  return mix(vec3(0.84, 0.86, 0.89), vec3(0.93, 0.95, 0.98), t);
+}
+vec3 environmentOf(vec3 d) {
+  float t = 0.5 * (d.y + 1.0);
+  vec3 sky = mix(vec3(0.20, 0.24, 0.30), vec3(0.78, 0.84, 0.92), t);
+  if (d.y < 0.0) { sky = vec3(0.16, 0.15, 0.14) * (1.0 + d.y) + vec3(0.08) * (-d.y); }
+  float r = sqrt(d.x * d.x + d.z * d.z);
+  float c = r > 1e-12 ? d.x / r : 1.0, sn = r > 1e-12 ? d.z / r : 0.0;
+  float cos3 = 4.0 * c * c * c - 3.0 * c, sin3 = 3.0 * sn - 4.0 * sn * sn * sn;
+  float lobe = cos3 * 0.8253356149096783 - sin3 * 0.5646424733950354;
+  float window = exp(-18.0 * (d.y - 0.55) * (d.y - 0.55)) * (0.5 + 0.5 * lobe);
+  return sky + vec3(1.0, 0.98, 0.92) * (0.9 * window * window);
+}
+// The area emitter and sky seen along a direction.
+vec3 skyOf(vec3 origin, vec3 dir) {
+  vec3 d = normalize(dir);
+  float t = 0.5 * (d.y + 1.0);
+  vec3 colour = d.y >= 0.0 ? mix(vec3(0.50, 0.56, 0.66), vec3(0.80, 0.86, 0.95), t)
+                           : vec3(0.30, 0.31, 0.33) * (1.0 + d.y) + vec3(0.12, 0.12, 0.13) * (-d.y);
+  vec3 centre = vec3(0.0, 1.3, 0.0) + uLight * 14.0;
+  float facing = -dot(d, uLight);
+  if (facing < -1e-6) {
+    float reach = dot(centre - origin, uLight) / dot(d, uLight);
+    if (reach > 0.0) {
+      vec3 local = origin + d * reach - centre;
+      vec3 helper = abs(uLight.y) < 0.9 ? vec3(0.0, 1.0, 0.0) : vec3(1.0, 0.0, 0.0);
+      vec3 ax = normalize(cross(helper, uLight)), ay = cross(uLight, ax);
+      float x = abs(dot(local, ax)), y = abs(dot(local, ay));
+      float window = (1.0 - smooth01(3.6, 4.2, x)) * (1.0 - smooth01(3.6, 4.2, y));
+      float bars = smooth01(0.10, 0.22, x) * smooth01(0.10, 0.22, y);
+      colour += vec3(4.2, 4.0, 3.7) * (window * (0.25 + 0.75 * bars));
+    }
+  }
+  return colour;
+}
+// The floor's checker averaged over a square of side width about p.
+float triangleWave(float t) {
+  float m = t - 2.0 * floor(0.5 * t);
+  return m < 1.0 ? m : 2.0 - m;
+}
+float squareWave(float x, float w) {
+  if (!(w > 1e-6)) { return (x - 2.0 * floor(0.5 * x)) < 1.0 ? 1.0 : -1.0; }
+  return (triangleWave(x + 0.5 * w) - triangleWave(x - 0.5 * w)) / w;
+}
+vec3 checkerOf(vec3 p, float width) {
+  float m = 0.5 + 0.5 * squareWave(p.x, width) * squareWave(p.z, width);
+  return mix(vec3(0.50, 0.52, 0.55), vec3(0.66, 0.68, 0.71), m);
+}
+// The fraction of the light that reaches p: the four texels around p, each
+// tested, blended by where p lies between their centres.
+float litAt(vec3 p, float bias) {
+  if (uShadows == 0) { return 1.0; }
+  vec3 d = p - uShadowCentre;
+  float reach = uShadowRadius * (1.0 + 4.0 / uShadowSize);
+  if (abs(dot(d, uShadowX)) > reach || abs(dot(d, uShadowY)) > reach) { return 1.0; }
+  float sx = (dot(d, uShadowX) / uShadowRadius * 0.5 + 0.5) * uShadowSize;
+  float sy = (dot(d, uShadowY) / uShadowRadius * 0.5 + 0.5) * uShadowSize;
+  float sz = -dot(d, uLight);
+  float x = sx - 0.5, y = sy - 0.5;
+  float fx = floor(x), fy = floor(y);
+  float ax = x - fx, ay = y - fy;
+  ivec2 base = ivec2(int(fx), int(fy));
+  float open[4];
+  for (int k = 0; k < 4; ++k) {
+    ivec2 at = base + ivec2(k & 1, k >> 1);
+    open[k] = (at.x < 0 || at.y < 0 || at.x >= int(uShadowSize) || at.y >= int(uShadowSize)) ? 1.0
+              : (sz - bias <= texelFetch(uShadowMap, at, 0).r ? 1.0 : 0.0);
+  }
+  return mix(mix(open[0], open[1], ax), mix(open[2], open[3], ax), ay);
+}
+float shadowBias(float nl) { return 0.02 + 0.02 * min(12.0, sqrt(max(0.0, 1.0 - nl * nl)) / nl); }
+vec3 floorColour(vec3 p, float width, float reach, bool shadowed) {
+  vec3 base = checkerOf(p, width);
+  float lit = shadowed ? litAt(p + vec3(0.0, 0.004, 0.0), 0.02) : 1.0;
+  float light = 0.55 + 0.45 * lit * max(0.0, uLight.y);
+  float fade = smooth01(18.0, 60.0, reach);
+  return mix(base * light, vec3(0.80, 0.84, 0.90), fade);
+}
+vec4 encode(vec3 linear) { return vec4(sqrt(clamp(linear, 0.0, 1.0)), 1.0); }   // gamma 2, as the CPU's bytes
+`;
+
+const FRAGMENT_GLSL = `#version 300 es
+${CONV_GLSL}
+${TRIM_GLSL}
+${ROOM_GLSL}
+in vec3 vWorld;
+in vec3 vNormal;
+in vec3 vUvs;
+uniform mat3 uPose;
+uniform int uMode;          // 0 picture, 1 distance along the light, 2 which part and where, 3 point, 4 normal, 5 presence
+uniform float uPartIndex;
+uniform float uOrientation, uInteriorFrom;
+uniform int uTwoSided, uPerPixel;
+uniform int uMaterial, uGloss, uLighting, uWire, uTextureOn, uMapping, uGroundOn;
+uniform Lat uTexture;
+uniform vec2 uPer;          // node intervals per source patch
+uniform vec2 uCellCount;    // the part's cells as presented
+uniform vec3 uAxis;
+uniform int uOpenTop;
+out vec4 outColour;
+
+bool facesCavity(float v) { return uInteriorFrom >= 0.0 ? v >= uInteriorFrom : v <= -uInteriorFrom - 1.0; }
+bool leavesCavity(vec3 d) { return (uCut != 0 && dot(d, uCutPlane.xyz) > 0.15) || (uOpenTop != 0 && dot(d, uAxis) > 0.6); }
+float mirrorDim(float lit, float nl) { return 1.0 - 0.5 * (1.0 - lit) * smooth01(0.0, 0.3, nl); }
+float lineInk(float coordinate, float period, float gradient, float halfWidth) {
+  float scaled = coordinate / period;
+  float distance = abs(scaled - floor(scaled + 0.5)) * period / max(gradient, 1e-12);
+  return 1.0 - smooth01(halfWidth - 0.5, halfWidth + 0.5, distance);
+}
+
+void main() {
+  if (uMode == 3) { outColour = vec4(vWorld, 1.0); return; }
+  if (uMode == 4) { outColour = vec4(vNormal, 1.0); return; }
+  if (hidden(vWorld, vUvs.x, vUvs.y)) { discard; }
+  if (uMode == 5) { outColour = vec4(1.0); return; }   // counted, not drawn
+  if (uMode == 1) {
+    outColour = vec4(-dot(vWorld - uShadowCentre, uLight), 0.0, 0.0, 1.0);
+    return;
+  }
+  if (uMode == 2) {
+    outColour = vec4(uPartIndex + 1.0, vUvs.x, vUvs.y, 1.0);
+    return;
+  }
+  // The normal: the surface's own at this pixel, or the one carried from the vertices.
+  vec3 normal = normalize(vNormal);
+  if (uPerPixel != 0) {
+    vec3 p, du, dv;
+    float side = vUvs.z > 1e-6 ? 1.0 : vUvs.z < -1e-6 ? -1.0 : 0.0;
+    evalSurface(vUvs.x, vUvs.y + side * 1e-4, p, du, dv);
+    vec3 n = cross(du, dv);
+    if (dot(n, n) > 1e-18) { normal = uPose * normalize(n); }
+  }
+  normal *= uOrientation;
+  vec3 incoming = normalize(vWorld - uEye), toEye = -incoming;
+  bool back = dot(normal, toEye) < 0.0;
+  if (back) { normal = -normal; }
+  bool inside = back && uTwoSided == 0;
+
+  vec3 base = vec3(0.93, 0.92, 0.89);
+  if (uTextureOn != 0) {
+    float tx, ty;
+    if (uMapping == 1) {
+      tx = -vUvs.x / max(1.0, uPer.x);
+      ty = vUvs.y / max(1.0, uPer.y);
+      ty = ty - floor(ty);
+    } else {
+      tx = 0.70 - vUvs.x / uCellCount.x * (uCellCount.x >= 16.0 ? 3.0 : 1.0);
+      ty = vUvs.y / uCellCount.y;
+    }
+    vec3 c, cu, cv;
+    evalLat(uTexture, (tx - floor(tx)) * float(uTexture.cu), clamp(ty, 0.0, 1.0) * float(uTexture.cv), c, cu, cv);
+    base = clamp(c, 0.0, 1.0);
+  }
+  bool chrome = uMaterial == 1 && uTextureOn == 0;
+  if (uMaterial == 2 && uTextureOn == 0 && uWire != 2) {
+    // Reflection lines: stripes of the mirror direction.
+    vec3 reflected = reflect(incoming, normal);
+    float stripe = sin(14.0 * atan(reflected.y, length(reflected.xz)) + 9.0 * atan(reflected.z, reflected.x));
+    float ink = smooth01(-0.12, 0.12, stripe);
+    float shade = 0.55 + 0.45 * max(0.0, dot(normal, toEye));
+    outColour = encode(mix(vec3(0.06, 0.07, 0.09), vec3(0.96, 0.96, 0.94), ink) * shade);
+    return;
+  }
+  if (inside) { base *= 0.55; }
+  if (uWire == 2) { base = vec3(0.97, 0.97, 0.96); }
+
+  vec3 colour = base;
+  if (uLighting != 0) {
+    float nl = dot(normal, uLight);
+    float lit = nl > 0.0 ? litAt(vWorld + normal * 0.02, shadowBias(nl)) : 1.0;
+    float diffuse = max(0.0, nl) * lit;
+    vec3 ambient = ambientOf(normal);
+    colour = base * (ambient + vec3(0.80, 0.78, 0.74) * diffuse);
+    if (uWire != 2) {
+      float nv = max(0.0, dot(normal, toEye));
+      float f0 = chrome ? 0.86 : 0.05;
+      float fresnel = f0 + (1.0 - f0) * fifth(1.0 - nv);
+      vec3 reflected = reflect(incoming, normal);
+      if (uGloss != 0) {
+        // What the mirror direction shows, answered by emitters: the sky and
+        // its window above, the floor below with its pattern and the shadow on it.
+        vec3 origin = vWorld + normal * 2e-3;
+        vec3 mirror;
+        if (facesCavity(vUvs.y) && !leavesCavity(reflected)) {
+          mirror = vec3(0.27, 0.26, 0.25);
+        } else if (uGroundOn != 0 && reflected.y < -1e-9 && origin.y > uGround) {
+          float reach = (uGround - origin.y) / reflected.y;
+          vec3 q = origin + reflected * reach;
+          float width = max(length(dFdx(q.xz)), length(dFdy(q.xz)));
+          mirror = floorColour(q, width, reach, true);
+        } else {
+          mirror = skyOf(origin, reflected);
+        }
+        vec3 tint = chrome ? vec3(0.95, 0.96, 0.98) : vec3(1.0);
+        vec3 under = chrome ? vec3(0.0) : colour;
+        colour = under * (1.0 - fresnel) + mirror * tint * (fresnel * mirrorDim(lit, nl));
+      } else {
+        vec3 halfway = normalize(uLight + toEye);
+        float specular = ninetieth(max(0.0, dot(normal, halfway))) * lit;
+        colour = colour * (1.0 - 0.6 * fresnel) + environmentOf(reflected) * (0.6 * fresnel) + vec3(0.55 * specular);
+      }
+    }
+  }
+  if (uWire != 0) {
+    // Node lines and patch outlines from the point's own parameters.
+    float gu = length(vec2(dFdx(vUvs.x), dFdy(vUvs.x))), gv = length(vec2(dFdx(vUvs.y), dFdy(vUvs.y)));
+    float node = max(lineInk(vUvs.x, 1.0, gu, 0.55), lineInk(vUvs.y, 1.0, gv, 0.55));
+    float outline = uPer.x == 0.0 ? 0.0 : max(lineInk(vUvs.x, uPer.x, gu, 1.1), lineInk(vUvs.y, uPer.y, gv, 1.1));
+    vec3 nodeInk = inside ? vec3(0.45, 0.50, 0.58) : vec3(0.16, 0.30, 0.52);
+    colour = mix(colour, nodeInk, 0.75 * node);
+    colour = mix(colour, vec3(0.08, 0.09, 0.12), outline);
+  }
+  outColour = encode(colour);
+}
+`;
+
+// The floor and what is beyond it: one triangle over the whole picture. Each
+// pixel's ray either meets the floor or shows the room.
+const ROOM_VERTEX_GLSL = `#version 300 es
+out vec2 vScreen;
+void main() {
+  vec2 corner = vec2(gl_VertexID == 1 ? 3.0 : -1.0, gl_VertexID == 2 ? 3.0 : -1.0);
+  vScreen = corner;
+  gl_Position = vec4(corner, 0.0, 1.0);
+}
+`;
+const ROOM_FRAGMENT_GLSL = `#version 300 es
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+${ROOM_GLSL}
+in vec2 vScreen;
+uniform vec3 uForward, uRight, uUp;   // right and up scaled so that forward + x right + y up is the ray at (x, y) in [-1, 1]
+uniform mat4 uViewProj;
+uniform int uGroundOn, uGloss, uLighting;
+uniform float uSink;   // the floor hides the teapot only where it is this far below the floor
+out vec4 outColour;
+void main() {
+  vec3 dir = uForward + uRight * vScreen.x + uUp * vScreen.y;
+  float t = uGroundOn != 0 && abs(dir.y) > 1e-9 ? (uGround - uEye.y) / dir.y : -1.0;
+  if (!(t > 0.0)) {
+    outColour = encode(uGloss != 0 ? skyOf(uEye, dir) : backgroundOf(dir));
+    gl_FragDepth = 1.0;
+    return;
+  }
+  vec3 p = uEye + dir * t;
+  float far = length(p - uEye);
+  float width = far / (1.0 / length(dFdy(vScreen.y) * uUp)) / max(0.08, abs(uEye.y - p.y) / max(far, 1e-9));
+  outColour = encode(floorColour(p, width, t, uLighting != 0));
+  // Depth of the floor a little below itself, so a body resting slightly in it is not cut by it.
+  vec4 clip = uViewProj * vec4(p - vec3(0.0, uSink, 0.0), 1.0);
+  gl_FragDepth = clamp(0.5 * clip.z / clip.w + 0.5, 0.0, 1.0);
+}
+`;
+
+// The cut face of a cutaway: where the cutting plane passes through material.
+const CAP_FRAGMENT_GLSL = `#version 300 es
+precision highp float;
+${ROOM_GLSL}
+in vec3 vWorld;
+uniform vec4 uCutPlane;
+out vec4 outColour;
+void main() {
+  vec3 clay = vec3(0.36, 0.26, 0.22);
+  outColour = encode(clay * (0.55 + 0.6 * max(0.0, dot(uCutPlane.xyz, uLight))));
+}
+`;
+const CAP_VERTEX_GLSL = `#version 300 es
+layout(location = 0) in vec3 aPoint;
+uniform mat4 uViewProj;
+out vec3 vWorld;
+void main() {
+  vWorld = aPoint;
+  gl_Position = uViewProj * vec4(aPoint, 1.0);
+}
+`;

@@ -170,6 +170,45 @@ public:
 
     const Teapot& teapot() const { return teapot_; }
 
+    // For a renderer elsewhere (the GPU's): the scene as it is, which teapot
+    // part each scene part is, the pose, the textures, and the simulation
+    // advanced without drawing.
+    Scene scene_now() { return build_scene(); }
+    const std::vector<std::size_t>& scene_parts() const { return scene_parts_; }
+    const Rigid& pose() const { return pose_now_; }
+    const std::vector<std::unique_ptr<Texture>>& textures() const { return textures_; }
+    std::uint64_t shown_signature() const { return signature() + build_count_ * 1000003ull; }
+    bool advance(double dt) {
+        if (!running) { return false; }
+        const double start = detail::now_ms();
+        if (sim.step((dt > 1.0 / 30.0 ? 1.0 / 30.0 : dt) * time_scale) > 0) { moved(); }
+        ms_sim = detail::now_ms() - start;
+        if (sim.asleep() && !sim.grabbing()) { running = false; }
+        return true;
+    }
+    // A press at pixel (x, y) that the other renderer found to land on scene
+    // part `part` at (u, v); part < 0: on nothing.
+    void pointer_down_at(double x, double y, int part, double u, double v, bool force_orbit) {
+        last_x_ = x;
+        last_y_ = y;
+        orbiting_ = true;
+        if (!force_orbit && part >= 0 && std::size_t(part) < scene_parts_.size()) {
+            const Vec3 point = pose_now_.point(teapot_.parts[scene_parts_[std::size_t(part)]]->conv.position(u, v));
+            const detail::View view(camera(), frame.width, frame.height);
+            grab_depth_ = dot(point - view.eye, view.forward);
+            sim.grab(point);
+            running = true;
+            orbiting_ = false;
+        }
+    }
+    void poke_at(double x, double y, int part, double u, double v) {
+        if (part < 0 || std::size_t(part) >= scene_parts_.size()) { return; }
+        const detail::View view(camera(), frame.width, frame.height);
+        const Vec3 point = pose_now_.point(teapot_.parts[scene_parts_[std::size_t(part)]]->conv.position(u, v));
+        sim.poke(point, normalize(view.ray(x, y)));
+        running = true;
+    }
+
     // Advance the simulation and render one frame.
     const std::uint8_t* draw(double dt) {
         if (running) {

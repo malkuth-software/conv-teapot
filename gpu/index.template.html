@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CONV Utah Teapot on the GPU</title>
+<style>
+:root {
+  --bg: #f4f2ee; --panel: #fbfaf7; --ink: #1c2330; --muted: #5d6675; --line: #d9d5cc;
+  --accent: #1f4f8f; --accent-ink: #ffffff; --key: #ece8df;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #14171c; --panel: #1b2027; --ink: #e8ebf0; --muted: #9aa4b3; --line: #2c333d;
+    --accent: #7fb0ee; --accent-ink: #0d1218; --key: #262d37;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #14171c; --panel: #1b2027; --ink: #e8ebf0; --muted: #9aa4b3; --line: #2c333d;
+  --accent: #7fb0ee; --accent-ink: #0d1218; --key: #262d37;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1180px; margin: 0 auto; padding: 20px 16px 40px; }
+h1 { font-size: 22px; margin: 0 0 2px; letter-spacing: -0.01em; }
+.lede { color: var(--muted); margin: 0 0 16px; max-width: 70ch; }
+.stage { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; align-items: start; }
+@media (max-width: 860px) { .stage { grid-template-columns: 1fr; } }
+.view { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+canvas { display: block; width: 100%; height: auto; touch-action: none; cursor: grab; background: #dfe2e6; }
+.stats { padding: 8px 12px; font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); border-top: 1px solid var(--line); min-height: 3.4em; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 4px 14px 14px; }
+fieldset { border: 0; border-top: 1px solid var(--line); margin: 12px 0 0; padding: 10px 0 0; }
+fieldset:first-child { border-top: 0; margin-top: 4px; }
+legend { padding: 0; font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+label.row { display: grid; grid-template-columns: 96px 1fr; gap: 8px; align-items: center; margin-top: 7px; }
+label.check { display: inline-flex; gap: 6px; align-items: center; margin: 7px 12px 0 0; }
+select, button, input[type=range] { font: inherit; color: var(--ink); }
+select { width: 100%; padding: 4px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); }
+button { padding: 6px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--key); cursor: pointer; margin: 8px 6px 0 0; }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+input[type=range] { width: 100%; }
+.hint { color: var(--muted); font-size: 13px; margin: 10px 0 0; }
+.credit { color: var(--muted); font-size: 13px; margin-top: 18px; max-width: 86ch; }
+.credit a { color: var(--accent); }
+kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; font: 12px ui-monospace, Menlo, monospace; }
+</style>
+</head>
+<body>
+<main>
+  <h1>The Utah Teapot in CONV geometry, on the GPU</h1>
+  <p class="lede">The same teapot as the <a href="../">CPU version</a>, drawn by WebGL 2. The CONV surface is evaluated in the shaders, at every vertex and at every pixel, from the same lattices; the line under the picture says how far the shaders' surface is from the CPU's.</p>
+  <div class="stage">
+    <div class="view">
+      <canvas id="view" width="960" height="600" aria-label="Rendered teapot"></canvas>
+      <div class="stats" id="stats">loading the engine…</div>
+    </div>
+    <div class="panel">
+      <fieldset>
+        <legend>Version</legend>
+        <label class="row">Teapot
+          <select data-engine="20" id="version">
+            <option value="4" selected>2026 – unified sheets</option>
+            <option value="3">2026 – Cem Yuksel, per patch</option>
+            <option value="2">1987 – Frank Crow</option>
+            <option value="1">1976 – Jim Blinn</option>
+            <option value="0">1975 – Martin Newell</option>
+          </select></label>
+        <label class="check"><input type="checkbox" data-engine="22" checked> handle</label>
+        <label class="check"><input type="checkbox" data-engine="23" checked> spout</label>
+        <label class="check"><input type="checkbox" data-engine="24" checked> lid</label>
+        <label class="check"><input type="checkbox" data-engine="25" checked> body</label>
+        <label class="check"><input type="checkbox" data-engine="26" checked> show interior</label>
+        <label class="check"><input type="checkbox" data-engine="37" checked> joins</label>
+        <label class="row">Side
+          <select data-engine="36"><option value="0">both</option><option value="1">left (cutaway)</option><option value="2">right (cutaway)</option></select></label>
+      </fieldset>
+      <fieldset>
+        <legend>Look</legend>
+        <label class="row">Wireframe
+          <select data-option="wire"><option value="0">off</option><option value="1">node lines</option><option value="2">lines only</option></select></label>
+        <label class="row">Material
+          <select data-option="material"><option value="0">porcelain</option><option value="1">chrome</option><option value="2">reflection lines</option></select></label>
+        <label class="row">Texture
+          <select data-option="texture"><option value="0">none</option><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></label>
+        <label class="row">Mapping
+          <select data-option="mapping"><option value="0">per part</option><option value="1">per patch</option></select></label>
+        <label class="check"><input type="checkbox" data-option="lighting" checked> lighting</label>
+        <label class="check"><input type="checkbox" data-option="shadows" checked> shadows</label>
+        <label class="check"><input type="checkbox" data-option="ground" checked> floor</label>
+        <label class="check"><input type="checkbox" data-option="gloss"> gloss</label>
+      </fieldset>
+      <fieldset>
+        <legend>GPU</legend>
+        <label class="check"><input type="checkbox" data-option="perPixel" checked> surface normal at every pixel</label>
+        <label class="row">Shadow map
+          <select data-option="shadowSize"><option value="1024">1024</option><option value="2048" selected>2048</option><option value="4096">4096</option></select></label>
+        <label class="row">Mesh
+          <select data-engine="28"><option value="0.01">coarse (1e-2)</option><option value="0.0025" selected>fine (2.5e-3)</option><option value="0.0006">finer (6e-4)</option></select></label>
+        <label class="row">Size
+          <select id="size"><option>640x400</option><option selected>960x600</option><option>1280x800</option></select></label>
+        <button id="check">Check against the CPU</button>
+        <p class="hint">The engine (WebAssembly) builds the lattices, lays out a mesh in (u, v), runs the rigid body and answers the pointer. Everything drawn is computed on the GPU: the CONV surface at each vertex and, with the box above ticked, again at each pixel for its normal; the shadow map; the trims of the joins; the cutaway's cut face; and reflections from emitters.</p>
+      </fieldset>
+      <fieldset>
+        <legend>Simulation</legend>
+        <button class="primary" id="drop">Drop</button><button id="pause">Run</button><button id="reset">Reset</button>
+        <p class="hint">Drag the teapot: it is held at the point you picked. Drag the background, or hold <kbd>Shift</kbd>, to orbit. Scroll to zoom. Double-click to poke. Arrow keys fly the camera, <kbd>Page Up</kbd> and <kbd>Page Down</kbd> raise and lower it, <kbd>Shift</kbd> slows it, <kbd>Home</kbd> returns it.</p>
+      </fieldset>
+    </div>
+  </div>
+  <p class="credit">The Utah Teapot was created by Martin Newell at the University of Utah; later versions are by Jim Blinn, Frank Crow and Cem Yuksel. These are Modified Utah Teapots. <a href="../">CPU version</a> · <a href="../conv_teapot.pdf">Paper (PDF)</a> · <a href="https://github.com/malkuth-software/conv-teapot">Source</a></p>
+</main>
+<script>
+/*ENGINE*/
+</script>
+<script>
+/*SHADERS*/
+/*RENDERER*/
+(async () => {
+  const stats = document.getElementById('stats');
+  let engine, gpu;
+  const canvas = document.getElementById('view');
+  try {
+    engine = await TeapotEngine();
+    gpu = new TeapotGpu(canvas, engine);
+  } catch (error) { stats.textContent = 'Could not start: ' + error.message; return; }
+  let width = 960, height = 600, dirty = true, last = performance.now(), smooth = 0, wasRunning = false, measured = 0, remeasure = true;
+  const scale = () => Math.min(2, window.devicePixelRatio || 1);
+  const resize = (w, h) => {
+    width = w; height = h;
+    canvas.width = Math.round(w * scale());
+    canvas.height = Math.round(h * scale());
+    engine._tp_init(w, h);
+    dirty = remeasure = true;
+  };
+  resize(width, height);
+  engine._tp_set(20, 4);
+  const held = new Set();
+  const flightKeys = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown'];
+  let slow = false, wasFlying = false, running = false;
+  const pauseButton = document.getElementById('pause');
+  const stateNow = (dt) => new Float64Array(engine.HEAPF64.buffer, engine._tp_frame(dt), 48).slice();
+  const sync = new Uint8Array(4);
+  const frame = (now) => {
+    const dt = Math.min(0.05, (now - last) / 1000);
+    last = now;
+    if (held.size > 0) {
+      const axis = (plus, minus) => (held.has(plus) ? 1 : 0) - (held.has(minus) ? 1 : 0);
+      const reach = (slow ? 0.3 : 1.5) * dt;
+      engine._tp_fly(axis('ArrowUp', 'ArrowDown') * reach, axis('ArrowRight', 'ArrowLeft') * reach, axis('PageUp', 'PageDown') * reach);
+      dirty = true;
+    }
+    if (dirty || running) {
+      const state = stateNow(dt);
+      running = state[27] > 0.5;
+      try {
+        if (gpu.upload()) { remeasure = true; }
+        const start = performance.now();
+        gpu.draw(state);
+        if (remeasure && !running) {
+          // The time of a frame, waited for: a few frames, each read back so that it is finished.
+          const gl = gpu.gl;
+          gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, sync);
+          const begin = performance.now();
+          for (let k = 0; k < 8; ++k) { gpu.draw(state); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, sync); }
+          measured = (performance.now() - begin) / 8;
+          remeasure = false;
+        }
+        const submit = performance.now() - start;
+        smooth = smooth === 0 ? submit : 0.85 * smooth + 0.15 * submit;
+      } catch (error) { stats.textContent = 'Drawing failed: ' + error.message; return; }
+      dirty = false;
+      const check = gpu.check;
+      stats.textContent = `${measured.toFixed(1)} ms/frame on the GPU at ${canvas.width}\u00d7${canvas.height}` +
+        (running ? ` · physics ${state[29].toFixed(2)} ms, ${state[28]} contacts` : '') + `\n` +
+        `${state[30]} nodes · ${gpu.vertexCount} vertices · ${gpu.triangleCount} triangles, each vertex and pixel evaluated from the lattice\n` +
+        (check ? `shaders against the CPU at ${check.points} points: largest distance ${check.worst.toExponential(2)}, largest angle between normals ${check.worstAngle.toFixed(4)}\u00b0`
+               : 'not yet checked against the CPU');
+      stats.style.whiteSpace = 'pre-wrap';
+      pauseButton.textContent = running ? 'Pause' : 'Run';
+      if (wasRunning && !running) { dirty = true; }
+      wasRunning = running;
+    }
+    requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+
+  for (const control of document.querySelectorAll('[data-engine]')) {
+    control.addEventListener('change', () => {
+      engine._tp_set(Number(control.dataset.engine), control.type === 'checkbox' ? (control.checked ? 1 : 0) : Number(control.value));
+      dirty = remeasure = true;
+    });
+  }
+  for (const control of document.querySelectorAll('[data-option]')) {
+    control.addEventListener('change', () => {
+      gpu.options[control.dataset.option] = control.type === 'checkbox' ? (control.checked ? 1 : 0) : Number(control.value);
+      dirty = remeasure = true;
+    });
+  }
+  document.getElementById('size').addEventListener('change', (event) => {
+    const [w, h] = event.target.value.split('x').map(Number);
+    resize(w, h);
+  });
+  document.getElementById('check').addEventListener('click', () => { gpu.compare(); dirty = true; });
+  document.getElementById('drop').addEventListener('click', () => { engine._tp_action(0); dirty = true; });
+  document.getElementById('reset').addEventListener('click', () => { engine._tp_action(1); dirty = true; });
+  pauseButton.addEventListener('click', () => { engine._tp_set(12, running ? 0 : 1); dirty = true; });
+
+  const place = (event) => {
+    const box = canvas.getBoundingClientRect();
+    return [(event.clientX - box.left) * width / box.width, (event.clientY - box.top) * height / box.height];
+  };
+  const hit = (x, y) => gpu.pick(x * canvas.width / width, y * canvas.height / height);
+  canvas.addEventListener('pointerdown', (event) => {
+    canvas.setPointerCapture(event.pointerId);
+    const [x, y] = place(event);
+    const orbit = event.shiftKey || event.button === 2;
+    const [part, u, v] = orbit ? [-1, 0, 0] : hit(x, y);
+    engine._tp_pointer(0, x, y, orbit ? 1 : 0, part, u, v);
+    dirty = true;
+  });
+  canvas.addEventListener('pointermove', (event) => {
+    if (event.buttons === 0) { return; }
+    const [x, y] = place(event);
+    engine._tp_pointer(1, x, y, 0, -1, 0, 0);
+    dirty = true;
+  });
+  const lift = () => { engine._tp_pointer(2, 0, 0, 0, -1, 0, 0); dirty = true; };
+  canvas.addEventListener('pointerup', lift);
+  canvas.addEventListener('pointercancel', lift);
+  canvas.addEventListener('dblclick', (event) => { const [x, y] = place(event); const [part, u, v] = hit(x, y); engine._tp_pointer(3, x, y, 0, part, u, v); dirty = true; });
+  canvas.addEventListener('contextmenu', (event) => event.preventDefault());
+  canvas.addEventListener('wheel', (event) => { event.preventDefault(); engine._tp_zoom(Math.exp(event.deltaY * 0.0012)); dirty = true; }, { passive: false });
+  const typing = (event) => ['INPUT', 'SELECT', 'TEXTAREA'].includes(event.target.tagName) && event.target.type !== 'checkbox';
+  window.addEventListener('keydown', (event) => {
+    slow = event.shiftKey;
+    if (typing(event)) { return; }
+    if (flightKeys.includes(event.key)) { held.add(event.key); event.preventDefault(); }
+    if (event.key === 'Home') { engine._tp_action(4); dirty = true; event.preventDefault(); }
+  });
+  window.addEventListener('keyup', (event) => { slow = event.shiftKey; held.delete(event.key); dirty = true; });
+  window.addEventListener('blur', () => held.clear());
+  window.teapot = { engine, gpu, redraw: () => { dirty = true; }, state: () => stateNow(0) };
+  setTimeout(() => { try { gpu.compare(); dirty = true; } catch (error) { console.error(error); } }, 600);
+})();
+</script>
+</body>
+</html>
