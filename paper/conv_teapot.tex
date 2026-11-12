@@ -1317,6 +1317,35 @@ light map painted by the ray tracer.}
 \label{fig:mesh}
 \end{figure*}
 
+\subsection{Reflections of the floor, and work that is skipped}
+
+A curved mirror shows the floor's checker much reduced, and a point
+sample of it aliases: the lower body of a glazed teapot showed a
+speckle that looked like facets. The checker is the product of two
+square waves, and each can be averaged exactly over an interval, so a
+mirror ray is answered with the checker averaged over the square its
+pixel covers on the floor. The side of that square is the distance
+between the point where this pixel's mirror ray meets the floor and the
+points where the rays of the pixel to its left and the pixel above did.
+
+Where no ray is traced, an emitter is not in view from everywhere. A
+point on a surface that faces the teapot's cavity (the body's inside,
+the lid's underside, the spout's channel) cannot see the floor through
+the bottom. Its mirror ray is given the floor or the sky only if it
+leaves through an opening, the cut of a cutaway or the top when the lid
+is off, tested in the teapot's own frame so that the answer is the same
+when the teapot is turned over; otherwise it is given a dark neutral
+value for the cavity. The traced modes need no such rule.
+
+The parts of the sheets that lie under a join, the end of a tube inside
+the body and the body under a band, are not surface. Their lattice cells
+are left out of prediction, of the shadow map and of the tree for
+incoherent rays, so no ray is solved against them. The lattice points,
+the shadow map and that tree depend on the surfaces and not on the
+camera, and are kept from frame to frame while the surfaces stay where
+they are: 23\,ms of a frame without gloss and 33\,ms with it, on one
+thread. The times of Table~\ref{tab:methods} were taken before this.
+
 \subsection{Cutaway}
 
 The official page shows the left or right half of the model. We cut the

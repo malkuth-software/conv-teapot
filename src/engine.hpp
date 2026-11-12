@@ -76,6 +76,7 @@ public:
         sim.move_nodes = false; // the lattice stays at rest; the pose carries the motion
         sim.build(teapot_);
         pose_now_ = Rigid{};
+        ++build_count_;
         running = false;
         mesh = Mesh{};
     }
@@ -293,6 +294,7 @@ private:
             render_part.per_u = part->per_u;
             render_part.per_v = part->per_v;
             render_part.two_sided = part->sampled;
+            render_part.interior_from = part->interior ? 0.0 : part->interior_from;
             scene.parts.push_back(render_part);
             scene_parts_.push_back(index);
         }
@@ -307,6 +309,10 @@ private:
             scene.parts[std::size_t(tube)].trims.push_back(&join.tube_trim);
         }
         for (const auto& texture : textures_) { scene.textures.push_back(texture.get()); }
+        scene.axis = pose_now_.direction({0.0, 1.0, 0.0});
+        scene.open_top = !show_lid;
+        // The surfaces and where they are: the renderer keeps what depends only on these.
+        scene.stamp = (build_count_ * 1000003ull + pose_) * 1099511628211ull + signature();
         if (side != 0) {
             // The cutting plane is the teapot's own plane of symmetry and moves with it.
             scene.cut = true;
@@ -357,7 +363,7 @@ private:
     Teapot teapot_;
     std::vector<std::size_t> scene_parts_; // scene part -> teapot part
     std::vector<std::unique_ptr<Texture>> textures_;
-    std::uint64_t mesh_signature_ = 0, mesh_pose_ = 0, pose_ = 0;
+    std::uint64_t mesh_signature_ = 0, mesh_pose_ = 0, pose_ = 0, build_count_ = 0;
     Rigid pose_now_;
     Frame quick_;
     std::vector<Vec3> rest_p_, rest_n_; // the mesh's vertices at rest

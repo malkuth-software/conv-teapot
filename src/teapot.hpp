@@ -86,6 +86,9 @@ struct TeapotPart {
     std::size_t per_u = 1, per_v = 1;
     std::string group = "body"; // body, lid, handle or spout: what the part toggles act on
     bool interior = false;      // an inner surface (2026 version)
+    // Unified sheets: rows from this one on face the cavity (the body's inside,
+    // the lid's underside, the spout's channel). Beyond the last row: none.
+    double interior_from = 1e30;
     bool sampled = false;       // built from surface samples; `bezier` is empty
     int hull = -2;              // collision: -2 cut along v (see sim.hpp), -1 none, >= 0 a hull group
     // The reference parameter (Bezier node units) of every lattice row, and
@@ -362,6 +365,17 @@ inline Teapot make_teapot(const TeapotOptions& options) {
             revolve_sheet(profile, plan, options.sheet_around, part->conv.lattice);
             part->per_u = part->per_v = 0; // no patch outlines inside a sheet
             part->row_param.assign(plan.row_arc.begin(), plan.row_arc.end());
+            {
+                // The body turns inward at the top of its rim, the lid at its widest row.
+                const Lattice& l = part->conv.lattice;
+                std::size_t turn = 0;
+                for (std::size_t v = 0; v < l.nv; ++v) {
+                    const double here = is_body ? l.at(0, v).y : std::hypot(l.at(0, v).x, l.at(0, v).z);
+                    const double best = is_body ? l.at(0, turn).y : std::hypot(l.at(0, turn).x, l.at(0, turn).z);
+                    if (here > best) { turn = v; }
+                }
+                part->interior_from = double(turn);
+            }
             part->conv.bubble = options.bubble;
             part->conv.compile();
             part->linear.lattice = &part->conv.lattice;
@@ -381,6 +395,23 @@ inline Teapot make_teapot(const TeapotOptions& options) {
             tube_sheet(patches.data(), count, utah::dense_tube_points, is_handle ? options.sheet_rows / 3 : options.sheet_rows / 2,
                        std::max<std::size_t>(8, (options.tube_around + 1) / 2 * 2), part->conv.lattice, part->row_param, options.rows_by_error);
             for (Vec3& node : part->conv.lattice.nodes) { node.y *= y_scale; }
+            if (!is_handle) {
+                // The spout turns into its channel at the lip, its furthest row from the axis.
+                const Lattice& l = part->conv.lattice;
+                std::size_t lip = 0;
+                double far = -1.0;
+                for (std::size_t v = 0; v < l.nv; ++v) {
+                    double reach = 0.0;
+                    for (std::size_t u = 0; u < l.nu; ++u) { reach += std::hypot(l.at(u, v).x, l.at(u, v).z); }
+                    if (reach > far) {
+                        far = reach;
+                        lip = v;
+                    }
+                }
+                // The channel is the stretch of rows on the narrower side of the lip.
+                const auto ring = [&](std::size_t v) { return length(l.at(0, v) - l.at(l.nu / 2, v)); };
+                part->interior_from = ring(0) >= ring(l.nv - 1) ? double(lip) : -double(lip) - 1.0; // negative: rows before the lip
+            }
             part->per_u = part->per_v = 0;
             part->conv.bubble = options.bubble;
             part->conv.compile();
@@ -412,6 +443,7 @@ inline Teapot make_teapot(const TeapotOptions& options) {
                     if (!made.ok) { continue; }
                     auto part = std::make_unique<TeapotPart>();
                     part->name = group + "_join";
+                    if (!exterior_end) { part->interior_from = 0.0; }
                     part->group = group;
                     part->sampled = true;
                     part->hull = -1;

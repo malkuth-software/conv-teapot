@@ -618,12 +618,23 @@ struct Visibility {
 inline void despeckle_crossings(Visibility& vis) {
     std::vector<unsigned char> odd(vis.samples.size());
     for (std::size_t k = 0; k < odd.size(); ++k) { odd[k] = vis.samples[k].crossings & 1u; }
-    for (int y = 1; y + 1 < vis.height; ++y) {
-        for (int x = 1; x + 1 < vis.width; ++x) {
+    // An odd run of at most `thin` samples, across or down, is such a line.
+    const int thin = 2 * vis.scale;
+    const auto run = [&](int x, int y, int dx, int dy) {
+        int length = 1;
+        for (int sign = -1; sign <= 1; sign += 2) {
+            for (int k = 1; k <= thin; ++k) {
+                const int nx = x + sign * k * dx, ny = y + sign * k * dy;
+                if (nx < 0 || ny < 0 || nx >= vis.width || ny >= vis.height || odd[std::size_t(ny) * std::size_t(vis.width) + std::size_t(nx)] == 0) { break; }
+                ++length;
+            }
+        }
+        return length;
+    };
+    for (int y = 0; y < vis.height; ++y) {
+        for (int x = 0; x < vis.width; ++x) {
             const std::size_t k = std::size_t(y) * std::size_t(vis.width) + std::size_t(x);
-            if (odd[k] == 0) { continue; }
-            const bool across = odd[k - 1] == 0 && odd[k + 1] == 0, down = odd[k - std::size_t(vis.width)] == 0 && odd[k + std::size_t(vis.width)] == 0;
-            if (across || down) { ++vis.samples[k].crossings; }
+            if (odd[k] != 0 && (run(x, y, 1, 0) <= thin || run(x, y, 0, 1) <= thin)) { ++vis.samples[k].crossings; }
         }
     }
 }

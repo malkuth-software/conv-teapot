@@ -126,6 +126,14 @@ engine of PlaySuite's rock-stacking game (wrench-transport solver).
   49 ms with transport. WebAssembly SIMD and link-time optimisation were
   tried and gave nothing: the arithmetic is scalar double precision.
 
+- **Reflected floor.** A mirror ray reads the checker averaged over its
+  pixel's image on the floor; point sampling gave a speckle on the lower body
+  under gloss. A point facing the cavity sees the floor or sky only through
+  an opening (the cut, or the top with the lid off).
+- **Work not repeated.** Lattice points, the shadow map and the ray tree are
+  kept between frames while the teapot stays put (23 to 33 ms a frame on one
+  thread). Cells buried under joins are not predicted, shadowed or traced.
+
 One 960 x 600 frame of the unified teapot, all threads / one thread: per-ray
 150 / 410 ms, transport 91 / 261, seeded 37 / 125, mesh shaded per pixel
 15 / 45, mesh with baked light and emitters 11 / 36.

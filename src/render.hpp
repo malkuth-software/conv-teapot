@@ -39,6 +39,11 @@ struct RenderPart {
     std::size_t per_u = 1, per_v = 1; // node intervals per source patch (for patch outlines)
     bool two_sided = false;           // no outward side is known: never shade as an inside
     std::vector<const Trim*> trims;   // regions of this surface that are not shown
+    // Rows that face the teapot's cavity: v >= interior_from, or, when it is
+    // negative, v <= -interior_from - 1. A point there sees the floor and the
+    // sky only through an opening.
+    double interior_from = 1e30;
+    bool faces_cavity(double v) const { return interior_from >= 0.0 ? v >= interior_from : v <= -interior_from - 1.0; }
 };
 
 // transport and independent trace the surface itself; raster draws the baked
@@ -128,6 +133,10 @@ struct Scene {
     std::vector<RenderPart> parts;
     std::vector<const Texture*> textures;
     double ground_y = 0.0;
+    // Changes whenever the surfaces or their poses change; 0: unknown. What
+    // depends only on the surfaces (lattice points, the shadow map, the
+    // tree for incoherent rays) is kept from frame to frame while it holds.
+    std::uint64_t stamp = 0;
     Mesh* mesh = nullptr; // baked geometry, for Method::raster and for light baking
     // Cutaway: everything with dot(cut_normal, p) > cut_offset is removed,
     // and where the cut passes through solid material the cut face is filled.
@@ -135,6 +144,15 @@ struct Scene {
     Vec3 cut_normal{0, 0, 1};
     double cut_offset = 0.0;
     bool removed(Vec3 p) const { return cut && dot(cut_normal, p) > cut_offset; }
+    // The teapot's own up direction and whether its top is open (the lid is not shown).
+    Vec3 axis{0, 1, 0};
+    bool open_top = false;
+    // Does a mirror ray along `direction` from a point that faces the
+    // cavity leave it? Only through the cut or the open top. The test is in
+    // the teapot's frame, so it holds when the teapot is turned over.
+    bool leaves_cavity(Vec3 direction) const {
+        return (cut && dot(direction, cut_normal) > 0.15) || (open_top && dot(direction, axis) > 0.6);
+    }
     Vec3 light = normalize(Vec3{-0.45, 0.85, 0.35}); // direction towards the light
 };
 
@@ -196,6 +214,11 @@ struct PartLattice {
     std::vector<Vec3> p;      // world positions
     std::vector<float> sx, sy, sz; // screen x, y and view depth
     std::vector<float> mx, my, mz; // the same for the eye mirrored in the floor
+    // Cells that lie wholly under a join (a tube's end inside the body, the
+    // body under a band). They are not part of the teapot's surface: no ray
+    // is predicted from them, they cast no shadow and nothing reflects them.
+    std::vector<unsigned char> buried; // [(nv - 1) cells of (nu - 1)]
+    bool cell_buried(int i, int j) const { return !buried.empty() && buried[std::size_t(j) * std::size_t(nu - 1) + std::size_t(i)] != 0; }
 };
 
 template<class Body> void parallel_rows(int rows, int threads, Body body) {
@@ -491,13 +514,12 @@ public:
         stats.ms_lattice = now_ms() - start;
         std::fill(frame.hits.begin(), frame.hits.end(), Hit{});
         const double mid = now_ms();
-        nodes_.clear();
         if (options.method == Method::transport) {
             predict(scene, view, options, false);
             if (mirror_ready) { predict(scene, view, options, true); }
         }
         // Per-ray tracing serves the independent method and every incoherent ray.
-        if (options.method == Method::independent || (options.gloss && options.lighting)) { build_bvh(); }
+        need_bvh(scene, options.method == Method::independent || (options.gloss && options.lighting));
         stats.ms_predict = now_ms() - mid;
         const double solve_start = now_ms();
         resolve_and_shade(scene, view, mirror, mirror_ready, options, frame);
@@ -508,8 +530,12 @@ public:
 private:
     // ---- transport: forward lattice ------------------------------------
     void transport_lattices(const Scene& scene, const detail::View& view, const detail::View* mirror, const RenderOptions& options) {
-        lattices_.resize(scene.parts.size());
         const int k = std::max(1, options.subdivision);
+        // The lattice points do not depend on the camera: only their projections are redone.
+        const bool same = scene.stamp != 0 && scene.stamp == lattice_stamp_ && k == lattice_k_ && lattices_.size() == scene.parts.size();
+        lattice_stamp_ = scene.stamp;
+        lattice_k_ = k;
+        lattices_.resize(scene.parts.size());
         for (std::size_t part = 0; part < scene.parts.size(); ++part) {
             const Surface& surface = *scene.parts[part].surface;
             detail::PartLattice& lattice = lattices_[part];
@@ -530,7 +556,7 @@ private:
                 for (int j = begin; j < end; ++j) {
                     for (int i = 0; i < lattice.nu; ++i) {
                         const std::size_t index = std::size_t(j) * std::size_t(lattice.nu) + std::size_t(i);
-                        const Vec3 p = surface.position(double(i) * lattice.step, double(j) * lattice.step);
+                        const Vec3 p = same ? lattice.p[index] : surface.position(double(i) * lattice.step, double(j) * lattice.step);
                         double x, y, z;
                         view.project(p, x, y, z);
                         lattice.p[index] = p;
@@ -547,10 +573,31 @@ private:
                 }
             });
             stats.lattice_points += count;
+            if (!same) {
+                lattice.buried.clear();
+                if (!scene.parts[part].trims.empty()) {
+                    lattice.buried.assign(std::size_t(lattice.nu - 1) * std::size_t(lattice.nv - 1), 0);
+                    for (int j = 0; j + 1 < lattice.nv; ++j) {
+                        for (int i = 0; i + 1 < lattice.nu; ++i) {
+                            bool all = hidden(scene.parts[part], (i + 0.5) * lattice.step, (j + 0.5) * lattice.step);
+                            for (int c = 0; c < 4 && all; ++c) { all = hidden(scene.parts[part], (i + (c & 1)) * lattice.step, (j + (c >> 1)) * lattice.step); }
+                            lattice.buried[std::size_t(j) * std::size_t(lattice.nu - 1) + std::size_t(i)] = all ? 1 : 0;
+                        }
+                    }
+                }
+            }
         }
     }
 
     void build_shadow_map(const Scene& scene, const RenderOptions& options) {
+        const double cut_key = scene.cut ? scene.cut_offset + 7.0 * scene.cut_normal.x + 13.0 * scene.cut_normal.y + 17.0 * scene.cut_normal.z + 1e3 : 0.0;
+        const int wanted_size = options.shadow_size > 0 ? options.shadow_size : 512;
+        if (options.shadows && options.lighting && scene.stamp != 0 && scene.stamp == shadow_stamp_ && shadow_version_ == 0 && shadow_.size == wanted_size &&
+            cut_key == shadow_cut_) {
+            return; // the same surfaces as last frame: the map stands
+        }
+        shadow_stamp_ = scene.stamp;
+        shadow_cut_ = cut_key;
         shadow_.size = 0;
         shadow_version_ = 0;
         if (!options.shadows || !options.lighting) { return; }
@@ -581,7 +628,7 @@ private:
                         corner[c][3] = double(i + (c & 1)) * lattice.step;
                         corner[c][4] = double(j + (c >> 1)) * lattice.step;
                     }
-                    if (gone == 4) { continue; } // removed by the cutaway: casts no shadow
+                    if (gone == 4 || lattice.cell_buried(i, j)) { continue; } // removed by the cutaway, or under a join: casts no shadow
                     detail::raster_depth(shadow_, corner[0], corner[1], corner[3], std::uint16_t(part));
                     detail::raster_depth(shadow_, corner[0], corner[3], corner[2], std::uint16_t(part));
                 }
@@ -697,7 +744,7 @@ private:
                 for (int i = 0; i + 1 < lattice.nu; ++i) {
                     const float low = std::min(std::min(sy0[i], sy0[i + 1]), std::min(sy1[i], sy1[i + 1]));
                     const float high = std::max(std::max(sy0[i], sy0[i + 1]), std::max(sy1[i], sy1[i + 1]));
-                    if (high < float(row_begin) - 1.0f || low > float(row_end) + 1.0f) { continue; }
+                    if (high < float(row_begin) - 1.0f || low > float(row_end) + 1.0f || lattice.cell_buried(i, j)) { continue; }
                     float corner[4][5];
                     bool visible = true;
                     for (int c = 0; c < 4; ++c) {
@@ -733,12 +780,26 @@ private:
         std::uint16_t i, j;
     };
 
+    // The tree over the lattice quads, kept while the surfaces are the same.
+    void need_bvh(const Scene& scene, bool wanted) {
+        if (!wanted) {
+            nodes_.clear();
+            bvh_stamp_ = 0;
+            return;
+        }
+        if (scene.stamp != 0 && scene.stamp == bvh_stamp_ && !nodes_.empty()) { return; }
+        nodes_.clear();
+        build_bvh();
+        bvh_stamp_ = scene.stamp;
+    }
+
     void build_bvh() {
         quads_.clear();
         for (std::size_t part = 0; part < lattices_.size(); ++part) {
             const detail::PartLattice& lattice = lattices_[part];
             for (int j = 0; j + 1 < lattice.nv; ++j) {
                 for (int i = 0; i + 1 < lattice.nu; ++i) {
+                    if (lattice.cell_buried(i, j)) { continue; }
                     Quad quad;
                     quad.part = std::uint16_t(part);
                     quad.i = std::uint16_t(i);
@@ -912,7 +973,56 @@ private:
     // ---- solve and shade -------------------------------------------------
     struct Work {
         std::size_t solves = 0, evaluations = 0, visits = 0, hits = 0, edges = 0;
+        // Where the floor was reached by the mirror rays of the pixel to the
+        // left and of the pixel above: their distance from this pixel's is
+        // the size of the pixel's image on the floor. x < 0: not tracked.
+        int x = -1;
+        Vec3 left;
+        bool has_left = false;
+        std::vector<Vec3> up;
+        std::vector<unsigned char> has_up;
+        void start_row(int width) {
+            has_left = false;
+            if (int(up.size()) != width) {
+                up.assign(std::size_t(width), Vec3{});
+                has_up.assign(std::size_t(width), 0);
+            }
+        }
+        // The footprint of this pixel's mirror ray on the floor at q.
+        double footprint(Vec3 q, double fallback) {
+            if (x < 0 || x >= int(up.size())) { return fallback; }
+            double size = 0.0;
+            if (has_left) { size = std::max(size, length(q - left)); }
+            if (has_up[std::size_t(x)] != 0) { size = std::max(size, length(q - up[std::size_t(x)])); }
+            left = q;
+            has_left = true;
+            up[std::size_t(x)] = q;
+            has_up[std::size_t(x)] = 1;
+            return size > 0.0 ? std::min(size, 40.0) : fallback;
+        }
+        void no_floor() {
+            has_left = false;
+            if (x >= 0 && x < int(has_up.size())) { has_up[std::size_t(x)] = 0; }
+        }
     };
+
+    // The floor's checker averaged over a square of side `width` about p: the
+    // product of two square waves, each averaged exactly. A point sample of
+    // the checker aliases wherever its image is smaller than a pixel, which
+    // is most of what a curved mirror shows of it.
+    static Vec3 checker(Vec3 p, double width) {
+        const auto wave = [](double x, double w) {
+            // The integral of the square wave of period 2 is a triangle wave.
+            const auto integral = [](double t) {
+                const double m = t - 2.0 * std::floor(0.5 * t);
+                return m < 1.0 ? m : 2.0 - m;
+            };
+            if (!(w > 1e-6)) { return (x - 2.0 * std::floor(0.5 * x)) < 1.0 ? 1.0 : -1.0; }
+            return (integral(x + 0.5 * w) - integral(x - 0.5 * w)) / w;
+        };
+        const double mix = 0.5 + 0.5 * wave(p.x, width) * wave(p.z, width); // 1: the light square
+        return Vec3{0.50, 0.52, 0.55} * (1.0 - mix) + Vec3{0.66, 0.68, 0.71} * mix;
+    }
 
     // The area emitter and sky seen along a direction: what a mirror shows
     // where it reflects nothing else. The emitter is a rectangle facing the
@@ -951,16 +1061,31 @@ private:
     }
 
     // What a mirror at `origin` shows along `dir`: the teapot, the floor, or the sky.
+    // What the inside of the teapot shows of itself where no ray is traced.
+    static Vec3 cavity() { return {0.27, 0.26, 0.25}; }
+
     Vec3 reflected_radiance(const Scene& scene, const RenderOptions& options, const detail::View& primary, Vec3 origin, Vec3 dir,
-                            Work& work) const {
+                            Work& work, bool from_cavity = false) const {
         detail::Solve solve;
         std::uint16_t part = 0;
         const bool hit = !nodes_.empty() && trace_secondary(scene, options, primary, origin, dir, solve, part, work);
         const Vec3 unit = normalize(dir);
+        if (!hit && nodes_.empty() && from_cavity && !scene.leaves_cavity(unit)) {
+            // Nothing is traced here, and the floor and sky are not in view from inside.
+            work.no_floor();
+            return cavity();
+        }
         double ground_t = -1.0;
         if (options.ground && unit.y < -1e-9 && origin.y > scene.ground_y) { ground_t = (scene.ground_y - origin.y) / unit.y; }
-        if (hit && !(ground_t > 0.0 && ground_t < solve.t)) { return shade_surface(scene, options, primary, unit, solve, part, 1, work); }
-        if (ground_t > 0.0) { return floor_colour(scene, options, origin + unit * ground_t, ground_t); }
+        if (hit && !(ground_t > 0.0 && ground_t < solve.t)) {
+            work.no_floor();
+            return shade_surface(scene, options, primary, unit, solve, part, 1, work);
+        }
+        if (ground_t > 0.0) {
+            const Vec3 q = origin + unit * ground_t;
+            return floor_colour(scene, options, q, ground_t, nullptr, nullptr, work.footprint(q, 4.0 * ground_t / primary.focal / std::fmax(0.1, -unit.y)));
+        }
+        work.no_floor();
         return sky(scene, origin, unit);
     }
 
@@ -1034,9 +1159,15 @@ private:
         return 0.25 * (first + second + ray(2) + ray(3));
     }
 
-    Vec3 floor_colour(const Scene& scene, const RenderOptions& options, Vec3 p, double t, const detail::View* primary = nullptr, Work* work = nullptr) const {
-        const long ix = long(std::floor(p.x)), iz = long(std::floor(p.z));
-        const Vec3 base = ((ix + iz) & 1) != 0 ? Vec3{0.50, 0.52, 0.55} : Vec3{0.66, 0.68, 0.71};
+    // `width`: the size of the pixel's image on the floor, for a mirror ray;
+    // for a camera ray it is found here.
+    Vec3 floor_colour(const Scene& scene, const RenderOptions& options, Vec3 p, double t, const detail::View* primary = nullptr, Work* work = nullptr,
+                      double width = 0.0) const {
+        if (primary != nullptr) {
+            const double far = length(p - primary->eye);
+            width = far / primary->focal / std::fmax(0.08, std::fabs(primary->eye.y - p.y) / (far > 1e-9 ? far : 1e-9));
+        }
+        const Vec3 base = checker(p, width);
         double light = 1.0;
         if (options.lighting) {
             const double lit = !options.shadows ? 1.0
@@ -1148,7 +1279,7 @@ private:
                     // A glaze over the body colour: what the mirror direction shows,
                     // weighted by Fresnel reflectance. One bounce is traced.
                     const Vec3 origin = solve.point.p + normal * 2e-3;
-                    const Vec3 mirror = depth == 0 ? reflected_radiance(scene, options, primary, origin, reflected, work)
+                    const Vec3 mirror = depth == 0 ? reflected_radiance(scene, options, primary, origin, reflected, work, part.faces_cavity(solve.v))
                                                    : sky(scene, origin, reflected);
                     const Vec3 tint = chrome ? Vec3{0.95, 0.96, 0.98} : Vec3{1, 1, 1};
                     const Vec3 under = chrome ? Vec3{0, 0, 0} : colour;
@@ -1322,9 +1453,11 @@ private:
         parallel_rows(height, options.threads, [&](int begin, int end, int worker) {
             Work work;
             for (int y = begin; y < end; ++y) {
+                work.start_row(width);
                 for (int x = 0; x < width; ++x) {
                     const std::size_t pixel = std::size_t(y) * std::size_t(width) + std::size_t(x);
                     Hit hit;
+                    work.x = x;
                     Vec3 colour = sample(scene, view, mirror, mirror_ready, options, x + 0.5, y + 0.5, pixel, work, hit);
                     if (hit.t > 0.0f) { ++work.hits; }
                     if (options.show_work) {
@@ -1410,8 +1543,7 @@ public:
         mesh.lit_diffuse_only = bake.diffuse_only;
         transport_lattices(scene, view, nullptr, options);
         build_shadow_map(scene, options);
-        nodes_.clear();
-        if (options.gloss && options.lighting) { build_bvh(); }
+        need_bvh(scene, options.gloss && options.lighting);
         mesh.texels = 0;
         for (std::size_t k = 0; k < mesh.parts.size() && k < scene.parts.size(); ++k) {
             MeshPart& part = mesh.parts[k];
@@ -1598,16 +1730,19 @@ private:
                 if (options.gloss) {
                     const Vec3 p = a.p * double(w[0]) + b.p * double(w[1]) + c.p * double(w[2]) + normal * 2e-3;
                     Vec3 mirror;
-                    if (options.ground && reflected.y < -1e-9 && p.y > scene.ground_y) {
+                    if (scene.parts[part].faces_cavity(double(hit.v)) && !scene.leaves_cavity(reflected)) {
+                        work.no_floor();
+                        mirror = cavity();
+                    } else if (options.ground && reflected.y < -1e-9 && p.y > scene.ground_y) {
                         // The stand-in floor: its pattern in closed form, its shadow from the bake.
                         const double reach = (scene.ground_y - p.y) / reflected.y;
                         const Vec3 q = p + reflected * reach;
-                        const long ix = long(std::floor(q.x)), iz = long(std::floor(q.z));
-                        const Vec3 base = ((ix + iz) & 1) != 0 ? Vec3{0.50, 0.52, 0.55} : Vec3{0.66, 0.68, 0.71};
+                        const Vec3 base = checker(q, work.footprint(q, 4.0 * reach / view.focal / std::fmax(0.1, -reflected.y)));
                         const double light = 0.55 + 0.45 * mesh.floor.lit_at(q.x, q.z) * std::fmax(0.0, scene.light.y);
                         const double fade = smoothstep(18.0, 60.0, reach);
                         mirror = base * light * (1.0 - fade) + Vec3{0.80, 0.84, 0.90} * fade;
                     } else {
+                        work.no_floor();
                         mirror = sky(scene, p, reflected);
                     }
                     const Vec3 tint = chrome ? Vec3{0.95, 0.96, 0.98} : Vec3{1, 1, 1};
@@ -1665,11 +1800,12 @@ private:
         const Mesh& mesh = *scene.mesh;
         const double start = now_ms();
         build_shadow_map_mesh(scene, options);
-        nodes_.clear();
         if (options.method == Method::seeded && options.gloss && options.lighting) {
             // The traced bounce needs the lattices and their tree.
             transport_lattices(scene, view, nullptr, options);
-            build_bvh();
+            need_bvh(scene, true);
+        } else {
+            need_bvh(scene, false);
         }
         stats.ms_lattice = now_ms() - start;
         const double raster_start = now_ms();
@@ -1713,6 +1849,7 @@ private:
             Work work;
             std::size_t hits = 0, edges = 0;
             for (int y = begin; y < end; ++y) {
+                work.start_row(width);
                 for (int x = 0; x < width; ++x) {
                     const std::size_t pixel = std::size_t(y) * std::size_t(width) + std::size_t(x);
                     // A pixel whose samples all show one part at one depth is shaded once.
@@ -1729,6 +1866,7 @@ private:
                     }
                     Hit hit;
                     Vec3 colour;
+                    work.x = flat ? x : -1;
                     if (flat && !options.mesh_lines) {
                         // Seeded rays go through the pixel's centre; the mesh alone is read at its first sample.
                         const double offset = options.method == Method::seeded ? 0.5 : 0.5 / scale;
@@ -1777,6 +1915,8 @@ private:
     std::vector<detail::PartLattice> lattices_;
     detail::ShadowMap shadow_;
     double shadow_cut_ = 0.0;
+    std::uint64_t lattice_stamp_ = 0, shadow_stamp_ = 0, bvh_stamp_ = 0;
+    int lattice_k_ = 0;
     std::uint64_t shadow_version_ = 0; // mesh version the shadow map was drawn from; 0: from the lattices
     Visibility visibility_;
     std::vector<float> triangle_lod_;

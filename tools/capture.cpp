@@ -121,6 +121,7 @@ int main(int argc, char** argv) {
         render_part.per_u = part->per_u;
         render_part.per_v = part->per_v;
         render_part.two_sided = part->sampled;
+        render_part.interior_from = part->interior ? 0.0 : part->interior_from;
         scene_index[part_index] = long(scene.parts.size());
         scene.parts.push_back(render_part);
     }
@@ -138,6 +139,9 @@ int main(int argc, char** argv) {
         scene.cut_normal = pose.direction({0.0, 0.0, side == "left" ? 1.0 : -1.0});
         scene.cut_offset = dot(scene.cut_normal, pose.b);
     }
+    scene.axis = pose.direction({0.0, 1.0, 0.0});
+    scene.stamp = number("cache", 1) != 0 ? 1 : 0; // the scene does not change between repeats
+    scene.open_top = hide.find("lid") != std::string::npos;
     RenderOptions options;
     const std::string method = get("method", "transport");
     options.method = method == "independent" ? Method::independent : method == "raster" ? Method::raster : method == "seeded" ? Method::seeded : Method::transport;
