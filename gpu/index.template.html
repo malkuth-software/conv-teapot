@@ -99,7 +99,10 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
       </fieldset>
       <fieldset>
         <legend>GPU</legend>
-        <label class="check"><input type="checkbox" data-option="perPixel" checked> surface normal at every pixel</label>
+        <label class="row">Mesh
+          <select data-option="meshDetail"><option value="0">coarse: 0.005 and 10&deg;</option><option value="1" selected>0.003 and 8&deg;</option><option value="2">fine: 0.0015 and 5&deg;</option></select></label>
+        <label class="row">Normal
+          <select data-option="perPixel"><option value="1" selected>from the map of normals</option><option value="2">evaluated at every pixel</option><option value="0">from the mesh's corners</option></select></label>
         <label class="check"><input type="checkbox" data-option="trace" checked> traced rays (shadow edges, the teapot in itself)</label>
         <label class="row">Room light
           <select data-option="roomLight"><option value="2" selected>through what each point sees, plus light gathered from the pot</option><option value="1">through what each point sees</option><option value="0">by the normal alone</option></select></label>
@@ -198,12 +201,12 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
       state[27] = running ? 1 : 0;
       try {
         if (gpu.upload()) { remeasure = true; }
-        if (bodyFor !== gpu.vertexCount + state[30] * 1e6) {
+        if (bodyFor !== gpu.uploads) {
           // A new teapot: its body, at rest where the engine has it.
           wrench.setBody(engine);
           simpleFor = -1;
-          if (physicsChoice.value === 'wrench') { rest(0, 0); sim().running = false; } else { simple.setBody(engine); simpleFor = gpu.vertexCount + state[30] * 1e6; takePose(); }
-          bodyFor = gpu.vertexCount + state[30] * 1e6;
+          if (physicsChoice.value === 'wrench') { rest(0, 0); sim().running = false; } else { simple.setBody(engine); simpleFor = gpu.uploads; takePose(); }
+          bodyFor = gpu.uploads;
         }
         const start = performance.now();
         gpu.draw(state);
@@ -225,7 +228,7 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
       stats.textContent = `${measured.toFixed(1)} ms/frame on the GPU at ${canvas.width}\u00d7${canvas.height}` +
         (running ? (onGpu() ? (physicsChoice.value === 'wrench' ? ` · wrench solver on the GPU: ${wrench.steps} frames, ${wrench.contacts} contacts, ${wrench.stepMs.toFixed(2)} ms with the read-back` : ` · simple step on the GPU: ${simple.steps} steps over ${simple.count} points, ${simple.stepMs.toFixed(2)} ms with the read-back`)
                             : ` · physics ${state[29].toFixed(2)} ms, ${state[28]} contacts`) : '') + `\n` +
-        `${state[30]} nodes · ${gpu.vertexCount} grid points · ${gpu.triangleCount} triangles, each grid point and pixel evaluated from the lattice on the GPU\n` +
+        `${state[30]} nodes · ${gpu.triangleCount} triangles in ${gpu.mesh.cells} lattice cells, each meshed alone to ${gpu.meshLimits()[0]} and ${gpu.meshLimits()[1]}\u00b0 (${gpu.mesh.ms.toFixed(0)} ms) · tree of ${gpu.mesh.nodes} boxes\n` +
         (gpu.roomMs ? `room light: ${gpu.options.directions} directions in ${gpu.roomMs.toFixed(0)} ms` + (gpu.thrownMs ? `, gathered in ${gpu.thrownMs.toFixed(0)} ms` + (gpu.thrownFrames > 1 ? ` over ${gpu.thrownFrames} frames` : '') : '') + ` · ` : '') +
         (check ? `shaders against the CPU at ${check.points} points: largest distance ${check.worst.toExponential(2)}, largest angle between normals ${check.worstAngle.toFixed(4)}\u00b0`
                : 'not yet checked against the CPU') +

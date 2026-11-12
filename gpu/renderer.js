@@ -8,15 +8,13 @@ class TeapotGpu {
     if (!gl) { throw new Error('WebGL 2 is not available'); }
     if (!gl.getExtension('EXT_color_buffer_float')) { throw new Error('rendering to float textures (EXT_color_buffer_float) is not available'); }
     this.gl = gl;
-    this.options = { material: 0, gloss: 0, lighting: 1, shadows: 1, ground: 1, wire: 0, texture: 0, mapping: 0, perPixel: 1, shadowSize: 2048, polished: 0, trace: 1, filter: 2, placeRows: 1, buildOnGpu: 1, gatherPerFrame: 3, roomLight: 2, directions: 256, gatherDirections: 48, gathers: 5, layers: 6 };
+    this.options = { material: 0, gloss: 0, lighting: 1, shadows: 1, ground: 1, wire: 0, texture: 0, mapping: 0, perPixel: 1, shadowSize: 2048, polished: 0, trace: 1, filter: 2, placeRows: 1, meshDetail: 1, specialize: 1, buildOnGpu: 1, gatherPerFrame: 3, roomLight: 2, directions: 256, gatherDirections: 48, gathers: 5, layers: 6 };
     // The surface from the lattice at every vertex (used once, to evaluate them, and to check against the CPU);
     // the teapot from those evaluated vertices; the maps of what each point sees of the room.
     this.conv = this.program(VERTEX_GLSL, PROBE_FRAGMENT_GLSL);
-    this.main = this.program(GRID_VERTEX_GLSL, FRAGMENT_GLSL);
-    this.peel = this.program(GRID_VERTEX_GLSL, PEEL_FRAGMENT_GLSL);
-    this.mapInfo = this.program(MAP_VERTEX_GLSL, MAP_INFO_GLSL);
-    this.boxCell = this.program(MAP_VERTEX_GLSL, BOX_CELL_GLSL);
-    this.boxParent = this.program(MAP_VERTEX_GLSL, BOX_PARENT_GLSL);
+    this.main = this.program(MESH_VERTEX_GLSL, FRAGMENT_GLSL);
+    this.peel = this.program(MESH_VERTEX_GLSL, PEEL_FRAGMENT_GLSL);
+    this.mesh = new BoundedMesh(this);
     this.mapSurface = this.program(MAP_VERTEX_GLSL, MAP_SURFACE_GLSL);
     this.mapOpen = this.program(MAP_VERTEX_GLSL, MAP_OPEN_GLSL);
     this.mapDirect = this.program(MAP_VERTEX_GLSL, MAP_DIRECT_GLSL);
@@ -84,6 +82,17 @@ class TeapotGpu {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   }
 
+  // How far a chord of the mesh may stray from the surface and how far the normal may turn along it (degrees).
+  meshLimits() { return [[5e-3, 10], [3e-3, 8], [1.5e-3, 5]][this.options.meshDetail] || [3e-3, 8]; }
+  buildMesh() {
+    const limits = this.meshLimits();
+    this.mesh.build(limits[0], limits[1]);
+    this.meshFor = limits.join(',');
+    this.meshBuilt = (this.meshBuilt || 0) + 1;
+    this.vertexCount = 3 * this.mesh.triangles;
+    this.triangleCount = this.mesh.triangles;
+  }
+
   // Take from the engine what is shown now, if it has changed.
   upload() {
     const e = this.engine, gl = this.gl;
@@ -103,7 +112,11 @@ class TeapotGpu {
       this.rowPlans = this.rowPlans || {};
       this.rowPlans[scale] = this.rowPlanner.placeAll(e);
     }
-    if (e._tp_build() === 0 && this.parts.length > 0) { return false; }
+    if (e._tp_build() === 0 && this.parts.length > 0) {
+      // The same teapot; a new mesh if the page asked for another.
+      if (this.meshFor !== this.meshLimits().join(',')) { this.buildMesh(); }
+      return false;
+    }
     const floats = (kind) => new Float32Array(e.HEAPF32.buffer, e._tp_buffer(kind), e._tp_length(kind)).slice();
     this.floatTexture('cells', floats(0), 4);
     this.floatTexture('shapes', floats(1), 4);
@@ -171,8 +184,7 @@ class TeapotGpu {
       }
       if (fits) { break; }
     }
-    this.vertexCount = this.parts.reduce((sum, part) => sum + part.rect[2] * part.rect[3], 0);
-    this.triangleCount = this.parts.reduce((sum, part) => sum + 2 * part.span[0] * part.span[1], 0);
+    this.gridPoints = this.parts.reduce((sum, part) => sum + part.rect[2] * part.rect[3], 0);
     // What a traced ray needs of the part it reaches.
     const partTable = new Float32Array(Math.max(1, this.parts.length) * 16);
     this.parts.forEach((part, k) => {
@@ -184,6 +196,9 @@ class TeapotGpu {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     this.bakeSurface();
+    // The mesh: each lattice cell meshed alone, to a distance and an angle (mesh.js).
+    this.buildMesh();
+    this.uploads = (this.uploads || 0) + 1;   // a new teapot (a new mesh of the same teapot does not count)
     this.roomKey = '';
     return true;
   }
@@ -248,69 +263,6 @@ class TeapotGpu {
       this.setPart(part, index, false, u);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
     });
-    // Per texel: its part's place in the texture, whether a cell starts there, the part.
-    const info = this.target('gridInfo', size, size, gl.RGBA32F);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, info.framebuffer);
-    gl.clearBufferfv(gl.COLOR, 0, [0, 0, 0, 0]);
-    gl.useProgram(this.mapInfo.program);
-    u = this.mapInfo.uniforms;
-    gl.uniform2f(u.uMapSize, size, size);
-    this.parts.forEach((part, index) => {
-      gl.uniform4fv(u.uRect, part.rect);
-      gl.uniform2f(u.uGridSpan, part.span[0], part.span[1]);
-      gl.uniform1f(u.uPartIndex, index);
-      gl.drawArrays(gl.TRIANGLES, 0, 6);
-    });
-    // The pyramid of boxes: one box per cell, then the box of four boxes, up to one box for all.
-    const levels = Math.round(Math.log2(size)) + 1;
-    if (!this.boxes) {
-      const make = () => {
-        const texture = gl.createTexture();
-        gl.bindTexture(gl.TEXTURE_2D, texture);
-        gl.texStorage2D(gl.TEXTURE_2D, levels, gl.RGBA32F, size, size);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST_MIPMAP_NEAREST);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-        return texture;
-      };
-      this.boxes = { low: make(), high: make(), framebuffer: gl.createFramebuffer() };
-    }
-    const boxes = this.boxes;
-    this.topLevel = levels - 1;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, boxes.framebuffer);
-    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
-    for (let level = 0; level < levels; ++level) {
-      const extent = size >> level;
-      for (const texture of [boxes.low, boxes.high]) {
-        // While a level is drawn, only the level below it may be read.
-        gl.bindTexture(gl.TEXTURE_2D, texture);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_BASE_LEVEL, Math.max(0, level - 1));
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, Math.max(0, level - 1));
-      }
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, boxes.low, level);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, boxes.high, level);
-      gl.viewport(0, 0, extent, extent);
-      const program = level === 0 ? this.boxCell : this.boxParent;
-      gl.useProgram(program.program);
-      u = program.uniforms;
-      gl.uniform4f(u.uRect, 0, 0, extent, extent);
-      gl.uniform2f(u.uMapSize, extent, extent);
-      if (level === 0) {
-        gl.activeTexture(gl.TEXTURE8); gl.bindTexture(gl.TEXTURE_2D, null);
-        gl.activeTexture(gl.TEXTURE9); gl.bindTexture(gl.TEXTURE_2D, null);
-        gl.activeTexture(gl.TEXTURE12); gl.bindTexture(gl.TEXTURE_2D, surface.first); gl.uniform1i(u.uGridPoints, 12);
-        gl.activeTexture(gl.TEXTURE13); gl.bindTexture(gl.TEXTURE_2D, surface.second); gl.uniform1i(u.uGridNormals, 13);
-        gl.activeTexture(gl.TEXTURE10); gl.bindTexture(gl.TEXTURE_2D, info.texture); gl.uniform1i(u.uGridInfo, 10);
-      } else {
-        gl.activeTexture(gl.TEXTURE8); gl.bindTexture(gl.TEXTURE_2D, boxes.low); gl.uniform1i(u.uBoxMin, 8);
-        gl.activeTexture(gl.TEXTURE9); gl.bindTexture(gl.TEXTURE_2D, boxes.high); gl.uniform1i(u.uBoxMax, 9);
-      }
-      gl.drawArrays(gl.TRIANGLES, 0, 6);
-    }
-    for (const texture of [boxes.low, boxes.high]) {
-      gl.bindTexture(gl.TEXTURE_2D, texture);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_BASE_LEVEL, 0);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, levels - 1);
-    }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.enable(gl.DEPTH_TEST);
   }
@@ -472,8 +424,7 @@ class TeapotGpu {
           this.current = this.peel;
           gl.useProgram(this.peel.program);
           gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this.textures.trims); gl.uniform1i(pu.uTrimData, 2);
-          gl.activeTexture(gl.TEXTURE12); gl.bindTexture(gl.TEXTURE_2D, surface.first); gl.uniform1i(pu.uGridPoints, 12);
-          gl.activeTexture(gl.TEXTURE13); gl.bindTexture(gl.TEXTURE_2D, surface.second); gl.uniform1i(pu.uGridNormals, 13);
+          this.meshUniforms(pu);
           gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, from.first); gl.uniform1i(pu.uThrownFront, 6);
           gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, from.second); gl.uniform1i(pu.uThrownBack, 7);
           gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, direct.first); gl.uniform1i(pu.uDirectFront, 4);
@@ -654,7 +605,38 @@ class TeapotGpu {
   }
 
   // Uniforms that hold for a whole pass over the teapot.
-  beginTeapot(view, mode, program = this.main) {
+  // The picture's own program for the settings as they are: every setting the shader would test at
+  // each pixel is written into it as a constant, so that the pixel's work holds no decision that
+  // was made before the frame began (and none of the code for what is switched off). One is
+  // compiled the first time its settings are used and kept.
+  pictureProgram(view) {
+    const o = this.options, s = view.state;
+    const settings = {
+      uMode: 0, uMaterial: o.material, uGloss: o.gloss, uLighting: o.lighting, uWire: o.wire, uTextureOn: o.texture > 0 ? 1 : 0, uMapping: o.mapping,
+      uGroundOn: o.ground, uFilter: o.filter, uPerPixel: o.perPixel, uCountSteps: o.countSteps || 0, uTraceOn: o.trace ? 1 : 0,
+      uRoomLight: o.roomLight && this.targets.mapOpen ? (o.roomLight > 1 && this.thrown ? 2 : 1) : 0,
+      uShadows: o.shadows && o.lighting ? 1 : 0, uImage: view.image ? 1 : 0, uCut: s[22] > 0.5 ? 1 : 0, uTraceCut: s[22] > 0.5 ? 1 : 0,
+    };
+    const key = Object.values(settings).join(',');
+    this.pictures = this.pictures || {};
+    if (!this.pictures[key]) {
+      const started = performance.now();
+      // Each named setting leaves its 'uniform int' declaration and becomes a constant there.
+      const source = FRAGMENT_GLSL.replace(/uniform int ([^;]+);/g, (whole, names) => {
+        const kept = [], fixed = [];
+        for (const name of names.split(',').map((n) => n.trim())) {
+          if (name in settings) { fixed.push(`const int ${name} = ${settings[name]};`); } else { kept.push(name); }
+        }
+        return (kept.length ? `uniform int ${kept.join(', ')};` : '') + fixed.join(' ');
+      });
+      this.pictures[key] = this.program(MESH_VERTEX_GLSL, source);
+      this.pictureMs = performance.now() - started;
+    }
+    return this.pictures[key];
+  }
+
+  beginTeapot(view, mode, program) {
+    if (!program) { program = mode === 0 && this.options.specialize ? this.pictureProgram(view) : this.main; }
     const gl = this.gl, u = program.uniforms, o = this.options, s = view.state;
     this.current = program;
     gl.useProgram(program.program);
@@ -683,9 +665,7 @@ class TeapotGpu {
     const thrown = this.thrown;
     gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, thrown ? thrown.first : null); gl.uniform1i(u.uThrownFront, 6);
     gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, thrown ? thrown.second : null); gl.uniform1i(u.uThrownBack, 7);
-    // The grid of surface points the teapot is drawn from.
-    gl.activeTexture(gl.TEXTURE12); gl.bindTexture(gl.TEXTURE_2D, this.targets.mapSurface.first); gl.uniform1i(u.uGridPoints, 12);
-    gl.activeTexture(gl.TEXTURE13); gl.bindTexture(gl.TEXTURE_2D, this.targets.mapSurface.second); gl.uniform1i(u.uGridNormals, 13);
+    this.meshUniforms(u);
     gl.uniform1i(u.uImage, view.image ? 1 : 0);
     gl.uniform2f(u.uImageOf, view.image ? 1 : 0, s[31]);
     const maps = room && this.targets.mapOpen;
@@ -697,6 +677,7 @@ class TeapotGpu {
     gl.uniform4f(u.uCutPlane, s[23], s[24], s[25], s[26]);
     this.roomUniforms(u, view, mode);
     gl.uniform1i(u.uPerPixel, o.perPixel);
+    gl.uniform1i(u.uCountSteps, mode === 0 ? (o.countSteps || 0) : 0);
     gl.uniform1i(u.uMaterial, o.material);
     gl.uniform1i(u.uGloss, o.gloss);
     gl.uniform1i(u.uLighting, o.lighting);
@@ -710,15 +691,25 @@ class TeapotGpu {
     gl.bindVertexArray(this.emptyVao);
   }
 
+  // The mesh the teapot is drawn and traced from, its tree, and the map of normals over the parts.
+  meshUniforms(u) {
+    const gl = this.gl, mesh = this.mesh;
+    gl.activeTexture(gl.TEXTURE8); gl.bindTexture(gl.TEXTURE_2D, mesh.tree); gl.uniform1i(u.uTree, 8);
+    gl.activeTexture(gl.TEXTURE9); gl.bindTexture(gl.TEXTURE_2D, mesh.points); gl.uniform1i(u.uMeshPoints, 9);
+    gl.activeTexture(gl.TEXTURE10); gl.bindTexture(gl.TEXTURE_2D, mesh.normals); gl.uniform1i(u.uMeshNormals, 10);
+    gl.activeTexture(gl.TEXTURE12); gl.bindTexture(gl.TEXTURE_2D, mesh.where); gl.uniform1i(u.uMeshWhere, 12);
+    gl.activeTexture(gl.TEXTURE13); gl.bindTexture(gl.TEXTURE_2D, this.targets.mapSurface.second); gl.uniform1i(u.uGridNormals, 13);
+    gl.uniform1i(u.uTreeCount, mesh.nodes);
+    gl.uniform3fv(u.uTreeLow, mesh.treeLow);
+    gl.uniform1f(u.uTreeStep, mesh.treeStep);
+    gl.uniform1i(u.uStepCap, this.options.stepCap || 8192);
+    gl.uniform1i(u.uTricks, this.options.tricks === undefined ? 3 : this.options.tricks);
+  }
+
   roomUniforms(u, view, mode) {
     const gl = this.gl, s = view.state, o = this.options;
     // Rays traced against the teapot: its tree and where it is.
-    gl.activeTexture(gl.TEXTURE8); gl.bindTexture(gl.TEXTURE_2D, this.boxes.low); gl.uniform1i(u.uBoxMin, 8);
-    gl.activeTexture(gl.TEXTURE9); gl.bindTexture(gl.TEXTURE_2D, this.boxes.high); gl.uniform1i(u.uBoxMax, 9);
-    gl.activeTexture(gl.TEXTURE10); gl.bindTexture(gl.TEXTURE_2D, this.targets.gridInfo.texture); gl.uniform1i(u.uGridInfo, 10);
-    gl.activeTexture(gl.TEXTURE12); gl.bindTexture(gl.TEXTURE_2D, this.targets.mapSurface.first); gl.uniform1i(u.uGridPoints, 12);
-    gl.activeTexture(gl.TEXTURE13); gl.bindTexture(gl.TEXTURE_2D, this.targets.mapSurface.second); gl.uniform1i(u.uGridNormals, 13);
-    gl.uniform1i(u.uTopLevel, this.topLevel);
+    this.meshUniforms(u);
     gl.activeTexture(gl.TEXTURE14); gl.bindTexture(gl.TEXTURE_2D, this.textures.partTable); gl.uniform1i(u.uPartTable, 14);
     gl.uniformMatrix3fv(u.uTracePose, false, view.pose);
     gl.uniform3fv(u.uTraceShift, view.shift);
@@ -771,8 +762,12 @@ class TeapotGpu {
   drawTeapot(exactTrims) {
     const gl = this.gl;
     this.parts.forEach((part, index) => {
+      if (part.triangles === 0) { return; }
       this.setPart(part, index, exactTrims);
-      gl.drawArrays(gl.TRIANGLES, 0, 6 * part.span[0] * part.span[1]);
+      gl.uniform1i(this.current.uniforms.uFirstVertex, 3 * part.firstTriangle);
+      gl.uniform1i(this.current.uniforms.uOwnRoot, part.treeRoot);
+      gl.uniform1i(this.current.uniforms.uOwnNext, part.treeNext);
+      gl.drawArrays(gl.TRIANGLES, 0, 3 * part.triangles);
     });
   }
 
@@ -851,7 +846,10 @@ class TeapotGpu {
     gl.disable(gl.STENCIL_TEST);
 
     // 1. The distance along the light of what is nearest the light.
-    if (o.shadows && o.lighting) {
+    // It depends on the teapot, where it is, the sphere that holds it and the sun, not on the eye: it is drawn again only when one of those changes.
+    const shadowKey = [this.meshBuilt, o.shadowSize, state[22], state[23], state[24], state[25], state[26]].join(',') + '|' + Array.from(state.slice(0, 12)).join(',') + '|' + Array.from(state.slice(19, 22)).join(',') + '|' + Array.from(state.slice(33, 37)).join(',');
+    if (o.shadows && o.lighting && shadowKey !== this.shadowKey) {
+      this.shadowKey = shadowKey;
       gl.bindFramebuffer(gl.FRAMEBUFFER, shadow.framebuffer);
       gl.viewport(0, 0, shadow.width, shadow.height);
       gl.clearBufferfv(gl.COLOR, 0, [1e30, 0, 0, 0]);
@@ -906,7 +904,7 @@ class TeapotGpu {
       gl.clearBufferfv(gl.COLOR, 0, [0, 0, 0, 0]);
       gl.clear(gl.DEPTH_BUFFER_BIT);
       this.beginTeapot({ ...view, eye: [view.eye[0], 2 * state[31] - view.eye[1], view.eye[2]], image: true }, 0);
-      gl.uniform3fv(this.main.uniforms.uEyeAt, view.eye);
+      gl.uniform3fv(this.current.uniforms.uEyeAt, view.eye);
       this.drawTeapot(false);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       gl.viewport(0, 0, width, height);

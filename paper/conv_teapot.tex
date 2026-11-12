@@ -1196,6 +1196,7 @@ where the tree uses 9000 vertices and 26\,500 triangles: an order of
 magnitude, in the limit.
 
 \subsection{Layouts from the metric}
+\label{sec:layouts}
 
 To see how much of that can be had, we built the layout the formulas
 describe. From the nodes, with $\mathrm{I}$, $\mathrm{II}$ and
@@ -1651,26 +1652,67 @@ the cut face. The teapot is drawn first for depth alone and then shaded
 at the nearest surface of each pixel, so the surface is evaluated once
 per pixel and not once per layer behind it.
 
-Two things the CPU does with rays are done with rays here too. Over the
-cells of the grid stands a pyramid of boxes, each level a quarter of the
-one below, which the GPU makes by taking the smallest and largest corner
-of four boxes at a time; a fragment shader walks it with a small stack,
-nearer box first. Where the shadow map's texels around a point disagree,
-light rays are traced from a rotated grid inside the pixel, as on the
-CPU; and a glossy teapot's mirror ray is traced one bounce, the point it
-reaches being shaded as the CPU shades a surface seen at second hand.
-The rays meet the grid's triangles, not the surface itself.
+Two things the CPU does with rays are done with rays here too. Where
+the shadow map's texels around a point disagree, light rays are traced
+from a rotated grid inside the pixel, as on the CPU; and a glossy
+teapot's mirror ray is traced one bounce, the point it reaches being
+shaded as the CPU shades a surface seen at second hand. The rays meet
+the mesh's triangles, not the surface itself.
+
+The mesh is the bounded form of the layouts from the metric
+(Section~\ref{sec:layouts}): the seeds are the lattice's own nodes and
+each lattice cell is meshed alone. The surface is sampled once, eight
+places to a cell each way. One fragment a cell reads its two edges and
+its middle line each way and finds the fewest equal steps, from 1 to 16,
+for which a chord stays within $\varepsilon$ of the surface and the
+normal turns by no more than $\alpha$ along it: with $P''$ and $N'$
+taken from the eight pieces, $k=\max(\sqrt{|P''|/8\varepsilon},
+|N'|/\alpha)$ where they are largest. An edge's count depends on the
+edge alone, so the two cells that share it agree; a cell's inside takes
+the largest count each way, and its border vertices are placed at the
+edge's own steps, so neighbours meet. Then one fragment a triangle
+corner evaluates the surface. With $\varepsilon=0.003$ and
+$\alpha=8^\circ$ the unified teapot is 73\,560 triangles, where the
+grid used before had 132\,096.
+
+Over the mesh stands a tree of boxes written in the order a ray walks
+it. A node is one texel of four whole numbers: its box in 65\,535ths of
+the teapot's box, rounded outward, and the node to go on from if the
+ray misses it. A node the ray meets is followed by its first child,
+which is the next node. So a step is one read, and the ray keeps no
+stack. The tree halves a part's cells by where they are in space, down
+to one cell, and goes on halving the cell's steps down to one pair of
+triangles. Two shortcuts for a mirror ray are exact. The ray stays in
+front of the tangent plane it leaves, so a box wholly behind that plane
+is skipped. And each cell is told beforehand which of sixteen blocks of
+its own part lie wholly behind the tangent planes at nine places of the
+cell; a ray from the cell skips those blocks, which for most of the
+body's outside is the whole body. A step takes about a nanosecond. Most
+mirror rays then take fewer than 16 steps; rays from the lid, which is
+hollow round its knob, and from the inside of the handle take 64 to
+255, and are most of what tracing still costs.
+
+The normal at a pixel is read from a map of the surface's normals laid
+over each part. The shadow map is drawn again only when the teapot, its
+pose or the sun changes. The picture's shader is compiled for the
+settings in use, each setting a constant in it, so that the work of a
+pixel holds no decision that was made before the frame began.
 
 Against the CPU ray tracer at $960\times600$, the share of pixels that
 differ by more than 8 of 255 is 0.25\% for porcelain, 0.25\% with the
 polished floor, 0.39\% with a texture, 0.55\% for chrome and 0.96\% for a
-cutaway. Without the traced mirror ray chrome differed in 3.6\%. The
-unified teapot is 66\,528 grid points and 132\,096 triangles. A frame
-takes 12\,ms at $960\times600$ and 21\,ms at $1920\times1200$ on the
-laptop used throughout (8\,ms at $960\times600$ without traced rays),
-and 28 and 54\,ms for chrome with its traced bounce, against 21\,ms for
-a moving frame and 43 to 50\,ms for a resting one of the CPU's baked
-renderer at $960\times600$.
+cutaway. Without the traced mirror ray chrome differed in 3.6\%. Those
+figures are for the grid and the pyramid of boxes used first; against
+that build the present one differs in 0.15\% to 0.6\% of pixels in
+seven views, along edges, and in 1.65\% seen from above in chrome,
+where the spout shows the body's rim and the lid's knob, which the
+pyramid's walk missed. A frame takes 3.8\,ms at $960\times600$ at the
+page's settings, in a headless browser on the laptop used throughout
+(10\,ms with the grid and pyramid). At $2560\times1600$ with chrome,
+the polished floor, traced rays and a shadow map of $4096^2$ it takes
+65\,ms (111 before), and 15\,ms without traced rays (45 before). The
+CPU's baked renderer takes 21\,ms for a moving frame and 43 to 50\,ms
+for a resting one at $960\times600$.
 
 \subsection{Room light without rays}
 

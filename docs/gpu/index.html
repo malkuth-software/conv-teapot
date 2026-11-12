@@ -99,7 +99,10 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
       </fieldset>
       <fieldset>
         <legend>GPU</legend>
-        <label class="check"><input type="checkbox" data-option="perPixel" checked> surface normal at every pixel</label>
+        <label class="row">Mesh
+          <select data-option="meshDetail"><option value="0">coarse: 0.005 and 10&deg;</option><option value="1" selected>0.003 and 8&deg;</option><option value="2">fine: 0.0015 and 5&deg;</option></select></label>
+        <label class="row">Normal
+          <select data-option="perPixel"><option value="1" selected>from the map of normals</option><option value="2">evaluated at every pixel</option><option value="0">from the mesh's corners</option></select></label>
         <label class="check"><input type="checkbox" data-option="trace" checked> traced rays (shadow edges, the teapot in itself)</label>
         <label class="row">Room light
           <select data-option="roomLight"><option value="2" selected>through what each point sees, plus light gathered from the pot</option><option value="1">through what each point sees</option><option value="0">by the normal alone</option></select></label>
@@ -664,22 +667,20 @@ vec4 encode(vec3 linear) { return vec4(sqrt(clamp(linear, 0.0, 1.0)), 1.0); }   
 // is taken into the teapot's frame and walks down the pyramid, nearer box
 // first, to the cells it may meet; a cell is two triangles.
 const TRACE_GLSL = `
-uniform sampler2D uBoxMin, uBoxMax;                    // the pyramid: level 0 is one box per cell
-uniform sampler2D uGridPoints, uGridNormals, uGridInfo; // per texel: point; normal and shown; (left edge, width, period flag, part)
-uniform int uTopLevel;
+// The tree over the mesh, in the order a ray walks it (mesh.js): one texel of four whole numbers a node, its box in
+// steps of the teapot's own box and the node to go on from on a miss (or, for one pair of triangles, the first of them).
+uniform highp usampler2D uTree;
+uniform vec3 uTreeLow;
+uniform float uTreeStep;
+uniform sampler2D uMeshPoints, uMeshNormals, uMeshWhere;   // three texels a triangle: point and shown; normal; u, v, part, cell
+uniform int uTreeCount, uStepCap;
 uniform mat3 uTracePose;      // the teapot's rotation
 uniform vec3 uTraceShift;
 uniform int uTraceCut;        // the teapot is cut: what is beyond the plane through its origin is not there
 uniform vec3 uTraceCutNormal; // in the teapot's frame
 uniform int uTraceOn;
-// The four grid texels of the cell whose first corner is at 'at': the last column of a part that closes on itself joins its first.
-void cellTexels(ivec2 at, out ivec2 t10, out ivec2 t11, out ivec2 t01) {
-  vec4 info = texelFetch(uGridInfo, at, 0);
-  int xn = at.x - int(info.x) == int(info.y) - 1 ? int(info.x) : at.x + 1;
-  t10 = ivec2(xn, at.y);
-  t11 = ivec2(xn, at.y + 1);
-  t01 = ivec2(at.x, at.y + 1);
-}
+vec4 listAt(sampler2D list, int i) { return texelFetch(list, ivec2(i & 2047, i >> 11), 0); }
+int traceSteps = 0, traceLeaves = 0;   // counted for the page's measurements
 bool meetTriangle(vec3 o, vec3 d, vec3 p0, vec3 p1, vec3 p2, float tMin, float tMax, out float t, out vec2 weights) {
   vec3 e1 = p1 - p0, e2 = p2 - p0;
   vec3 pv = cross(d, e2);
@@ -694,60 +695,55 @@ bool meetTriangle(vec3 o, vec3 d, vec3 p0, vec3 p1, vec3 p2, float tMin, float t
   weights = vec2(wu, wv);
   return t > tMin && t < tMax;
 }
-// The nearest cell along a ray of the room between tMin and tMax (or any, for a shadow).
-// 'triangle' names the cell and which of its two triangles: ((y << 12 | x) << 1) | which of the two.
-bool traceRay(vec3 origin, vec3 direction, float tMin, float tMax, bool any, out float tHit, out int triangle, out vec2 weights) {
+// The nearest triangle along a ray of the room between tMin and tMax (or any, for a shadow).
+// The walk keeps no stack: a node the ray meets is followed by its first child, which is the
+// next node; one it misses names the node to go on from.
+// 'from', 'onFrom' and 'bands': the nodes of the part the ray leaves (first, and the one after its last) and the bands of
+// that part's rows the ray may meet, as bits; the others it is known to be clear of. from -1: nothing is known.
+// 'ahead': the tangent plane the ray leaves (unit normal on the ray's side, and normal . point), or zero. The ray stays in
+// front of it, so a box wholly behind it cannot be met.
+bool traceRay(vec3 origin, vec3 direction, float tMin, float tMax, bool any, int from, int onFrom, int bands, vec4 ahead, out float tHit, out int triangle, out vec2 weights) {
   vec3 o = (origin - uTraceShift) * uTracePose, d = direction * uTracePose;   // into the teapot's frame
+  vec3 facing = ahead.xyz * uTracePose;
+  float level = ahead.w - dot(ahead.xyz, uTraceShift);
   vec3 inv = 1.0 / mix(d, vec3(1e-20), lessThan(abs(d), vec3(1e-20)));
-  int stack[64];
-  int top = 0;
   tHit = tMax;
   triangle = -1;
-  stack[top++] = uTopLevel << 24;
-  for (int step = 0; step < 4096 && top > 0; ++step) {
-    int node = stack[--top];
-    int level = node >> 24, y = (node >> 12) & 4095, x = node & 4095;
-    if (level == 0) {
-      ivec2 at = ivec2(x, y), t10, t11, t01;
-      cellTexels(at, t10, t11, t01);
-      vec3 p00 = texelFetch(uGridPoints, at, 0).xyz, p10 = texelFetch(uGridPoints, t10, 0).xyz, p11 = texelFetch(uGridPoints, t11, 0).xyz, p01 = texelFetch(uGridPoints, t01, 0).xyz;
-      for (int side2 = 0; side2 < 2; ++side2) {
+  int node = 0;
+  for (int step = 0; step < uStepCap && node < uTreeCount; ++step) {
+    if (node == from && bands == 0) { node = onFrom; continue; }
+    uvec4 packed = texelFetch(uTree, ivec2(node & 2047, node >> 11), 0);
+    ++traceSteps;
+    int kind = int(packed.a >> 24), link = int(packed.a & 0xFFFFFFu);
+    bool pair = kind >= 128;
+    int onMiss = pair ? node + 1 : link;
+    // A block of the part the ray leaves that it is known to be clear of.
+    if (kind > 0 && !pair && node > from && node < onFrom && ((bands >> (kind - 1)) & 1) == 0) { node = onMiss; continue; }
+    vec3 low = uTreeLow + uTreeStep * vec3(packed.r & 0xFFFFu, packed.r >> 16, packed.g & 0xFFFFu);
+    vec3 high = uTreeLow + uTreeStep * vec3(packed.g >> 16, packed.b & 0xFFFFu, packed.b >> 16);
+    vec3 t0 = (low - o) * inv, t1 = (high - o) * inv;
+    vec3 a = min(t0, t1), b = max(t0, t1);
+    float near = max(max(a.x, a.y), max(a.z, tMin)), far = min(min(b.x, b.y), min(b.z, tHit));
+    // Missed, empty, or wholly behind the plane the ray leaves.
+    vec3 reach = max(facing * low, facing * high);
+    if (low.x > high.x || near > far || reach.x + reach.y + reach.z < level - 1e-4) { node = onMiss; continue; }
+    if (pair) {
+      // One pair of triangles.
+      ++traceLeaves;
+      for (int k = 0; k < 2; ++k) {
+        int at = 3 * (link + k);
+        vec4 p0 = listAt(uMeshPoints, at), p1 = listAt(uMeshPoints, at + 1), p2 = listAt(uMeshPoints, at + 2);
         float t;
         vec2 w;
-        if (!meetTriangle(o, d, p00, side2 == 0 ? p10 : p11, side2 == 0 ? p11 : p01, tMin, tHit, t, w)) { continue; }
+        if (p0.w + p1.w + p2.w < 0.5 || !meetTriangle(o, d, p0.xyz, p1.xyz, p2.xyz, tMin, tHit, t, w)) { continue; }
         if (uTraceCut != 0 && dot(uTraceCutNormal, o + d * t) > 0.0) { continue; }
         tHit = t;
-        triangle = (((y << 12) | x) << 1) | side2;
+        triangle = link + k;
         weights = w;
         if (any) { return true; }
       }
-      continue;
     }
-    // The four boxes below: those the ray meets, the nearest taken first.
-    float entry[4];
-    int child[4];
-    int count = 0;
-    for (int k = 0; k < 4; ++k) {
-      ivec2 c = ivec2(2 * x + (k & 1), 2 * y + (k >> 1));
-      vec3 low = texelFetch(uBoxMin, c, level - 1).xyz, high = texelFetch(uBoxMax, c, level - 1).xyz;
-      if (low.x > high.x) { continue; }   // nothing in it
-      vec3 t0 = (low - o) * inv, t1 = (high - o) * inv;
-      vec3 a = min(t0, t1), b = max(t0, t1);
-      float near = max(max(a.x, a.y), max(a.z, tMin)), far = min(min(b.x, b.y), min(b.z, tHit));
-      if (near > far) { continue; }
-      entry[count] = near;
-      child[count] = ((level - 1) << 24) | (c.y << 12) | c.x;
-      ++count;
-    }
-    for (int a = 0; a < count; ++a) {
-      int farthest = 0;
-      float most = -1.0;
-      for (int b = 0; b < count; ++b) {
-        if (entry[b] > most) { most = entry[b]; farthest = b; }
-      }
-      if (top < 62) { stack[top++] = child[farthest]; }
-      entry[farthest] = -2.0;
-    }
+    node += 1;
   }
   return triangle >= 0;
 }
@@ -776,11 +772,11 @@ float litTraced(vec3 p, float bias, vec3 dx, vec3 dy) {
   float t;
   int triangle;
   vec2 weights;
-  float first = traceRay(p + dx * -0.375 + dy * -0.125, uLight, 1e-3, 1e30, true, t, triangle, weights) ? 0.0 : 1.0;
-  float second = traceRay(p + dx * 0.375 + dy * 0.125, uLight, 1e-3, 1e30, true, t, triangle, weights) ? 0.0 : 1.0;
+  float first = traceRay(p + dx * -0.375 + dy * -0.125, uLight, 1e-3, 1e30, true, -1, 0, 0, vec4(0.0), t, triangle, weights) ? 0.0 : 1.0;
+  float second = traceRay(p + dx * 0.375 + dy * 0.125, uLight, 1e-3, 1e30, true, -1, 0, 0, vec4(0.0), t, triangle, weights) ? 0.0 : 1.0;
   if (first == second) { return first; }
-  float third = traceRay(p + dx * 0.125 + dy * -0.375, uLight, 1e-3, 1e30, true, t, triangle, weights) ? 0.0 : 1.0;
-  float fourth = traceRay(p + dx * -0.125 + dy * 0.375, uLight, 1e-3, 1e30, true, t, triangle, weights) ? 0.0 : 1.0;
+  float third = traceRay(p + dx * 0.125 + dy * -0.375, uLight, 1e-3, 1e30, true, -1, 0, 0, vec4(0.0), t, triangle, weights) ? 0.0 : 1.0;
+  float fourth = traceRay(p + dx * -0.125 + dy * 0.375, uLight, 1e-3, 1e30, true, -1, 0, 0, vec4(0.0), t, triangle, weights) ? 0.0 : 1.0;
   return 0.25 * (first + second + third + fourth);
 }
 `;
@@ -793,11 +789,14 @@ ${TRACE_GLSL}
 in vec3 vWorld;
 in vec3 vNormal;
 in vec3 vUvs;
+in float vClear;
+uniform int uOwnRoot, uOwnNext;   // the part's nodes in the tree
+uniform int uTricks;              // for measurements: 1 the blocks a cell is clear of are skipped, 2 boxes behind the tangent plane are skipped
 uniform mat3 uPose;
 uniform int uMode;          // 0 picture, 1 distance along the light, 2 which part and where, 3 point, 4 normal, 5 presence
 uniform float uPartIndex;
 uniform float uOrientation, uInteriorFrom;
-uniform int uTwoSided, uPerPixel, uOnBand;
+uniform int uTwoSided, uPerPixel, uOnBand, uCountSteps;
 uniform int uMaterial, uGloss, uLighting, uWire, uTextureOn, uMapping, uGroundOn;
 uniform Lat uTexture;
 uniform vec2 uPer;          // node intervals per source patch
@@ -809,6 +808,7 @@ uniform sampler2D uOpenFront, uOpenBack;   // per texel: mean open direction (un
 uniform vec4 uRect;
 uniform float uOpenScale;   // 1 / (the weight a fully open texel has)
 uniform sampler2D uThrownFront, uThrownBack;   // the light the body throws on each texel (gathered)
+uniform sampler2D uGridNormals;                // per texel of the maps: the surface's normal
 uniform vec2 uGridSpan;                        // the part's grid: steps around and along
 uniform int uImage;                            // drawing the image in a polished floor: a second bounce shows only the room
 out vec4 outColour;
@@ -852,19 +852,14 @@ uniform sampler2D uPartTable;
 // surface seen at second hand: its own colour, the sun and the room, and for
 // its own gloss only the room.
 vec3 shadeHit(vec3 point, vec3 direction, int triangle, vec2 weights) {
-  int side2 = triangle & 1, x = (triangle >> 1) & 4095, y = triangle >> 13;
-  ivec2 at00 = ivec2(x, y), t10, t11, t01;
-  cellTexels(at00, t10, t11, t01);
-  int part = int(texelFetch(uGridInfo, at00, 0).a);
+  vec4 where0 = listAt(uMeshWhere, 3 * triangle), where1 = listAt(uMeshWhere, 3 * triangle + 1), where2 = listAt(uMeshWhere, 3 * triangle + 2);
+  int part = int(where0.z);
   vec4 info = texelFetch(uPartTable, ivec2(part * 4, 0), 0), cells = texelFetch(uPartTable, ivec2(part * 4 + 1, 0), 0), rect = texelFetch(uPartTable, ivec2(part * 4 + 2, 0), 0);
   vec2 span = texelFetch(uPartTable, ivec2(part * 4 + 3, 0), 0).xy;
-  // The cell's corners in the part's grid, and the hit between them.
-  vec2 corner = vec2(float(x) - rect.x, float(y) - rect.y);
-  vec2 grid = corner + (side2 == 0 ? vec2(weights.x + weights.y, weights.y) : vec2(weights.x, weights.x + weights.y));
-  vec2 uv = grid / span * cells.xy;
+  // Where the hit is on its part, and the normal there, between the triangle's corners.
   float wa = 1.0 - weights.x - weights.y;
-  vec3 n00 = texelFetch(uGridNormals, at00, 0).xyz, nb = texelFetch(uGridNormals, side2 == 0 ? t10 : t11, 0).xyz, nc = texelFetch(uGridNormals, side2 == 0 ? t11 : t01, 0).xyz;
-  vec3 raw = normalize(uPose * (n00 * wa + nb * weights.x + nc * weights.y));
+  vec2 uv = where0.xy * wa + where1.xy * weights.x + where2.xy * weights.y;
+  vec3 raw = normalize(uPose * (listAt(uMeshNormals, 3 * triangle).xyz * wa + listAt(uMeshNormals, 3 * triangle + 1).xyz * weights.x + listAt(uMeshNormals, 3 * triangle + 2).xyz * weights.y));
   vec3 normal = raw * info.x;
   vec3 incoming = normalize(direction), toEye = -incoming;
   bool back = dot(normal, toEye) < 0.0;
@@ -925,7 +920,20 @@ void main() {
   }
   // The normal: the surface's own at this pixel, or the one carried from the vertices.
   vec3 normal = normalize(vNormal);
-  if (uPerPixel != 0) {
+  if (uPerPixel == 1) {
+    // From the map of the surface's normals laid over the part, between its four nearest texels.
+    vec2 grid = vec2(vUvs.x - floor(vUvs.x / uCellCount.x) * uCellCount.x, vUvs.y) / uCellCount * uGridSpan;
+    ivec2 corner = ivec2(floor(grid)), size = ivec2(uRect.zw);
+    vec2 f = grid - vec2(corner);
+    bool closes = size.x == int(uGridSpan.x);
+    int x0 = clamp(corner.x, 0, size.x - 1), x1 = closes ? (corner.x + 1) % size.x : min(corner.x + 1, size.x - 1);
+    int y0 = clamp(corner.y, 0, size.y - 1), y1 = min(corner.y + 1, size.y - 1);
+    ivec2 origin = ivec2(uRect.xy);
+    vec3 n = mix(mix(texelFetch(uGridNormals, origin + ivec2(x0, y0), 0).xyz, texelFetch(uGridNormals, origin + ivec2(x1, y0), 0).xyz, f.x),
+                 mix(texelFetch(uGridNormals, origin + ivec2(x0, y1), 0).xyz, texelFetch(uGridNormals, origin + ivec2(x1, y1), 0).xyz, f.x), f.y);
+    if (dot(n, n) > 1e-12) { normal = uPose * normalize(n); }
+  } else if (uPerPixel == 2) {
+    // The surface's own normal, evaluated here.
     vec3 p, du, dv;
     float side = vUvs.z > 1e-6 ? 1.0 : vUvs.z < -1e-6 ? -1.0 : 0.0;
     evalSurface(vUvs.x, vUvs.y + side * 1e-4, p, du, dv);
@@ -965,6 +973,8 @@ void main() {
   if (uWire == 2) { base = vec3(0.97, 0.97, 0.96); }
 
   vec3 colour = base;
+  vec3 debugHit = vec3(0.0);
+  int shadowSteps = 0;
   if (uLighting != 0) {
     float nl = dot(normal, uLight);
     float lit = 1.0;
@@ -979,6 +989,7 @@ void main() {
       if (uTraceOn != 0 && trust < 1.0 && litAt(vWorld + normal * 0.02, 0.3) < 1.0) { trust = 1.0; }
       if (uTraceOn != 0 && trust > 0.0) { lit += (litTraced(vWorld + normal * 0.02, bias, dFdx(vWorld), dFdy(vWorld)) - lit) * trust; }
     }
+    shadowSteps = traceSteps;
     float diffuse = max(0.0, nl) * lit;
     vec3 ambient = ambientOf(normal);
     if (uRoomLight != 0) {
@@ -1009,9 +1020,10 @@ void main() {
         int triangle;
         vec2 weights;
         float floorAt = uGroundOn != 0 && reflected.y < -1e-9 && origin.y > uGround ? (uGround - origin.y) / reflected.y : 1e30;
-        if (uImage == 0 && uTraceOn != 0 && traceRay(origin, reflected, 1e-3, floorAt, false, tHit, triangle, weights)) {
+        if (uImage == 0 && uTraceOn != 0 && traceRay(origin, reflected, 1e-3, floorAt, false, back || (uTricks & 1) == 0 ? -1 : uOwnRoot, uOwnNext, int(vClear + 0.5), (uTricks & 2) == 0 ? vec4(0.0) : vec4(normal, dot(normal, vWorld)), tHit, triangle, weights)) {
           // The teapot shows itself: the point the mirror ray reaches, lit as a surface seen at second hand.
           mirror = shadeHit(origin + reflected * tHit, reflected, triangle, weights);
+          debugHit = vec3(listAt(uMeshWhere, 3 * triangle).z + 1.0, tHit, float(triangle));
         } else if (uTraceOn == 0 && facesCavity(vUvs.y) && !leavesCavity(reflected)) {
           mirror = vec3(0.27, 0.26, 0.25);
         } else if (uImage == 0 && uGroundOn != 0 && reflected.y < -1e-9 && origin.y > uGround) {
@@ -1042,6 +1054,10 @@ void main() {
     colour = mix(colour, vec3(0.08, 0.09, 0.12), outline);
   }
   outColour = encode(colour);
+  if (uCountSteps == 1) { outColour = vec4(float(traceSteps % 256) / 255.0, float(traceSteps / 256) / 255.0, float(min(traceLeaves, 255)) / 255.0, 1.0); }
+  if (uCountSteps == 3) { outColour = vec4(debugHit.x / 16.0, clamp(debugHit.y, 0.0, 1.0), uPartIndex / 16.0, 1.0); }
+  if (uCountSteps == 4) { int tri = int(debugHit.z) + (debugHit.x > 0.0 ? 1 : 0); outColour = vec4(float(tri % 256) / 255.0, float((tri / 256) % 256) / 255.0, float(tri / 65536) / 255.0, 1.0); }
+  if (uCountSteps == 2) { outColour = vec4(back ? 1.0 : 0.0, vClear / 65535.0 > 0.0 ? 0.5 + 0.5 * fract(vClear / 256.0) : 0.0, float(min(shadowSteps, 255)) / 255.0, 1.0); }
 }
 `;
 
@@ -1122,38 +1138,6 @@ void main() {
 // (TeapotGpu.bakeSurface). There is no vertex buffer: a vertex's number says
 // which cell of the part's grid it belongs to and which corner, and its
 // point and normal are read from the grid.
-const GRID_VERTEX_GLSL = `#version 300 es
-precision highp float;
-precision highp int;
-precision highp sampler2D;
-uniform sampler2D uGridPoints, uGridNormals;
-uniform vec4 uRect;
-uniform vec2 uCellCount, uGridSpan;
-uniform int uPeriodic;
-uniform mat3 uPose;
-uniform vec3 uShift;
-uniform mat4 uViewProj;
-uniform vec3 uEyeAt;
-uniform float uNearer;
-uniform vec2 uImageOf;   // x > 0: draw the teapot's image in a floor at height y (as the eye sees it reflected there)
-out vec3 vWorld;
-out vec3 vNormal;
-out vec3 vUvs;
-void main() {
-  int w = int(uRect.z), across = int(uGridSpan.x);
-  int cell = gl_VertexID / 6, k = gl_VertexID % 6;
-  int column = cell % across + ((k == 1 || k == 2 || k == 4) ? 1 : 0), row = cell / across + ((k == 2 || k == 4 || k == 5) ? 1 : 0);
-  ivec2 texel = ivec2(int(uRect.x) + column % w, int(uRect.y) + row);
-  vWorld = uPose * texelFetch(uGridPoints, texel, 0).xyz + uShift;
-  vNormal = uPose * texelFetch(uGridNormals, texel, 0).xyz;
-  vUvs = vec3(vec2(float(column), float(row)) / uGridSpan * uCellCount, 0.0);
-  vec3 placed = vWorld + (uEyeAt - vWorld) * uNearer;
-  if (uImageOf.x > 0.0) { placed.y = 2.0 * uImageOf.y - placed.y; }
-  gl_Position = uViewProj * vec4(placed, 1.0);
-}
-`;
-
-// A rectangle of a map laid over a part's (u, v): one texel per place on the part.
 const MAP_VERTEX_GLSL = `#version 300 es
 uniform vec4 uRect;      // x, y, width, height in texels
 uniform vec2 uMapSize;
@@ -1185,66 +1169,6 @@ void main() {
   }
   outPoint = vec4(p, 1.0);
   outNormal = vec4(normalize(n), hidden(p, u, v) ? 0.0 : 1.0);
-}
-`;
-// What a ray needs to know of a grid texel: its part's left edge and width in the texture, whether a cell starts here, the part.
-const MAP_INFO_GLSL = `#version 300 es
-precision highp float;
-uniform vec4 uRect;
-uniform vec2 uGridSpan;
-uniform float uPartIndex;
-out vec4 outInfo;
-void main() {
-  vec2 at = gl_FragCoord.xy - 0.5 - uRect.xy;
-  outInfo = vec4(uRect.x, uRect.z, at.x < uGridSpan.x && at.y < uGridSpan.y ? 1.0 : 0.0, uPartIndex);
-}
-`;
-// The pyramid's lowest level: the box of every cell that is shown.
-const BOX_CELL_GLSL = `#version 300 es
-precision highp float;
-precision highp sampler2D;
-uniform sampler2D uGridPoints, uGridNormals, uGridInfo;
-layout(location = 0) out vec4 outLow;
-layout(location = 1) out vec4 outHigh;
-void main() {
-  ivec2 at = ivec2(gl_FragCoord.xy);
-  vec4 info = texelFetch(uGridInfo, at, 0);
-  outLow = vec4(1e30);
-  outHigh = vec4(-1e30);
-  if (texelFetch(uGridPoints, at, 0).a < 0.5 || info.z < 0.5) { return; }
-  int xn = at.x - int(info.x) == int(info.y) - 1 ? int(info.x) : at.x + 1;
-  ivec2 corner[4] = ivec2[4](at, ivec2(xn, at.y), ivec2(xn, at.y + 1), ivec2(at.x, at.y + 1));
-  float shown = 0.0;
-  vec3 low = vec3(1e30), high = vec3(-1e30);
-  for (int k = 0; k < 4; ++k) {
-    vec3 p = texelFetch(uGridPoints, corner[k], 0).xyz;
-    low = min(low, p);
-    high = max(high, p);
-    shown += texelFetch(uGridNormals, corner[k], 0).a;
-  }
-  if (shown < 0.5) { return; }   // wholly under a join
-  outLow = vec4(low, 1.0);
-  outHigh = vec4(high, 1.0);
-}
-`;
-// One level of the pyramid from the one below: the box of four boxes.
-const BOX_PARENT_GLSL = `#version 300 es
-precision highp float;
-precision highp sampler2D;
-uniform sampler2D uBoxMin, uBoxMax;
-layout(location = 0) out vec4 outLow;
-layout(location = 1) out vec4 outHigh;
-void main() {
-  ivec2 at = ivec2(gl_FragCoord.xy) * 2;
-  vec4 low = vec4(1e30), high = vec4(-1e30);
-  for (int k = 0; k < 4; ++k) {
-    ivec2 c = at + ivec2(k & 1, k >> 1);
-    // While this level is drawn the textures' base level is the one below it: level 0 here.
-    low = min(low, texelFetch(uBoxMin, c, 0));
-    high = max(high, texelFetch(uBoxMax, c, 0));
-  }
-  outLow = low;
-  outHigh = high;
 }
 `;
 // Peeling along a direction: the next layer of the body behind the one taken
@@ -1475,6 +1399,747 @@ void main() {
 }
 `;
 
+// The mesh the teapot is drawn and traced from: the bounded form of the
+// paper's layouts from the metric (tools/mesh_study.cpp, "nodes bounded,
+// checked"). The seeds are the lattice's own nodes; each lattice cell is
+// meshed alone, with more vertices only inside the cell that needs them; the
+// test is the checked one: a chord may stray from the surface by no more
+// than a distance, and the normal may turn along it by no more than an angle.
+//
+// Adapted to how a GPU works, each step is a pass in which every cell, edge
+// or vertex is found independently:
+//   factors   one fragment a lattice cell: along the cell's two edges and its
+//             middle line each way, the fewest equal steps (1, 2, 4, 8 or 16)
+//             that pass the test. The cell's interior takes the largest each
+//             way; each edge keeps its own count. An edge's count depends on
+//             the edge alone, so the two cells that share it agree without
+//             being told;
+//   layout    the cells' triangle counts are summed in order (on the CPU: a
+//             few thousand numbers) so that every triangle has a place;
+//   vertices  one fragment a triangle corner: which cell, which corner of
+//             which step, snapped along an edge to that edge's own count so
+//             that neighbours meet; the surface there, its normal, whether it
+//             is shown. Three texels a triangle, in order: drawing and tracing
+//             read them straight through;
+//   boxes     one fragment a pair of triangles (one step of a cell), its box;
+//             one fragment a cell, the box of its pairs; then one fragment a
+//             node of a tree, the box of the cells or pairs under it. The
+//             tree halves a part's cells by where they are in space, down to
+//             one cell, and goes on halving the cell's steps down to one
+//             pair. Which cells or pairs a node stands for, and where it lies
+//             in the list, is planned on the CPU from the cells' boxes, which
+//             the GPU finds (a few thousand boxes); the nodes are written
+//             in the order a ray walks them, each with the node to go on from
+//             if the ray misses it. A ray needs no stack and makes no
+//             decision but "hit or miss".
+const MESH_COMMON_GLSL = `
+uniform vec2 uCellCount;
+uniform int uPeriodic;
+// The surface and its unit normal; at a pole, the normal a little way along the part.
+void surfaceAt(float u, float v, out vec3 p, out vec3 n) {
+  vec3 du, dv;
+  evalSurface(u, v, p, du, dv);
+  n = cross(du, dv);
+  if (dot(n, n) < 1e-16) {
+    vec3 q;
+    evalSurface(u, v < 0.5 * uCellCount.y ? v + 0.05 : v - 0.05, q, du, dv);
+    n = cross(du, dv);
+  }
+  n = normalize(n);
+}
+// A column around a part that closes on itself is evaluated where its twin is: the last is the first.
+float around(float u) { return uPeriodic != 0 && u >= uCellCount.x ? u - uCellCount.x : u; }
+`;
+
+// The surface at eight places to a cell each way, every part's samples side by side: point and
+// whether it is shown; unit normal. Each is found once and read by the cells on both sides of it.
+const MESH_SAMPLE_GLSL = `#version 300 es
+${CONV_GLSL}
+${TRIM_GLSL}
+${MESH_COMMON_GLSL}
+uniform vec4 uRect;
+layout(location = 0) out vec4 outPoint;
+layout(location = 1) out vec4 outNormal;
+void main() {
+  vec2 at = floor(gl_FragCoord.xy - uRect.xy) / 8.0;
+  vec3 p, n;
+  surfaceAt(at.x, at.y, p, n);
+  outPoint = vec4(p, hidden(p, at.x, at.y) ? 0.0 : 1.0);
+  outNormal = vec4(n, 0.0);
+}
+`;
+
+const MESH_FACTOR_GLSL = `#version 300 es
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+uniform sampler2D uSamplePoints, uSampleNormals;
+uniform vec4 uRect;          // the part's cells in the target
+uniform vec4 uSampleRect;    // the part's samples: eight to a cell
+uniform int uPeriodic;
+uniform float uTolerance, uAngle;
+out vec4 outFactors;
+ivec2 sampleAt(ivec2 at) {
+  int wide = int(uSampleRect.z);
+  return ivec2(uSampleRect.xy) + ivec2(uPeriodic != 0 ? at.x % wide : at.x, at.y);
+}
+// The fewest equal steps along one side or middle line of the cell that pass, from its eight
+// pieces: a chord of 1/k of the line strays by |P''| / (8 k^2) and the normal turns by
+// |N'| / k along it, so k is the larger of sqrt(|P''| / (8 tolerance)) and |N'| / angle where
+// they are largest.
+float stepsAlong(ivec2 from, ivec2 direction) {
+  float bend = 0.0, turn = 0.0, size = 0.0;
+  for (int k = 0; k < 8; ++k) {
+    ivec2 a = sampleAt(from + direction * k), b = sampleAt(from + direction * (k + 1));
+    vec3 pa = texelFetch(uSamplePoints, a, 0).xyz, pb = texelFetch(uSamplePoints, b, 0).xyz;
+    size += distance(pa, pb);
+    turn = max(turn, acos(clamp(dot(texelFetch(uSampleNormals, a, 0).xyz, texelFetch(uSampleNormals, b, 0).xyz), -1.0, 1.0)));
+    if (k > 0) { bend = max(bend, length(texelFetch(uSamplePoints, sampleAt(from + direction * (k - 1)), 0).xyz - 2.0 * pa + pb)); }
+  }
+  if (size < 1e-7) { return 1.0; }   // a pole: no length
+  // bend is |P''| / 64 and turn is |N'| / 8.
+  return clamp(ceil(max(sqrt(8.0 * bend / uTolerance), 8.0 * turn / uAngle) - 1e-3), 1.0, 16.0);
+}
+void main() {
+  ivec2 cell = ivec2(floor(gl_FragCoord.xy - uRect.xy)) * 8;
+  float low = stepsAlong(cell, ivec2(1, 0)), middle = stepsAlong(cell + ivec2(0, 4), ivec2(1, 0)), high = stepsAlong(cell + ivec2(0, 8), ivec2(1, 0));
+  float left = stepsAlong(cell, ivec2(0, 1)), centre = stepsAlong(cell + ivec2(4, 0), ivec2(0, 1)), right = stepsAlong(cell + ivec2(8, 0), ivec2(0, 1));
+  float a = max(low, max(middle, high)), b = max(left, max(centre, right));
+  // A cell a join's edge crosses is meshed finer, so that its triangles follow the edge.
+  float shown = 0.0;
+  for (int k = 0; k < 9; ++k) { shown += texelFetch(uSamplePoints, sampleAt(cell + 4 * ivec2(k % 3, k / 3)), 0).w; }
+  if (shown > 0.5 && shown < 8.5) { a = max(a, 8.0); b = max(b, 8.0); }
+  outFactors = vec4(a, b, low * 64.0 + high, left * 64.0 + right);
+}
+`;
+
+// The box of each cell's samples that are shown: what the tree is planned from.
+const MESH_SAMPLE_BOX_GLSL = `#version 300 es
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+uniform sampler2D uSamplePoints;
+uniform vec4 uRect, uSampleRect;
+uniform int uPeriodic;
+layout(location = 0) out vec4 outLow;
+layout(location = 1) out vec4 outHigh;
+void main() {
+  ivec2 cell = ivec2(floor(gl_FragCoord.xy - uRect.xy)) * 8, origin = ivec2(uSampleRect.xy), size = ivec2(uSampleRect.zw);
+  vec3 low = vec3(1e30), high = vec3(-1e30);
+  for (int y = 0; y <= 8; ++y) {
+    for (int x = 0; x <= 8; ++x) {
+      ivec2 at = cell + ivec2(x, y);
+      if (uPeriodic != 0) { at.x = at.x % size.x; }
+      vec4 p = texelFetch(uSamplePoints, origin + at, 0);
+      if (p.w < 0.5) { continue; }
+      low = min(low, p.xyz);
+      high = max(high, p.xyz);
+    }
+  }
+  outLow = vec4(low, 0.0);
+  outHigh = vec4(high, 0.0);
+}
+`;
+
+// Which blocks of its own part a cell is not clear of. A part's tree has up to sixteen blocks
+// (its nodes four levels down). A block is clear of a cell if all of it lies on or behind the
+// tangent plane at nine places of the cell: a ray that leaves the cell outward stays in front
+// of its own tangent plane and so cannot meet that block. The answer is a number whose bit b
+// is set if block b is not clear; 0 means the ray has only the other parts to look for.
+const MESH_CLEAR_GLSL = `#version 300 es
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+uniform sampler2D uSamplePoints, uSampleNormals, uCellBlock;
+uniform vec4 uRect, uSampleRect;
+uniform int uPeriodic, uCellBase, uCu, uCv;
+uniform float uOrientation, uMargin;
+out vec4 outClear;
+void main() {
+  ivec2 cell = ivec2(floor(gl_FragCoord.xy - uRect.xy)) * 8, origin = ivec2(uSampleRect.xy), size = ivec2(uSampleRect.zw);
+  vec3 point[9], normal[9];
+  for (int k = 0; k < 9; ++k) {
+    ivec2 at = cell + 4 * ivec2(k % 3, k / 3);
+    if (uPeriodic != 0) { at.x = at.x % size.x; }
+    point[k] = texelFetch(uSamplePoints, origin + at, 0).xyz;
+    normal[k] = texelFetch(uSampleNormals, origin + at, 0).xyz * uOrientation;
+  }
+  int mask = 0;
+  for (int j = 0; j < uCv; ++j) {
+    for (int i = 0; i < uCu; ++i) {
+      int index = uCellBase + j * uCu + i;
+      int block = int(texelFetch(uCellBlock, ivec2(index & 2047, index >> 11), 0).x);
+      if (block < 0 || ((mask >> block) & 1) != 0) { continue; }
+      // Every other sample of the other cell, its edges included.
+      float above = -1e30;
+      for (int y = 0; y <= 8; y += 2) {
+        for (int x = 0; x <= 8; x += 2) {
+          ivec2 at = ivec2(8 * i + x, 8 * j + y);
+          if (uPeriodic != 0) { at.x = at.x % size.x; }
+          vec4 p = texelFetch(uSamplePoints, origin + at, 0);
+          if (p.w < 0.5) { continue; }   // under a join
+          for (int k = 0; k < 9; ++k) { above = max(above, dot(normal[k], p.xyz - point[k])); }
+        }
+      }
+      if (above > uMargin) { mask |= 1 << block; }
+    }
+  }
+  outClear = vec4(float(mask), 0.0, 0.0, 0.0);
+}
+`;
+
+const MESH_VERTEX_BUILD_GLSL = `#version 300 es
+${CONV_GLSL}
+${TRIM_GLSL}
+${MESH_COMMON_GLSL}
+uniform sampler2D uCellTable;   // per cell two texels: first triangle, steps around, steps along, part; column, row, edge counts
+uniform sampler2D uClear;       // per cell: which blocks of its own part it is not clear of
+uniform sampler2D uCellBlock;   // per cell: its block, or -1 if none of the cell is shown
+uniform vec4 uClearRect;
+uniform int uCellBase, uCellEnd, uFirstVertex, uVertexEnd;
+uniform float uPartIndex;
+layout(location = 0) out vec4 outPoint;    // the point; 1 if any of its cell is shown (then a ray meets all of the cell)
+layout(location = 1) out vec4 outNormal;   // the unit normal; the blocks of its own part its cell is not clear of
+layout(location = 2) out vec4 outWhere;    // u, v, part, cell
+vec4 cellAt(int i) { return texelFetch(uCellTable, ivec2(i & 2047, i >> 11), 0); }
+void main() {
+  int slot = int(gl_FragCoord.y) * 2048 + int(gl_FragCoord.x);
+  if (slot < uFirstVertex || slot >= uVertexEnd) { discard; }
+  int triangle = slot / 3, corner = slot % 3;
+  // The cell this triangle is in: the last whose first triangle is not after it.
+  int low = uCellBase, high = uCellEnd;
+  for (int step = 0; step < 16 && low + 1 < high; ++step) {
+    int mid = (low + high) / 2;
+    if (int(cellAt(2 * mid).x) <= triangle) { low = mid; } else { high = mid; }
+  }
+  vec4 cell = cellAt(2 * low), more = cellAt(2 * low + 1);
+  int a = int(cell.y), b = int(cell.z), local = triangle - int(cell.x);
+  int quad = local / 2, second = local % 2;
+  // The corner of the step: (0,0),(1,0),(1,1) for the first triangle, (0,0),(1,1),(0,1) for the second.
+  int dx = corner == 0 ? 0 : (second == 0 || corner == 1) ? 1 : 0;
+  int dy = corner == 0 ? 0 : (second == 1 || corner == 2) ? 1 : 0;
+  int ci = quad % a + dx, cj = quad / a + dy;
+  float fu = float(ci) / float(a), fv = float(cj) / float(b);
+  // On an edge, the place of the edge's own vertex at or before this one: the neighbour does the same.
+  int low2 = int(more.z) / 64, high2 = int(more.z) % 64, left = int(more.w) / 64, right = int(more.w) % 64;
+  if (cj == 0) { fu = float((ci * low2) / a) / float(low2); }
+  if (cj == b) { fu = float((ci * high2) / a) / float(high2); }
+  if (ci == 0) { fv = float((cj * left) / b) / float(left); }
+  if (ci == a) { fv = float((cj * right) / b) / float(right); }
+  float u = more.x + fu, v = more.y + fv;
+  vec3 p, n;
+  surfaceAt(around(u), v, p, n);
+  // A join's band and the flat pieces of the part under it do not meet exactly where the part is cut away,
+  // so for rays a cell with any of it shown is whole: nothing slips in under the band.
+  outPoint = vec4(p, texelFetch(uCellBlock, ivec2(low & 2047, low >> 11), 0).x < -0.5 ? 0.0 : 1.0);
+  outNormal = vec4(n, texelFetch(uClear, ivec2(uClearRect.xy) + ivec2(more.xy), 0).x);
+  outWhere = vec4(u, v, uPartIndex, float(low));
+}
+`;
+
+// The box of each pair of triangles (one step of a cell) that is shown, in the triangles' order.
+const MESH_QUAD_BOX_GLSL = `#version 300 es
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+uniform sampler2D uMeshPoints;
+uniform int uQuadCount;
+layout(location = 0) out vec4 outLow;
+layout(location = 1) out vec4 outHigh;
+void main() {
+  int index = int(gl_FragCoord.y) * 2048 + int(gl_FragCoord.x);
+  outLow = vec4(1e30);
+  outHigh = vec4(-1e30);
+  if (index >= uQuadCount) { return; }
+  vec3 low = vec3(1e30), high = vec3(-1e30);
+  float shown = 0.0;
+  for (int k = 0; k < 6; ++k) {
+    vec4 p = texelFetch(uMeshPoints, ivec2((6 * index + k) & 2047, (6 * index + k) >> 11), 0);
+    low = min(low, p.xyz);
+    high = max(high, p.xyz);
+    shown += p.w;
+  }
+  if (shown < 0.5) { return; }   // wholly under a join
+  outLow = vec4(low, 0.0);
+  outHigh = vec4(high, 0.0);
+}
+`;
+// The box of each cell: of its pairs' boxes.
+const MESH_CELL_BOX_GLSL = `#version 300 es
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+uniform sampler2D uCellTable, uQuadLow, uQuadHigh;
+uniform int uCellCount;
+layout(location = 0) out vec4 outLow;
+layout(location = 1) out vec4 outHigh;
+vec4 lin(sampler2D t, int i) { return texelFetch(t, ivec2(i & 2047, i >> 11), 0); }
+void main() {
+  int index = int(gl_FragCoord.y) * 2048 + int(gl_FragCoord.x);
+  outLow = vec4(1e30);
+  outHigh = vec4(-1e30);
+  if (index >= uCellCount) { return; }
+  vec4 cell = lin(uCellTable, 2 * index);
+  int first = int(cell.x) / 2, count = int(cell.y) * int(cell.z);
+  vec3 low = vec3(1e30), high = vec3(-1e30);
+  for (int q = 0; q < count; ++q) {
+    low = min(low, lin(uQuadLow, first + q).xyz);
+    high = max(high, lin(uQuadHigh, first + q).xyz);
+  }
+  outLow = vec4(low, 0.0);
+  outHigh = vec4(high, 0.0);
+}
+`;
+// A node of the tree, from the plan: its box, the node to go on from on a miss, and its two
+// triangles if it is one pair. One texel of four whole numbers a node, so that a step of a ray's
+// walk is one read: the box's corners in steps of 1/65535 of the teapot's own box, rounded
+// outward (low x | low y << 16, low z | high x << 16, high y | high z << 16); then the node to go
+// on from in 24 bits, or for a pair its first triangle (the node to go on from is then the next),
+// with the top bits saying which: 128 a pair, otherwise the block of its part it is.
+// The plan, three texels a node: (0, first of its cells in the list, how many), (0, go on from)
+// for a stretch of cells; (1, cell, first step around, first step along), (end around, end along, go on from, 0) inside a cell;
+// then (the block of its part it is, from 1, or 0).
+const MESH_TREE_GLSL = `#version 300 es
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+uniform sampler2D uPlan, uCellTable, uCellList, uCellLow, uCellHigh, uQuadLow, uQuadHigh;
+uniform int uNodeCount;
+uniform vec3 uTreeLow;
+uniform float uTreeStep;
+out uvec4 outNode;
+vec4 lin(sampler2D t, int i) { return texelFetch(t, ivec2(i & 2047, i >> 11), 0); }
+void main() {
+  int node = int(gl_FragCoord.y) * 2048 + int(gl_FragCoord.x);
+  if (node >= uNodeCount) { outNode = uvec4(0u); return; }
+  vec4 plan = lin(uPlan, 3 * node), more = lin(uPlan, 3 * node + 1);
+  float band = lin(uPlan, 3 * node + 2).x;
+  vec3 low = vec3(1e30), high = vec3(-1e30);
+  float next, pair = 0.0, first = 0.0;
+  if (plan.x < 0.5) {
+    int listed = int(plan.y), count = int(plan.z);
+    next = more.y;
+    for (int k = 0; k < count; ++k) {
+      int cell = int(lin(uCellList, listed + k).x);
+      low = min(low, lin(uCellLow, cell).xyz);
+      high = max(high, lin(uCellHigh, cell).xyz);
+    }
+  } else {
+    vec4 cell = lin(uCellTable, 2 * int(plan.y));
+    int around = int(cell.y), quads = int(cell.x) / 2;
+    int x0 = int(plan.z), y0 = int(plan.w), x1 = int(more.x), y1 = int(more.y);
+    next = more.z;
+    for (int y = y0; y < y1; ++y) {
+      for (int x = x0; x < x1; ++x) {
+        low = min(low, lin(uQuadLow, quads + y * around + x).xyz);
+        high = max(high, lin(uQuadHigh, quads + y * around + x).xyz);
+      }
+    }
+    if (x1 - x0 == 1 && y1 - y0 == 1) {
+      pair = 1.0;
+      first = cell.x + float(2 * (y0 * around + x0));
+    }
+  }
+  uvec3 a = uvec3(65535u), b = uvec3(0u);   // nothing in it
+  if (low.x <= high.x) {
+    a = uvec3(clamp(floor((low - uTreeLow) / uTreeStep), 0.0, 65535.0));
+    b = uvec3(clamp(ceil((high - uTreeLow) / uTreeStep), 0.0, 65535.0));
+  }
+  uint last = pair > 0.5 ? uint(first) | (128u << 24) : uint(next) | (uint(band) << 24);
+  outNode = uvec4(a.x | (a.y << 16), a.z | (b.x << 16), b.y | (b.z << 16), last);
+}
+`;
+
+// A vertex of the mesh: read from the three textures by its number.
+const MESH_VERTEX_GLSL = `#version 300 es
+precision highp float;
+precision highp int;
+precision highp sampler2D;
+uniform sampler2D uMeshPoints, uMeshNormals, uMeshWhere;
+uniform int uFirstVertex;
+uniform mat3 uPose;
+uniform vec3 uShift;
+uniform mat4 uViewProj;
+uniform vec3 uEyeAt;
+uniform float uNearer;
+uniform vec2 uImageOf;   // x > 0: draw the teapot's image in a floor at height y (as the eye sees it reflected there)
+out vec3 vWorld;
+out vec3 vNormal;
+out vec3 vUvs;
+out float vClear;   // the blocks of its own part the cell is not clear of, as bits
+void main() {
+  int slot = uFirstVertex + gl_VertexID;
+  ivec2 texel = ivec2(slot & 2047, slot >> 11);
+  vWorld = uPose * texelFetch(uMeshPoints, texel, 0).xyz + uShift;
+  vec4 normal = texelFetch(uMeshNormals, texel, 0);
+  vNormal = uPose * normal.xyz;
+  vClear = normal.w;
+  vUvs = vec3(texelFetch(uMeshWhere, texel, 0).xy, 0.0);
+  vec3 placed = vWorld + (uEyeAt - vWorld) * uNearer;
+  if (uImageOf.x > 0.0) { placed.y = 2.0 * uImageOf.y - placed.y; }
+  gl_Position = uViewProj * vec4(placed, 1.0);
+}
+`;
+
+class BoundedMesh {
+  constructor(gpu) {
+    this.gpu = gpu;
+    const gl = gpu.gl;
+    this.sampleProgram = gpu.program(MAP_VERTEX_GLSL, MESH_SAMPLE_GLSL);
+    this.factorProgram = gpu.program(MAP_VERTEX_GLSL, MESH_FACTOR_GLSL);
+    this.clearProgram = gpu.program(MAP_VERTEX_GLSL, MESH_CLEAR_GLSL);
+    this.sampleBoxProgram = gpu.program(MAP_VERTEX_GLSL, MESH_SAMPLE_BOX_GLSL);
+    this.sampleBoxes = this.target(512, 512, 2);
+    this.clear = this.target(512, 512, 1);
+    this.vertexProgram = gpu.program(ROOM_VERTEX_GLSL, MESH_VERTEX_BUILD_GLSL);
+    this.quadBoxProgram = gpu.program(ROOM_VERTEX_GLSL, MESH_QUAD_BOX_GLSL);
+    this.cellBoxProgram = gpu.program(ROOM_VERTEX_GLSL, MESH_CELL_BOX_GLSL);
+    this.treeProgram = gpu.program(ROOM_VERTEX_GLSL, MESH_TREE_GLSL);
+    this.factorSize = 512;
+    this.factors = this.target(this.factorSize, this.factorSize, 1);
+    this.textures = {};
+  }
+
+  // A float target of `count` textures (2048 wide for the lists).
+  target(width, height, count) {
+    const gl = this.gpu.gl;
+    const framebuffer = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+    const textures = [];
+    for (let k = 0; k < count; ++k) {
+      const texture = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32F, width, height);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0 + k, gl.TEXTURE_2D, texture, 0);
+      textures.push(texture);
+    }
+    gl.drawBuffers(textures.map((_, k) => gl.COLOR_ATTACHMENT0 + k));
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return { framebuffer, textures, width, height };
+  }
+  // A list of whole numbers, four to a texel.
+  wholeList(key, texels) {
+    const gl = this.gpu.gl, rows = Math.max(1, Math.ceil(texels / 2048));
+    const old = this.textures[key];
+    if (old && old.height >= rows) { return old; }
+    if (old) { gl.deleteTexture(old.textures[0]); gl.deleteFramebuffer(old.framebuffer); }
+    const framebuffer = gl.createFramebuffer(), texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA32UI, 2048, rows + 8);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffer);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, texture, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return (this.textures[key] = { framebuffer, textures: [texture], width: 2048, height: rows + 8 });
+  }
+  // A list target with room for `texels`, kept if it is already large enough.
+  list(key, texels, count) {
+    const gl = this.gpu.gl, rows = Math.max(1, Math.ceil(texels / 2048));
+    const old = this.textures[key];
+    if (old && old.height >= rows) { return old; }
+    if (old) { old.textures.forEach((texture) => gl.deleteTexture(texture)); gl.deleteFramebuffer(old.framebuffer); }
+    return (this.textures[key] = this.target(2048, rows + 8, count));
+  }
+
+  build(tolerance, degrees) {
+    const g = this.gpu, gl = g.gl, parts = g.parts;
+    const started = performance.now();
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.BLEND);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.bindVertexArray(g.emptyVao);
+    const surfaceInputs = (u) => {
+      gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, g.textures.cells); gl.uniform1i(u.uCells, 0);
+      gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, g.textures.shapes); gl.uniform1i(u.uShapes, 1);
+      gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, g.textures.trims); gl.uniform1i(u.uTrimData, 2);
+      gl.activeTexture(gl.TEXTURE15); gl.bindTexture(gl.TEXTURE_2D, g.textures.nodes); gl.uniform1i(u.uNodes, 15);
+      gl.activeTexture(gl.TEXTURE11); gl.bindTexture(gl.TEXTURE_2D, g.textures.patches); gl.uniform1i(u.uPatches, 11);
+      gl.uniform1i(u.uCut, 0);
+    };
+
+    // 1. Factors: a rectangle of cells for each part, side by side.
+    let x = 0, y = 0, shelf = 0;
+    for (const part of parts) {
+      const [cu, cv] = part.cells;
+      if (x + cu > this.factorSize) { x = 0; y += shelf; shelf = 0; }
+      part.factorRect = [x, y, cu, cv];
+      x += cu;
+      shelf = Math.max(shelf, cv);
+      if (y + cv > this.factorSize) { throw new Error('too many cells for the mesh'); }
+    }
+    // The samples the factors are read from: eight to a cell, one more at the far side of a part that does not close.
+    let sampleSize = 1024;
+    for (;; sampleSize *= 2) {
+      let sx = 0, sy = 0, tall = 0, fits = true;
+      for (const part of parts) {
+        const w = 8 * part.cells[0] + (part.wrap ? 0 : 1), h = 8 * part.cells[1] + 1;
+        if (sx + w > sampleSize) { sx = 0; sy += tall; tall = 0; }
+        part.sampleRect = [sx, sy, w, h];
+        sx += w;
+        tall = Math.max(tall, h);
+        fits = fits && w <= sampleSize && sy + h <= sampleSize;
+      }
+      if (fits || sampleSize >= 4096) { break; }
+    }
+    if (!this.samples || this.samples.width !== sampleSize) {
+      if (this.samples) { this.samples.textures.forEach((texture) => gl.deleteTexture(texture)); gl.deleteFramebuffer(this.samples.framebuffer); }
+      this.samples = this.target(sampleSize, sampleSize, 2);
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.samples.framebuffer);
+    gl.viewport(0, 0, sampleSize, sampleSize);
+    gl.useProgram(this.sampleProgram.program);
+    let u = this.sampleProgram.uniforms;
+    surfaceInputs(u);
+    gl.uniform2f(u.uMapSize, sampleSize, sampleSize);
+    parts.forEach((part, index) => {
+      g.setPart(part, index, false, u);
+      gl.uniform4fv(u.uRect, part.sampleRect);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    });
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.factors.framebuffer);
+    gl.viewport(0, 0, this.factorSize, this.factorSize);
+    gl.useProgram(this.factorProgram.program);
+    u = this.factorProgram.uniforms;
+    gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, this.samples.textures[0]); gl.uniform1i(u.uSamplePoints, 3);
+    gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, this.samples.textures[1]); gl.uniform1i(u.uSampleNormals, 4);
+    gl.uniform2f(u.uMapSize, this.factorSize, this.factorSize);
+    gl.uniform1f(u.uTolerance, tolerance);
+    gl.uniform1f(u.uAngle, degrees * Math.PI / 180);
+    parts.forEach((part, index) => {
+      gl.uniform4fv(u.uRect, part.factorRect);
+      gl.uniform4fv(u.uSampleRect, part.sampleRect);
+      gl.uniform1i(u.uPeriodic, part.wrap ? 1 : 0);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    });
+
+    // The tree over each part's cells is planned from where the cells are: the box of each cell's
+    // samples is found here and read back, and the cells are halved by the middle of their boxes
+    // along the longest way, down to one cell (a few thousand boxes; whole numbers and comparisons).
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.sampleBoxes.framebuffer);
+    gl.useProgram(this.sampleBoxProgram.program);
+    u = this.sampleBoxProgram.uniforms;
+    gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, this.samples.textures[0]); gl.uniform1i(u.uSamplePoints, 3);
+    gl.uniform2f(u.uMapSize, this.factorSize, this.factorSize);
+    for (const part of parts) {
+      gl.uniform4fv(u.uRect, part.factorRect);
+      gl.uniform4fv(u.uSampleRect, part.sampleRect);
+      gl.uniform1i(u.uPeriodic, part.wrap ? 1 : 0);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    }
+    let cellTotal = 0;
+    for (const part of parts) { part.cellBase = cellTotal; cellTotal += part.cells[0] * part.cells[1]; }
+    const cellBlock = new Float32Array(cellTotal * 4).fill(-1);
+    const least = [1e30, 1e30, 1e30], most = [-1e30, -1e30, -1e30];
+    for (const part of parts) {
+      const [fx, fy, cu, cv] = part.factorRect, low = new Float32Array(cu * cv * 4), high = new Float32Array(cu * cv * 4);
+      gl.readBuffer(gl.COLOR_ATTACHMENT0);
+      gl.readPixels(fx, fy, cu, cv, gl.RGBA, gl.FLOAT, low);
+      gl.readBuffer(gl.COLOR_ATTACHMENT1);
+      gl.readPixels(fx, fy, cu, cv, gl.RGBA, gl.FLOAT, high);
+      gl.readBuffer(gl.COLOR_ATTACHMENT0);
+      const middle = (c, axis) => 0.5 * (low[c * 4 + axis] + high[c * 4 + axis]);
+      const shown = [];
+      for (let c = 0; c < cu * cv; ++c) {
+        if (!(low[c * 4] <= high[c * 4])) { continue; }
+        shown.push(c);
+        for (let a = 0; a < 3; ++a) { least[a] = Math.min(least[a], low[c * 4 + a]); most[a] = Math.max(most[a], high[c * 4 + a]); }
+      }
+      // A node: its cells (a stretch of `order`), its two halves, and which block it is (from 1) four levels down.
+      part.order = shown;
+      let blocks = 0;
+      const split = (first, count, depth) => {
+        const node = { first, count, block: 0, halves: null };
+        if (depth === 4 || (count === 1 && depth < 4)) {
+          node.block = ++blocks;
+          for (let k = first; k < first + count; ++k) { cellBlock[(part.cellBase + shown[k]) * 4] = node.block - 1; }
+        }
+        if (count > 1) {
+          let axis = 0, widest = -1;
+          for (let a = 0; a < 3; ++a) {
+            let least = 1e30, most = -1e30;
+            for (let k = first; k < first + count; ++k) { const m = middle(shown[k], a); least = Math.min(least, m); most = Math.max(most, m); }
+            if (most - least > widest) { widest = most - least; axis = a; }
+          }
+          const part2 = shown.slice(first, first + count).sort((a, b) => middle(a, axis) - middle(b, axis));
+          for (let k = 0; k < count; ++k) { shown[first + k] = part2[k]; }
+          const half = count >> 1;
+          node.halves = [split(first, half, depth + 1), split(first + half, count - half, depth + 1)];
+        }
+        return node;
+      };
+      part.root = shown.length > 0 ? split(0, shown.length, 0) : null;
+      part.blocks = blocks;
+    }
+    g.floatTexture('meshCellBlock', cellBlock, 4);
+    // The teapot's own box, a little larger, in 65535 steps: the tree's boxes are written in these.
+    const widest = Math.max(1e-6, most[0] - least[0], most[1] - least[1], most[2] - least[2]) * 1.02;
+    this.treeLow = least.map((x, a) => x - 0.5 * (widest - (most[a] - least[a])) - 0.005 * widest);
+    this.treeStep = widest * 1.01 / 65535;
+
+    // Which blocks of its own part each cell is not clear of.
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.clear.framebuffer);
+    gl.useProgram(this.clearProgram.program);
+    u = this.clearProgram.uniforms;
+    gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, this.samples.textures[0]); gl.uniform1i(u.uSamplePoints, 3);
+    gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, this.samples.textures[1]); gl.uniform1i(u.uSampleNormals, 4);
+    gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_2D, g.textures.meshCellBlock); gl.uniform1i(u.uCellBlock, 5);
+    gl.uniform2f(u.uMapSize, this.factorSize, this.factorSize);
+    gl.uniform1f(u.uMargin, 1e-3);
+    for (const part of parts) {
+      gl.uniform4fv(u.uRect, part.factorRect);
+      gl.uniform4fv(u.uSampleRect, part.sampleRect);
+      gl.uniform1i(u.uPeriodic, part.wrap ? 1 : 0);
+      gl.uniform1f(u.uOrientation, part.orientation);
+      gl.uniform1i(u.uCellBase, part.cellBase);
+      gl.uniform1i(u.uCu, part.cells[0]);
+      gl.uniform1i(u.uCv, part.cells[1]);
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.factors.framebuffer);
+    const stage = [];
+    const mark = () => { const texel = new Float32Array(4); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, texel); stage.push(Math.round(performance.now() - started)); };
+    mark();
+    // 2. Layout: every cell's first triangle, in order.
+    const cells = cellTotal;
+    let triangles = 0;
+    const table = new Float32Array(cells * 8);
+    parts.forEach((part, index) => {
+      const [fx, fy, cu, cv] = part.factorRect, found = new Float32Array(cu * cv * 4);
+      gl.readPixels(fx, fy, cu, cv, gl.RGBA, gl.FLOAT, found);
+      part.firstTriangle = triangles;
+      for (let j = 0; j < cv; ++j) {
+        for (let i = 0; i < cu; ++i) {
+          const f = found.subarray((j * cu + i) * 4, (j * cu + i) * 4 + 4), cell = part.cellBase + j * cu + i;
+          table.set([triangles, f[0], f[1], index, i, j, f[2], f[3]], cell * 8);
+          triangles += 2 * f[0] * f[1];
+        }
+      }
+      part.triangles = triangles - part.firstTriangle;
+    });
+    g.floatTexture('meshCells', table, 4);
+    this.cells = cells;
+    this.triangles = triangles;
+
+    // 3. Vertices: three texels a triangle.
+    const mesh = this.list('mesh', triangles * 3, 3);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, mesh.framebuffer);
+    gl.viewport(0, 0, 2048, mesh.height);
+    gl.useProgram(this.vertexProgram.program);
+    u = this.vertexProgram.uniforms;
+    surfaceInputs(u);
+    gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, g.textures.meshCells); gl.uniform1i(u.uCellTable, 3);
+    gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, this.clear.textures[0]); gl.uniform1i(u.uClear, 4);
+    gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_2D, g.textures.meshCellBlock); gl.uniform1i(u.uCellBlock, 5);
+    gl.enable(gl.SCISSOR_TEST);
+    parts.forEach((part, index) => {
+      if (part.triangles === 0) { return; }
+      g.setPart(part, index, false, u);
+      gl.uniform4fv(u.uClearRect, part.factorRect);
+      const first = part.firstTriangle * 3, end = first + part.triangles * 3;
+      gl.uniform1i(u.uCellBase, part.cellBase);
+      gl.uniform1i(u.uCellEnd, part.cellBase + part.cells[0] * part.cells[1]);
+      gl.uniform1i(u.uFirstVertex, first);
+      gl.uniform1i(u.uVertexEnd, end);
+      gl.uniform1f(u.uPartIndex, index);
+      const top = Math.floor(first / 2048), bottom = Math.floor((end - 1) / 2048);
+      gl.scissor(0, top, 2048, bottom - top + 1);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    });
+    gl.disable(gl.SCISSOR_TEST);
+    mark();
+
+    // 4. The box of every pair of triangles, then of every cell.
+    const quads = this.list('quadBoxes', triangles / 2, 2);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, quads.framebuffer);
+    gl.viewport(0, 0, 2048, quads.height);
+    gl.useProgram(this.quadBoxProgram.program);
+    u = this.quadBoxProgram.uniforms;
+    gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, mesh.textures[0]); gl.uniform1i(u.uMeshPoints, 4);
+    gl.uniform1i(u.uQuadCount, triangles / 2);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    const boxes = this.list('cellBoxes', cells, 2);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, boxes.framebuffer);
+    gl.viewport(0, 0, 2048, boxes.height);
+    gl.useProgram(this.cellBoxProgram.program);
+    u = this.cellBoxProgram.uniforms;
+    gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, g.textures.meshCells); gl.uniform1i(u.uCellTable, 3);
+    gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, quads.textures[0]); gl.uniform1i(u.uQuadLow, 4);
+    gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_2D, quads.textures[1]); gl.uniform1i(u.uQuadHigh, 5);
+    gl.uniform1i(u.uCellCount, cells);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    mark();
+
+    // 5. The tree's plan: which cells or pairs each node stands for, in the order a ray walks them.
+    // A block is halved each way while it is more than one across; a single cell goes on into its steps.
+    const plan = [];
+    const inCell = (cell, x0, y0, x1, y1, band = 0) => {
+      const at = plan.length;
+      plan.push(1, cell, x0, y0, x1, y1, 0, 0, band, 0, 0, 0);
+      const w = x1 - x0, h = y1 - y0;
+      if (w > 1 || h > 1) {
+        const xm = w > 1 ? x0 + Math.ceil(w / 2) : x1, ym = h > 1 ? y0 + Math.ceil(h / 2) : y1;
+        for (const [ya, yb] of h > 1 ? [[y0, ym], [ym, y1]] : [[y0, y1]]) {
+          for (const [xa, xb] of w > 1 ? [[x0, xm], [xm, x1]] : [[x0, x1]]) { inCell(cell, xa, ya, xb, yb); }
+        }
+      }
+      plan[at + 6] = plan.length / 12;
+    };
+    // A part: its nodes over cells as planned above, each stretch of cells listed in `cellList`; a single cell goes on into its steps.
+    const cellList = [];
+    const over = (part, node) => {
+      if (node.count === 1) {
+        const cell = part.cellBase + part.order[node.first];
+        inCell(cell, 0, 0, table[cell * 8 + 1], table[cell * 8 + 2], node.block);
+        return;
+      }
+      const at = plan.length;
+      plan.push(0, part.listBase + node.first, node.count, 0, 0, 0, 0, 0, node.block, 0, 0, 0);
+      over(part, node.halves[0]);
+      over(part, node.halves[1]);
+      plan[at + 5] = plan.length / 12;
+    };
+    for (const part of parts) {
+      part.listBase = cellList.length / 4;
+      for (const c of part.order) { cellList.push(part.cellBase + c, 0, 0, 0); }
+      part.treeRoot = plan.length / 12;
+      if (part.root) { over(part, part.root); }
+      part.treeNext = plan.length / 12;
+    }
+    g.floatTexture('meshCellList', Float32Array.from(cellList.length ? cellList : [0, 0, 0, 0]), 4);
+    const nodes = plan.length / 12;
+    g.floatTexture('meshPlan', Float32Array.from(plan), 4);
+    const tree = this.wholeList('tree', nodes);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, tree.framebuffer);
+    gl.viewport(0, 0, 2048, tree.height);
+    gl.useProgram(this.treeProgram.program);
+    u = this.treeProgram.uniforms;
+    gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, g.textures.meshPlan); gl.uniform1i(u.uPlan, 2);
+    gl.activeTexture(gl.TEXTURE8); gl.bindTexture(gl.TEXTURE_2D, g.textures.meshCellList); gl.uniform1i(u.uCellList, 8);
+    gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, g.textures.meshCells); gl.uniform1i(u.uCellTable, 3);
+    gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, quads.textures[0]); gl.uniform1i(u.uQuadLow, 4);
+    gl.activeTexture(gl.TEXTURE5); gl.bindTexture(gl.TEXTURE_2D, quads.textures[1]); gl.uniform1i(u.uQuadHigh, 5);
+    gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, boxes.textures[0]); gl.uniform1i(u.uCellLow, 6);
+    gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, boxes.textures[1]); gl.uniform1i(u.uCellHigh, 7);
+    gl.uniform1i(u.uNodeCount, nodes);
+    gl.uniform3fv(u.uTreeLow, this.treeLow);
+    gl.uniform1f(u.uTreeStep, this.treeStep);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.finish();
+    stage.push(Math.round(performance.now() - started));
+    this.stages = stage;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.enable(gl.DEPTH_TEST);
+    this.nodes = nodes;
+    this.points = mesh.textures[0];
+    this.normals = mesh.textures[1];
+    this.where = mesh.textures[2];
+    this.tree = tree.textures[0];
+    this.ms = performance.now() - started;
+  }
+}
 // The GPU version's renderer: WebGL 2. The engine (WebAssembly) builds the
 // teapot, runs the physics and answers the pointer; this draws.
 class TeapotGpu {
@@ -1485,15 +2150,13 @@ class TeapotGpu {
     if (!gl) { throw new Error('WebGL 2 is not available'); }
     if (!gl.getExtension('EXT_color_buffer_float')) { throw new Error('rendering to float textures (EXT_color_buffer_float) is not available'); }
     this.gl = gl;
-    this.options = { material: 0, gloss: 0, lighting: 1, shadows: 1, ground: 1, wire: 0, texture: 0, mapping: 0, perPixel: 1, shadowSize: 2048, polished: 0, trace: 1, filter: 2, placeRows: 1, buildOnGpu: 1, gatherPerFrame: 3, roomLight: 2, directions: 256, gatherDirections: 48, gathers: 5, layers: 6 };
+    this.options = { material: 0, gloss: 0, lighting: 1, shadows: 1, ground: 1, wire: 0, texture: 0, mapping: 0, perPixel: 1, shadowSize: 2048, polished: 0, trace: 1, filter: 2, placeRows: 1, meshDetail: 1, specialize: 1, buildOnGpu: 1, gatherPerFrame: 3, roomLight: 2, directions: 256, gatherDirections: 48, gathers: 5, layers: 6 };
     // The surface from the lattice at every vertex (used once, to evaluate them, and to check against the CPU);
     // the teapot from those evaluated vertices; the maps of what each point sees of the room.
     this.conv = this.program(VERTEX_GLSL, PROBE_FRAGMENT_GLSL);
-    this.main = this.program(GRID_VERTEX_GLSL, FRAGMENT_GLSL);
-    this.peel = this.program(GRID_VERTEX_GLSL, PEEL_FRAGMENT_GLSL);
-    this.mapInfo = this.program(MAP_VERTEX_GLSL, MAP_INFO_GLSL);
-    this.boxCell = this.program(MAP_VERTEX_GLSL, BOX_CELL_GLSL);
-    this.boxParent = this.program(MAP_VERTEX_GLSL, BOX_PARENT_GLSL);
+    this.main = this.program(MESH_VERTEX_GLSL, FRAGMENT_GLSL);
+    this.peel = this.program(MESH_VERTEX_GLSL, PEEL_FRAGMENT_GLSL);
+    this.mesh = new BoundedMesh(this);
     this.mapSurface = this.program(MAP_VERTEX_GLSL, MAP_SURFACE_GLSL);
     this.mapOpen = this.program(MAP_VERTEX_GLSL, MAP_OPEN_GLSL);
     this.mapDirect = this.program(MAP_VERTEX_GLSL, MAP_DIRECT_GLSL);
@@ -1561,6 +2224,17 @@ class TeapotGpu {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   }
 
+  // How far a chord of the mesh may stray from the surface and how far the normal may turn along it (degrees).
+  meshLimits() { return [[5e-3, 10], [3e-3, 8], [1.5e-3, 5]][this.options.meshDetail] || [3e-3, 8]; }
+  buildMesh() {
+    const limits = this.meshLimits();
+    this.mesh.build(limits[0], limits[1]);
+    this.meshFor = limits.join(',');
+    this.meshBuilt = (this.meshBuilt || 0) + 1;
+    this.vertexCount = 3 * this.mesh.triangles;
+    this.triangleCount = this.mesh.triangles;
+  }
+
   // Take from the engine what is shown now, if it has changed.
   upload() {
     const e = this.engine, gl = this.gl;
@@ -1580,7 +2254,11 @@ class TeapotGpu {
       this.rowPlans = this.rowPlans || {};
       this.rowPlans[scale] = this.rowPlanner.placeAll(e);
     }
-    if (e._tp_build() === 0 && this.parts.length > 0) { return false; }
+    if (e._tp_build() === 0 && this.parts.length > 0) {
+      // The same teapot; a new mesh if the page asked for another.
+      if (this.meshFor !== this.meshLimits().join(',')) { this.buildMesh(); }
+      return false;
+    }
     const floats = (kind) => new Float32Array(e.HEAPF32.buffer, e._tp_buffer(kind), e._tp_length(kind)).slice();
     this.floatTexture('cells', floats(0), 4);
     this.floatTexture('shapes', floats(1), 4);
@@ -1648,8 +2326,7 @@ class TeapotGpu {
       }
       if (fits) { break; }
     }
-    this.vertexCount = this.parts.reduce((sum, part) => sum + part.rect[2] * part.rect[3], 0);
-    this.triangleCount = this.parts.reduce((sum, part) => sum + 2 * part.span[0] * part.span[1], 0);
+    this.gridPoints = this.parts.reduce((sum, part) => sum + part.rect[2] * part.rect[3], 0);
     // What a traced ray needs of the part it reaches.
     const partTable = new Float32Array(Math.max(1, this.parts.length) * 16);
     this.parts.forEach((part, k) => {
@@ -1661,6 +2338,9 @@ class TeapotGpu {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     this.bakeSurface();
+    // The mesh: each lattice cell meshed alone, to a distance and an angle (mesh.js).
+    this.buildMesh();
+    this.uploads = (this.uploads || 0) + 1;   // a new teapot (a new mesh of the same teapot does not count)
     this.roomKey = '';
     return true;
   }
@@ -1725,69 +2405,6 @@ class TeapotGpu {
       this.setPart(part, index, false, u);
       gl.drawArrays(gl.TRIANGLES, 0, 6);
     });
-    // Per texel: its part's place in the texture, whether a cell starts there, the part.
-    const info = this.target('gridInfo', size, size, gl.RGBA32F);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, info.framebuffer);
-    gl.clearBufferfv(gl.COLOR, 0, [0, 0, 0, 0]);
-    gl.useProgram(this.mapInfo.program);
-    u = this.mapInfo.uniforms;
-    gl.uniform2f(u.uMapSize, size, size);
-    this.parts.forEach((part, index) => {
-      gl.uniform4fv(u.uRect, part.rect);
-      gl.uniform2f(u.uGridSpan, part.span[0], part.span[1]);
-      gl.uniform1f(u.uPartIndex, index);
-      gl.drawArrays(gl.TRIANGLES, 0, 6);
-    });
-    // The pyramid of boxes: one box per cell, then the box of four boxes, up to one box for all.
-    const levels = Math.round(Math.log2(size)) + 1;
-    if (!this.boxes) {
-      const make = () => {
-        const texture = gl.createTexture();
-        gl.bindTexture(gl.TEXTURE_2D, texture);
-        gl.texStorage2D(gl.TEXTURE_2D, levels, gl.RGBA32F, size, size);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST_MIPMAP_NEAREST);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-        return texture;
-      };
-      this.boxes = { low: make(), high: make(), framebuffer: gl.createFramebuffer() };
-    }
-    const boxes = this.boxes;
-    this.topLevel = levels - 1;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, boxes.framebuffer);
-    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
-    for (let level = 0; level < levels; ++level) {
-      const extent = size >> level;
-      for (const texture of [boxes.low, boxes.high]) {
-        // While a level is drawn, only the level below it may be read.
-        gl.bindTexture(gl.TEXTURE_2D, texture);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_BASE_LEVEL, Math.max(0, level - 1));
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, Math.max(0, level - 1));
-      }
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, boxes.low, level);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, boxes.high, level);
-      gl.viewport(0, 0, extent, extent);
-      const program = level === 0 ? this.boxCell : this.boxParent;
-      gl.useProgram(program.program);
-      u = program.uniforms;
-      gl.uniform4f(u.uRect, 0, 0, extent, extent);
-      gl.uniform2f(u.uMapSize, extent, extent);
-      if (level === 0) {
-        gl.activeTexture(gl.TEXTURE8); gl.bindTexture(gl.TEXTURE_2D, null);
-        gl.activeTexture(gl.TEXTURE9); gl.bindTexture(gl.TEXTURE_2D, null);
-        gl.activeTexture(gl.TEXTURE12); gl.bindTexture(gl.TEXTURE_2D, surface.first); gl.uniform1i(u.uGridPoints, 12);
-        gl.activeTexture(gl.TEXTURE13); gl.bindTexture(gl.TEXTURE_2D, surface.second); gl.uniform1i(u.uGridNormals, 13);
-        gl.activeTexture(gl.TEXTURE10); gl.bindTexture(gl.TEXTURE_2D, info.texture); gl.uniform1i(u.uGridInfo, 10);
-      } else {
-        gl.activeTexture(gl.TEXTURE8); gl.bindTexture(gl.TEXTURE_2D, boxes.low); gl.uniform1i(u.uBoxMin, 8);
-        gl.activeTexture(gl.TEXTURE9); gl.bindTexture(gl.TEXTURE_2D, boxes.high); gl.uniform1i(u.uBoxMax, 9);
-      }
-      gl.drawArrays(gl.TRIANGLES, 0, 6);
-    }
-    for (const texture of [boxes.low, boxes.high]) {
-      gl.bindTexture(gl.TEXTURE_2D, texture);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_BASE_LEVEL, 0);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, levels - 1);
-    }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.enable(gl.DEPTH_TEST);
   }
@@ -1949,8 +2566,7 @@ class TeapotGpu {
           this.current = this.peel;
           gl.useProgram(this.peel.program);
           gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, this.textures.trims); gl.uniform1i(pu.uTrimData, 2);
-          gl.activeTexture(gl.TEXTURE12); gl.bindTexture(gl.TEXTURE_2D, surface.first); gl.uniform1i(pu.uGridPoints, 12);
-          gl.activeTexture(gl.TEXTURE13); gl.bindTexture(gl.TEXTURE_2D, surface.second); gl.uniform1i(pu.uGridNormals, 13);
+          this.meshUniforms(pu);
           gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, from.first); gl.uniform1i(pu.uThrownFront, 6);
           gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, from.second); gl.uniform1i(pu.uThrownBack, 7);
           gl.activeTexture(gl.TEXTURE4); gl.bindTexture(gl.TEXTURE_2D, direct.first); gl.uniform1i(pu.uDirectFront, 4);
@@ -2131,7 +2747,38 @@ class TeapotGpu {
   }
 
   // Uniforms that hold for a whole pass over the teapot.
-  beginTeapot(view, mode, program = this.main) {
+  // The picture's own program for the settings as they are: every setting the shader would test at
+  // each pixel is written into it as a constant, so that the pixel's work holds no decision that
+  // was made before the frame began (and none of the code for what is switched off). One is
+  // compiled the first time its settings are used and kept.
+  pictureProgram(view) {
+    const o = this.options, s = view.state;
+    const settings = {
+      uMode: 0, uMaterial: o.material, uGloss: o.gloss, uLighting: o.lighting, uWire: o.wire, uTextureOn: o.texture > 0 ? 1 : 0, uMapping: o.mapping,
+      uGroundOn: o.ground, uFilter: o.filter, uPerPixel: o.perPixel, uCountSteps: o.countSteps || 0, uTraceOn: o.trace ? 1 : 0,
+      uRoomLight: o.roomLight && this.targets.mapOpen ? (o.roomLight > 1 && this.thrown ? 2 : 1) : 0,
+      uShadows: o.shadows && o.lighting ? 1 : 0, uImage: view.image ? 1 : 0, uCut: s[22] > 0.5 ? 1 : 0, uTraceCut: s[22] > 0.5 ? 1 : 0,
+    };
+    const key = Object.values(settings).join(',');
+    this.pictures = this.pictures || {};
+    if (!this.pictures[key]) {
+      const started = performance.now();
+      // Each named setting leaves its 'uniform int' declaration and becomes a constant there.
+      const source = FRAGMENT_GLSL.replace(/uniform int ([^;]+);/g, (whole, names) => {
+        const kept = [], fixed = [];
+        for (const name of names.split(',').map((n) => n.trim())) {
+          if (name in settings) { fixed.push(`const int ${name} = ${settings[name]};`); } else { kept.push(name); }
+        }
+        return (kept.length ? `uniform int ${kept.join(', ')};` : '') + fixed.join(' ');
+      });
+      this.pictures[key] = this.program(MESH_VERTEX_GLSL, source);
+      this.pictureMs = performance.now() - started;
+    }
+    return this.pictures[key];
+  }
+
+  beginTeapot(view, mode, program) {
+    if (!program) { program = mode === 0 && this.options.specialize ? this.pictureProgram(view) : this.main; }
     const gl = this.gl, u = program.uniforms, o = this.options, s = view.state;
     this.current = program;
     gl.useProgram(program.program);
@@ -2160,9 +2807,7 @@ class TeapotGpu {
     const thrown = this.thrown;
     gl.activeTexture(gl.TEXTURE6); gl.bindTexture(gl.TEXTURE_2D, thrown ? thrown.first : null); gl.uniform1i(u.uThrownFront, 6);
     gl.activeTexture(gl.TEXTURE7); gl.bindTexture(gl.TEXTURE_2D, thrown ? thrown.second : null); gl.uniform1i(u.uThrownBack, 7);
-    // The grid of surface points the teapot is drawn from.
-    gl.activeTexture(gl.TEXTURE12); gl.bindTexture(gl.TEXTURE_2D, this.targets.mapSurface.first); gl.uniform1i(u.uGridPoints, 12);
-    gl.activeTexture(gl.TEXTURE13); gl.bindTexture(gl.TEXTURE_2D, this.targets.mapSurface.second); gl.uniform1i(u.uGridNormals, 13);
+    this.meshUniforms(u);
     gl.uniform1i(u.uImage, view.image ? 1 : 0);
     gl.uniform2f(u.uImageOf, view.image ? 1 : 0, s[31]);
     const maps = room && this.targets.mapOpen;
@@ -2174,6 +2819,7 @@ class TeapotGpu {
     gl.uniform4f(u.uCutPlane, s[23], s[24], s[25], s[26]);
     this.roomUniforms(u, view, mode);
     gl.uniform1i(u.uPerPixel, o.perPixel);
+    gl.uniform1i(u.uCountSteps, mode === 0 ? (o.countSteps || 0) : 0);
     gl.uniform1i(u.uMaterial, o.material);
     gl.uniform1i(u.uGloss, o.gloss);
     gl.uniform1i(u.uLighting, o.lighting);
@@ -2187,15 +2833,25 @@ class TeapotGpu {
     gl.bindVertexArray(this.emptyVao);
   }
 
+  // The mesh the teapot is drawn and traced from, its tree, and the map of normals over the parts.
+  meshUniforms(u) {
+    const gl = this.gl, mesh = this.mesh;
+    gl.activeTexture(gl.TEXTURE8); gl.bindTexture(gl.TEXTURE_2D, mesh.tree); gl.uniform1i(u.uTree, 8);
+    gl.activeTexture(gl.TEXTURE9); gl.bindTexture(gl.TEXTURE_2D, mesh.points); gl.uniform1i(u.uMeshPoints, 9);
+    gl.activeTexture(gl.TEXTURE10); gl.bindTexture(gl.TEXTURE_2D, mesh.normals); gl.uniform1i(u.uMeshNormals, 10);
+    gl.activeTexture(gl.TEXTURE12); gl.bindTexture(gl.TEXTURE_2D, mesh.where); gl.uniform1i(u.uMeshWhere, 12);
+    gl.activeTexture(gl.TEXTURE13); gl.bindTexture(gl.TEXTURE_2D, this.targets.mapSurface.second); gl.uniform1i(u.uGridNormals, 13);
+    gl.uniform1i(u.uTreeCount, mesh.nodes);
+    gl.uniform3fv(u.uTreeLow, mesh.treeLow);
+    gl.uniform1f(u.uTreeStep, mesh.treeStep);
+    gl.uniform1i(u.uStepCap, this.options.stepCap || 8192);
+    gl.uniform1i(u.uTricks, this.options.tricks === undefined ? 3 : this.options.tricks);
+  }
+
   roomUniforms(u, view, mode) {
     const gl = this.gl, s = view.state, o = this.options;
     // Rays traced against the teapot: its tree and where it is.
-    gl.activeTexture(gl.TEXTURE8); gl.bindTexture(gl.TEXTURE_2D, this.boxes.low); gl.uniform1i(u.uBoxMin, 8);
-    gl.activeTexture(gl.TEXTURE9); gl.bindTexture(gl.TEXTURE_2D, this.boxes.high); gl.uniform1i(u.uBoxMax, 9);
-    gl.activeTexture(gl.TEXTURE10); gl.bindTexture(gl.TEXTURE_2D, this.targets.gridInfo.texture); gl.uniform1i(u.uGridInfo, 10);
-    gl.activeTexture(gl.TEXTURE12); gl.bindTexture(gl.TEXTURE_2D, this.targets.mapSurface.first); gl.uniform1i(u.uGridPoints, 12);
-    gl.activeTexture(gl.TEXTURE13); gl.bindTexture(gl.TEXTURE_2D, this.targets.mapSurface.second); gl.uniform1i(u.uGridNormals, 13);
-    gl.uniform1i(u.uTopLevel, this.topLevel);
+    this.meshUniforms(u);
     gl.activeTexture(gl.TEXTURE14); gl.bindTexture(gl.TEXTURE_2D, this.textures.partTable); gl.uniform1i(u.uPartTable, 14);
     gl.uniformMatrix3fv(u.uTracePose, false, view.pose);
     gl.uniform3fv(u.uTraceShift, view.shift);
@@ -2248,8 +2904,12 @@ class TeapotGpu {
   drawTeapot(exactTrims) {
     const gl = this.gl;
     this.parts.forEach((part, index) => {
+      if (part.triangles === 0) { return; }
       this.setPart(part, index, exactTrims);
-      gl.drawArrays(gl.TRIANGLES, 0, 6 * part.span[0] * part.span[1]);
+      gl.uniform1i(this.current.uniforms.uFirstVertex, 3 * part.firstTriangle);
+      gl.uniform1i(this.current.uniforms.uOwnRoot, part.treeRoot);
+      gl.uniform1i(this.current.uniforms.uOwnNext, part.treeNext);
+      gl.drawArrays(gl.TRIANGLES, 0, 3 * part.triangles);
     });
   }
 
@@ -2328,7 +2988,10 @@ class TeapotGpu {
     gl.disable(gl.STENCIL_TEST);
 
     // 1. The distance along the light of what is nearest the light.
-    if (o.shadows && o.lighting) {
+    // It depends on the teapot, where it is, the sphere that holds it and the sun, not on the eye: it is drawn again only when one of those changes.
+    const shadowKey = [this.meshBuilt, o.shadowSize, state[22], state[23], state[24], state[25], state[26]].join(',') + '|' + Array.from(state.slice(0, 12)).join(',') + '|' + Array.from(state.slice(19, 22)).join(',') + '|' + Array.from(state.slice(33, 37)).join(',');
+    if (o.shadows && o.lighting && shadowKey !== this.shadowKey) {
+      this.shadowKey = shadowKey;
       gl.bindFramebuffer(gl.FRAMEBUFFER, shadow.framebuffer);
       gl.viewport(0, 0, shadow.width, shadow.height);
       gl.clearBufferfv(gl.COLOR, 0, [1e30, 0, 0, 0]);
@@ -2383,7 +3046,7 @@ class TeapotGpu {
       gl.clearBufferfv(gl.COLOR, 0, [0, 0, 0, 0]);
       gl.clear(gl.DEPTH_BUFFER_BIT);
       this.beginTeapot({ ...view, eye: [view.eye[0], 2 * state[31] - view.eye[1], view.eye[2]], image: true }, 0);
-      gl.uniform3fv(this.main.uniforms.uEyeAt, view.eye);
+      gl.uniform3fv(this.current.uniforms.uEyeAt, view.eye);
       this.drawTeapot(false);
       gl.bindFramebuffer(gl.FRAMEBUFFER, null);
       gl.viewport(0, 0, width, height);
@@ -4977,12 +5640,12 @@ class TeapotBuilder {
       state[27] = running ? 1 : 0;
       try {
         if (gpu.upload()) { remeasure = true; }
-        if (bodyFor !== gpu.vertexCount + state[30] * 1e6) {
+        if (bodyFor !== gpu.uploads) {
           // A new teapot: its body, at rest where the engine has it.
           wrench.setBody(engine);
           simpleFor = -1;
-          if (physicsChoice.value === 'wrench') { rest(0, 0); sim().running = false; } else { simple.setBody(engine); simpleFor = gpu.vertexCount + state[30] * 1e6; takePose(); }
-          bodyFor = gpu.vertexCount + state[30] * 1e6;
+          if (physicsChoice.value === 'wrench') { rest(0, 0); sim().running = false; } else { simple.setBody(engine); simpleFor = gpu.uploads; takePose(); }
+          bodyFor = gpu.uploads;
         }
         const start = performance.now();
         gpu.draw(state);
@@ -5004,7 +5667,7 @@ class TeapotBuilder {
       stats.textContent = `${measured.toFixed(1)} ms/frame on the GPU at ${canvas.width}\u00d7${canvas.height}` +
         (running ? (onGpu() ? (physicsChoice.value === 'wrench' ? ` · wrench solver on the GPU: ${wrench.steps} frames, ${wrench.contacts} contacts, ${wrench.stepMs.toFixed(2)} ms with the read-back` : ` · simple step on the GPU: ${simple.steps} steps over ${simple.count} points, ${simple.stepMs.toFixed(2)} ms with the read-back`)
                             : ` · physics ${state[29].toFixed(2)} ms, ${state[28]} contacts`) : '') + `\n` +
-        `${state[30]} nodes · ${gpu.vertexCount} grid points · ${gpu.triangleCount} triangles, each grid point and pixel evaluated from the lattice on the GPU\n` +
+        `${state[30]} nodes · ${gpu.triangleCount} triangles in ${gpu.mesh.cells} lattice cells, each meshed alone to ${gpu.meshLimits()[0]} and ${gpu.meshLimits()[1]}\u00b0 (${gpu.mesh.ms.toFixed(0)} ms) · tree of ${gpu.mesh.nodes} boxes\n` +
         (gpu.roomMs ? `room light: ${gpu.options.directions} directions in ${gpu.roomMs.toFixed(0)} ms` + (gpu.thrownMs ? `, gathered in ${gpu.thrownMs.toFixed(0)} ms` + (gpu.thrownFrames > 1 ? ` over ${gpu.thrownFrames} frames` : '') : '') + ` · ` : '') +
         (check ? `shaders against the CPU at ${check.points} points: largest distance ${check.worst.toExponential(2)}, largest angle between normals ${check.worstAngle.toFixed(4)}\u00b0`
                : 'not yet checked against the CPU') +
