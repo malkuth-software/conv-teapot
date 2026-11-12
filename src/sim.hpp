@@ -14,6 +14,7 @@
 #pragma once
 #include "teapot.hpp"
 #include "../third_party/zc_phys/physics.hpp"
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <exception>
@@ -114,6 +115,14 @@ public:
         desc.hulls = std::move(accepted);
         shape_ = zc::phys::cook(desc);
         hulls_ = desc.hulls.size();
+        {
+            // The inverse of the body-frame inertia, for the grab.
+            const std::array<double, 9>& a = shape_.inertia;
+            const double det = a[0] * (a[4] * a[8] - a[5] * a[7]) - a[1] * (a[3] * a[8] - a[5] * a[6]) + a[2] * (a[3] * a[7] - a[4] * a[6]);
+            inverse_inertia_ = {(a[4] * a[8] - a[5] * a[7]) / det, (a[2] * a[7] - a[1] * a[8]) / det, (a[1] * a[5] - a[2] * a[4]) / det,
+                                (a[5] * a[6] - a[3] * a[8]) / det, (a[0] * a[8] - a[2] * a[6]) / det, (a[2] * a[3] - a[0] * a[5]) / det,
+                                (a[3] * a[7] - a[4] * a[6]) / det, (a[1] * a[6] - a[0] * a[7]) / det, (a[0] * a[4] - a[1] * a[3]) / det};
+        }
         zc::phys::WorldParams params;
         params.frame_dt = 1.0 / 120.0;
         world_ = std::make_unique<zc::phys::World>(params);
@@ -144,28 +153,24 @@ public:
         write_back();
     }
 
-    // Take hold of the teapot (the game's crane hold); drag() moves the hook.
+    // Take hold of the teapot at a point of its surface. The grab is a soft
+    // pin: the picked point of the body is pulled to the pointer by a
+    // critically damped spring acting at that point, so the body swings and
+    // turns about where it is held instead of being carried by its centre.
+    // drag() moves the pointer end.
     void grab(Vec3 point) {
         const zc::phys::BodyState state = world_->state(body_);
-        grab_offset_ = state.pose.p - to_physics(point);
-        zc::phys::HoldParams hold;
-        hold.max_lift = 3.0;
-        hold.max_lateral = 2.0;
-        hold.ang_hertz = 0.6;
-        world_->hold(body_, state.pose, hold);
-        hold_pose_ = state.pose;
+        grab_local_ = zc::phys::rotate(zc::phys::conjugate(state.pose.q), to_physics(point) - state.pose.p);
+        grab_target_ = to_physics(point);
         holding_ = true;
+        world_->wake(body_);
     }
     void drag(Vec3 target) {
         if (!holding_) { return; }
-        hold_pose_.p = to_physics(target) + grab_offset_;
-        world_->set_hold_target(hold_pose_);
+        grab_target_ = to_physics(target);
         world_->wake(body_);
     }
-    void release() {
-        if (holding_) { world_->release(); }
-        holding_ = false;
-    }
+    void release() { holding_ = false; }
     bool grabbing() const { return holding_; }
 
     // A push: a change of velocity at a surface point along a direction.
@@ -186,6 +191,7 @@ public:
         const double frame = world_->params().frame_dt;
         int steps = 0;
         while (accumulator_ >= frame && steps < 8) {
+            if (holding_) { pull(frame); }
             world_->step();
             accumulator_ -= frame;
             ++steps;
@@ -202,6 +208,56 @@ private:
     static zc::phys::Vec3 to_physics(Vec3 p) { return {p.x * metres, -p.z * metres, p.y * metres}; }
     static zc::phys::Vec3 to_physics_direction(Vec3 d) { return {d.x, -d.z, d.y}; }
     static Vec3 to_model(zc::phys::Vec3 p) { return {p.x / metres, p.z / metres, -p.y / metres}; }
+
+    // One frame of the grab: the impulse at the held point that a spring and
+    // damper between that point and the pointer would give over the frame,
+    // found implicitly (a soft constraint), so it is stable at any stiffness.
+    void pull(double h) {
+        using zc::phys::Vec3;
+        const zc::phys::BodyState state = world_->state(body_);
+        const Vec3 r = zc::phys::rotate(state.pose.q, grab_local_);
+        const Vec3 error = state.pose.p + r - grab_target_;
+        const Vec3 speed = state.v + zc::phys::cross(state.w, r);
+        const double omega = 2.0 * 3.14159265358979 * 8.0; // 8 Hz, critically damped: the weight sags it by 4 mm
+        const double stiffness = shape_.mass * omega * omega, damping = 2.0 * shape_.mass * omega;
+        const double gamma = 1.0 / (h * (damping + h * stiffness)), beta = h * stiffness * gamma;
+        // World-frame inverse inertia applied to a vector.
+        const auto spin = [&](Vec3 torque) {
+            const Vec3 local = zc::phys::rotate(zc::phys::conjugate(state.pose.q), torque);
+            const Vec3 turned{inverse_inertia_[0] * local.x + inverse_inertia_[1] * local.y + inverse_inertia_[2] * local.z,
+                              inverse_inertia_[3] * local.x + inverse_inertia_[4] * local.y + inverse_inertia_[5] * local.z,
+                              inverse_inertia_[6] * local.x + inverse_inertia_[7] * local.y + inverse_inertia_[8] * local.z};
+            return zc::phys::rotate(state.pose.q, turned);
+        };
+        // How the point's velocity answers an impulse there, plus the softness.
+        double k[3][3];
+        for (int column = 0; column < 3; ++column) {
+            const Vec3 unit{column == 0 ? 1.0 : 0.0, column == 1 ? 1.0 : 0.0, column == 2 ? 1.0 : 0.0};
+            const Vec3 answer = unit * (1.0 / shape_.mass) + zc::phys::cross(spin(zc::phys::cross(r, unit)), r);
+            k[0][column] = answer.x;
+            k[1][column] = answer.y;
+            k[2][column] = answer.z;
+            k[column][column] += gamma;
+        }
+        const Vec3 wanted = (speed + error * beta) * -1.0;
+        const double det = k[0][0] * (k[1][1] * k[2][2] - k[1][2] * k[2][1]) - k[0][1] * (k[1][0] * k[2][2] - k[1][2] * k[2][0]) +
+                           k[0][2] * (k[1][0] * k[2][1] - k[1][1] * k[2][0]);
+        if (!(std::fabs(det) > 1e-300)) { return; }
+        const auto solve_column = [&](int column) {
+            double m[3][3];
+            for (int i = 0; i < 3; ++i) {
+                for (int j = 0; j < 3; ++j) { m[i][j] = j == column ? (i == 0 ? wanted.x : i == 1 ? wanted.y : wanted.z) : k[i][j]; }
+            }
+            return (m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0]) +
+                    m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])) / det;
+        };
+        Vec3 impulse{solve_column(0), solve_column(1), solve_column(2)};
+        // A hand pulls with at most a few times the teapot's weight.
+        const double limit = 6.0 * shape_.mass * 9.81 * h;
+        const double size = std::sqrt(impulse.x * impulse.x + impulse.y * impulse.y + impulse.z * impulse.z);
+        if (size > limit) { impulse = impulse * (limit / size); }
+        world_->add_velocity(body_, impulse * (1.0 / shape_.mass), spin(zc::phys::cross(r, impulse)));
+    }
 
     void write_back() {
         const zc::phys::Pose pose = world_->state(body_).pose;
@@ -222,8 +278,8 @@ private:
     std::unique_ptr<zc::phys::World> world_;
     zc::phys::BodyId body_ = 0;
     std::size_t hulls_ = 0;
-    zc::phys::Vec3 grab_offset_{};
-    zc::phys::Pose hold_pose_{};
+    zc::phys::Vec3 grab_local_{}, grab_target_{}; // the held point in the body frame; where the pointer is
+    std::array<double, 9> inverse_inertia_{};
     bool holding_ = false, moved_ = false;
     double accumulator_ = 0.0;
 };

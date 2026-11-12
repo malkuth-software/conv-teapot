@@ -34,8 +34,8 @@ int main(int argc, char** argv) {
     teapot_options.circular = number("round", 0) != 0;
     const std::string version = get("version", "1976");
     teapot_options.version = version == "1975" ? Version::v1975 : version == "1987" ? Version::v1987 : version == "2026" ? Version::v2026 : version == "2026u" ? Version::v2026_unified : Version::v1976;
-    teapot_options.sheet_rows = std::size_t(number("rows", 96));
-    teapot_options.sheet_around = std::size_t(number("around", 24));
+    teapot_options.sheet_rows = std::size_t(number("rows", 72));
+    teapot_options.sheet_around = std::size_t(number("around", 12));
     teapot_options.joins = number("joins", 1) != 0;
     teapot_options.blinn_scale = number("blinn", version == "1975" ? 0 : 1) != 0;
     const std::string hide = get("hide", "");
@@ -82,7 +82,12 @@ int main(int argc, char** argv) {
     for (const auto& texture : textures) { scene.textures.push_back(texture.get()); }
 
     RenderOptions options;
-    options.method = get("method", "transport") == "independent" ? Method::independent : Method::transport;
+    const std::string method = get("method", "transport");
+    options.method = method == "independent" ? Method::independent : method == "raster" ? Method::raster : method == "seeded" ? Method::seeded : Method::transport;
+    options.supersample = int(number("ss", 2));
+    options.mesh_lines = number("lines", 0) != 0;
+    options.live_reflection = number("live", 1) != 0;
+    options.exact_shadows = number("exact", 1) != 0;
     options.wire = Wire(int(number("wire", 0)));
     options.texture = int(number("texture", 0));
     const std::string filter = get("filter", "conv");
@@ -112,6 +117,38 @@ int main(int argc, char** argv) {
     Frame frame;
     frame.resize(width, height);
     Renderer renderer;
+    Mesh mesh;
+    if (options.method == Method::raster || options.method == Method::seeded) {
+        // Bake the surfaces to vertices, and with light=1 the lighting to light maps.
+        MeshOptions mesh_options;
+        const std::string layout = get("layout", "tree");
+        mesh_options.layout = layout == "uniform" ? Layout::uniform : layout == "bounds" ? Layout::bounds : Layout::tree;
+        mesh_options.tolerance = number("tolerance", 1e-2);
+        mesh_options.uniform = int(number("cuts", 4));
+        mesh_options.angle = number("angle", 20.0);
+        std::vector<const Surface*> surfaces;
+        std::vector<std::vector<const Trim*>> trims;
+        for (const RenderPart& part : scene.parts) {
+            surfaces.push_back(part.surface);
+            trims.push_back(part.trims);
+        }
+        const double start = detail::now_ms();
+        mesh = build_mesh(surfaces, trims, mesh_options);
+        mesh.ms_build = detail::now_ms() - start;
+        scene.mesh = &mesh;
+        std::printf("mesh: layout %s, %zu vertices, %zu triangles, %zu surface evaluations, %.2f ms\n", layout.c_str(), mesh.vertices.size(), mesh.triangle_count(),
+                    mesh.evaluations, mesh.ms_build);
+        if (number("light", 0) != 0) {
+            // bakeaz: bake from another azimuth than the picture is taken from.
+            Camera bake_camera = camera;
+            if (args.count("bakeaz") != 0) {
+                const double az = number("bakeaz", 68.0) * M_PI / 180.0;
+                bake_camera.eye = camera.target + Vec3{std::cos(elevation) * std::cos(az), std::sin(elevation), std::cos(elevation) * std::sin(az)} * distance;
+            }
+            renderer.bake_light(scene, bake_camera, options, width, height, number("texel", 0.016));
+            std::printf("light: %zu texels, %.2f ms\n", mesh.texels, mesh.ms_light);
+        }
+    }
     const int repeat = int(number("repeat", 1));
     std::vector<double> total, lattice, predict, solve;
     for (int k = 0; k < repeat; ++k) {
@@ -124,7 +161,7 @@ int main(int argc, char** argv) {
     const auto median = [](std::vector<double> v) { std::sort(v.begin(), v.end()); return v[v.size() / 2]; };
     const RenderStats& s = renderer.stats;
     std::printf("%s %s %dx%d nodes=%zu lattice=%zu candidates=%zu solves=%zu evaluations=%zu hits=%zu visits=%zu edge_pixels=%zu\n",
-                geometry.c_str(), options.method == Method::transport ? "transport" : "independent", width, height,
+                geometry.c_str(), method.c_str(), width, height,
                 teapot.node_count(), s.lattice_points, s.candidates, s.solves, s.iterations, s.hit_pixels, s.node_visits, s.edge_pixels);
     std::printf("  median of %d: total %.2f ms (lattice+shadow %.2f, predict/bvh %.2f, solve+shade %.2f); solves/hit %.3f evaluations/hit %.3f\n",
                 repeat, median(total), median(lattice), median(predict), median(solve),

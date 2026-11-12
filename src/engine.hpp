@@ -35,6 +35,11 @@ public:
     Renderer renderer;
     double ms_sim = 0.0;
     double time_scale = 0.5;
+    // Baked geometry for Method::raster: built on demand, kept until the
+    // teapot or the parts shown change, moved with the body when it moves.
+    MeshOptions mesh_options{Layout::tree, 1e-2, 4, 20.0};
+    Mesh mesh;
+    double light_texel = 0.016;
 
     Engine() {
         textures_ = make_textures();
@@ -57,6 +62,32 @@ public:
         teapot_ = make_teapot(options);
         sim.build(teapot_);
         running = false;
+        mesh = Mesh{};
+    }
+
+    // Bake the surfaces now shown to vertices.
+    void bake_vertices() {
+        const Scene scene = build_scene();
+        std::vector<const Surface*> surfaces;
+        std::vector<std::vector<const Trim*>> trims;
+        for (const RenderPart& part : scene.parts) {
+            surfaces.push_back(part.surface);
+            trims.push_back(part.trims);
+        }
+        const double start = detail::now_ms();
+        mesh = build_mesh(surfaces, trims, mesh_options);
+        mesh.ms_build = detail::now_ms() - start;
+        mesh_signature_ = signature();
+        mesh_pose_ = pose_;
+    }
+
+    // Bake the lighting, as the ray tracer sees it from the camera now, into the mesh's light maps.
+    void bake_light() {
+        if (mesh.vertices.empty() || mesh_signature_ != signature()) { bake_vertices(); }
+        Scene scene = build_scene();
+        sync_mesh(scene);
+        scene.mesh = &mesh;
+        renderer.bake_light(scene, camera(), render, frame.width, frame.height, light_texel);
     }
 
     Camera camera() const {
@@ -74,40 +105,17 @@ public:
         if (running) {
             const double start = detail::now_ms();
             // Shown at half speed: at teapot scale a drop is over in half a second.
-            sim.step((dt > 1.0 / 30.0 ? 1.0 / 30.0 : dt) * time_scale);
+            if (sim.step((dt > 1.0 / 30.0 ? 1.0 / 30.0 : dt) * time_scale) > 0) { ++pose_; }
             ms_sim = detail::now_ms() - start;
             // The engine puts a settled body to sleep; stop drawing then.
             if (sim.asleep() && !sim.grabbing()) { running = false; }
         }
-        Scene scene;
-        scene_parts_.clear();
-        for (std::size_t index = 0; index < teapot_.parts.size(); ++index) {
-            const auto& part = teapot_.parts[index];
-            const bool shown = part->group == "handle" ? show_handle : part->group == "spout" ? show_spout : part->group == "lid" ? show_lid : show_body;
-            if (!shown || (part->interior && !show_interior)) { continue; }
-            RenderPart render_part;
-            const bool deformed = sim.moved();
-            render_part.surface = geometry == Geometry::bezier && !deformed && !part->sampled ? static_cast<const Surface*>(&part->bezier)
-                                  : geometry == Geometry::control_mesh ? static_cast<const Surface*>(&part->linear)
-                                                                       : static_cast<const Surface*>(&part->conv);
-            render_part.orientation = part->orientation;
-            render_part.per_u = part->per_u;
-            render_part.per_v = part->per_v;
-            render_part.two_sided = part->sampled;
-            scene.parts.push_back(render_part);
-            scene_parts_.push_back(index);
+        Scene scene = build_scene();
+        if (render.method == Method::raster || render.method == Method::seeded) {
+            if (mesh.vertices.empty() || mesh_signature_ != signature()) { bake_vertices(); }
+            sync_mesh(scene);
+            scene.mesh = &mesh;
         }
-        for (const TeapotJoin& join : teapot_.joins) {
-            long body = -1, tube = -1;
-            for (std::size_t k = 0; k < scene_parts_.size(); ++k) {
-                if (scene_parts_[k] == join.body_part) { body = long(k); }
-                if (scene_parts_[k] == join.tube_part) { tube = long(k); }
-            }
-            if (body < 0 || tube < 0) { continue; }
-            scene.parts[std::size_t(body)].trims.push_back(&join.body_trim);
-            scene.parts[std::size_t(tube)].trims.push_back(&join.tube_trim);
-        }
-        for (const auto& texture : textures_) { scene.textures.push_back(texture.get()); }
         // Sampled versions carry twice the nodes per patch: halve the lattice
         // samples per node interval so the transported lattice stays the same.
         RenderOptions options = render;
@@ -160,14 +168,69 @@ public:
     }
     void drop() {
         sim.reset(6.0, 1.2);
+        ++pose_;
         running = true;
     }
     void reset() {
         sim.reset();
+        ++pose_;
         running = false;
     }
 
 private:
+    // The scene as the options have it now; fills scene_parts_.
+    Scene build_scene() {
+        Scene scene;
+        scene_parts_.clear();
+        for (std::size_t index = 0; index < teapot_.parts.size(); ++index) {
+            const auto& part = teapot_.parts[index];
+            const bool shown = part->group == "handle" ? show_handle : part->group == "spout" ? show_spout : part->group == "lid" ? show_lid : show_body;
+            if (!shown || (part->interior && !show_interior)) { continue; }
+            RenderPart render_part;
+            const bool deformed = sim.moved();
+            render_part.surface = geometry == Geometry::bezier && !deformed && !part->sampled ? static_cast<const Surface*>(&part->bezier)
+                                  : geometry == Geometry::control_mesh ? static_cast<const Surface*>(&part->linear)
+                                                                       : static_cast<const Surface*>(&part->conv);
+            render_part.orientation = part->orientation;
+            render_part.per_u = part->per_u;
+            render_part.per_v = part->per_v;
+            render_part.two_sided = part->sampled;
+            scene.parts.push_back(render_part);
+            scene_parts_.push_back(index);
+        }
+        for (const TeapotJoin& join : teapot_.joins) {
+            long body = -1, tube = -1;
+            for (std::size_t k = 0; k < scene_parts_.size(); ++k) {
+                if (scene_parts_[k] == join.body_part) { body = long(k); }
+                if (scene_parts_[k] == join.tube_part) { tube = long(k); }
+            }
+            if (body < 0 || tube < 0) { continue; }
+            scene.parts[std::size_t(body)].trims.push_back(&join.body_trim);
+            scene.parts[std::size_t(tube)].trims.push_back(&join.tube_trim);
+        }
+        for (const auto& texture : textures_) { scene.textures.push_back(texture.get()); }
+        return scene;
+    }
+
+    // What the mesh was built from: a change means it must be built again.
+    std::uint64_t signature() const {
+        std::uint64_t value = std::uint64_t(geometry) | std::uint64_t(show_handle) << 8 | std::uint64_t(show_spout) << 9 | std::uint64_t(show_lid) << 10 |
+                              std::uint64_t(show_body) << 11 | std::uint64_t(show_interior) << 12 | std::uint64_t(mesh_options.layout) << 16 |
+                              std::uint64_t(mesh_options.uniform) << 20;
+        value = value * 1099511628211ull ^ std::uint64_t(mesh_options.tolerance * 1e7);
+        value = value * 1099511628211ull ^ std::uint64_t(mesh_options.angle * 1e3);
+        return value + 1;
+    }
+
+    // Move the mesh's vertices with the body when it has moved since they were placed.
+    void sync_mesh(const Scene& scene) {
+        if (mesh_pose_ == pose_) { return; }
+        std::vector<const Surface*> surfaces;
+        for (const RenderPart& part : scene.parts) { surfaces.push_back(part.surface); }
+        refresh_mesh(mesh, surfaces);
+        mesh_pose_ = pose_;
+    }
+
     const Hit* hit_at(double x, double y) const {
         const int ix = int(x), iy = int(y);
         if (ix < 0 || iy < 0 || ix >= frame.width || iy >= frame.height) { return nullptr; }
@@ -178,6 +241,7 @@ private:
     Teapot teapot_;
     std::vector<std::size_t> scene_parts_; // scene part -> teapot part
     std::vector<std::unique_ptr<Texture>> textures_;
+    std::uint64_t mesh_signature_ = 0, mesh_pose_ = 0, pose_ = 0;
     double last_x_ = 0.0, last_y_ = 0.0, grab_depth_ = 0.0;
     bool orbiting_ = false;
 };

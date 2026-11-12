@@ -160,6 +160,7 @@ public:
     BodyState state(BodyId id) const;
     void set_pose(BodyId id, const Pose& pose);    // teleport; zeroes velocity; wakes the body and its contacts
     void wake(BodyId id);                          // wakes the whole touching group
+    void add_velocity(BodyId id, Vec3 dv, Vec3 dw); // teapot addition: an impulse already divided by mass and inertia; wakes the group
 
     // the crane: at most one held body at a time
     void hold(BodyId id, const Pose& target, const HoldParams& params = {});

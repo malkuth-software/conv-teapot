@@ -611,6 +611,16 @@ void World::wake(BodyId id) {
     (*impl_).wake_island(id);
 }
 
+// Teapot addition (not in PlaySuite's copy): a change of velocity applied
+// from outside, used for a grab at a point of the body.
+void World::add_velocity(BodyId id, Vec3 dv, Vec3 dw) {
+    Impl& impl = *impl_;
+    impl.wake_island(id);
+    Body& body = impl.bodies[id];
+    body.velocity = body.velocity + dv;
+    body.angular = body.angular + dw;
+}
+
 void World::hold(BodyId id, const Pose& target, const HoldParams& params) {
     Impl& impl = *impl_;
     impl.wake_island(id);

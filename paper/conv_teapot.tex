@@ -43,11 +43,19 @@ with the same node count and renders without a mesh. Taken patch by
 patch, the 2026 shape keeps its normals to $0.11^\circ$ across joints
 but not its curvature continuity. Taken as whole sheets it does better:
 the body with its interior is \emph{one} lattice, the lid another, with
-rows placed by a piecewise projective warp, and the mean relative
-curvature jump along the profile falls from 0.16 to 0.007. The handle and
-spout are joined to the body by blends that interpolate between the two
-surfaces. These joins are ours, not the 2026 model's chamfers, and we
-report where they are rough.
+rows placed by a piecewise projective warp whose density is set by CONV's
+own error, and the mean relative curvature jump along the profile falls
+from 0.16 to 0.003. The handle and spout are joined to the body by blends
+that interpolate between the two surfaces. These joins are ours, not the
+2026 model's chamfers, and we report where they are rough. Given the same
+nodes on targets native to no method, CONV needs as few as the globally
+solved $C^2$ spline and a half to a quarter of what a local bicubic
+needs; the whole 2026 teapot is 3104 nodes. Finally the surface can be
+baked: sampled once to vertices chosen by its own error, drawn by a CPU
+rasterizer with no evaluation per frame, and lit from a texture that the
+ray tracer paints, with reflections that follow the camera taken from
+emitters and not traced. The same mesh seeds the ray tracer, which then
+needs about one surface evaluation per pixel.
 \end{abstract}
 
 \begin{IEEEkeywords}
@@ -460,8 +468,8 @@ barely turns at all. CONV interpolates in the row index, so what matters
 is that the profile be a smooth function of that index, not that rows be
 evenly spaced. We place rows by a piecewise projective warp. Stations
 $s_0<\cdots<s_m$ are laid along the profile's arc length, and each is given
-a wanted spacing $h_k$, proportional to the local radius of curvature
-within limits and bounded in its rate of change. Between stations
+a wanted spacing $h_k$, within limits and bounded in its rate of change;
+how $h_k$ is chosen is the next subsection. Between stations
 $\sqrt h$ is linear. Writing $p=\sqrt h$, a span of length $d$ then holds
 \begin{equation}
  n=\int\frac{ds}{h}=\frac{d}{p_0\,p_1}
@@ -486,6 +494,30 @@ the two meridians, and $17\times17$ points per patch of the tubes. The
 earlier $9\times9$ reconstruction had tangent kinks of up to $1.5^\circ$
 at its own joints, which a sheet fitted to it would inherit.
 
+\subsection{Rows by CONV's own error}
+
+Our first choice of $h$ was the profile's radius of curvature. It is a
+poor one: the 2026 body has three bends of radius about 0.03 (at the
+foot, the lip and inside the rim) that it under-resolves, while rows pile
+up at the rim's crease, where the radius measured across the crease is
+meaninglessly small. The better density comes from the interpolant
+itself. Through the current rows the meridian is a pair of CONV lines.
+In each cell we measure its distance $e$ from the source profile and form
+$g=e/h^4$, which for a fourth-order interpolant estimates how hard the
+profile is there, independent of the spacing used to measure it. The
+spacing that makes every cell err alike is $h\propto g^{-1/4}$, the
+equidistribution rule of de~Boor~\cite{deboor1973}. That $h$ is handed
+to the projective grading above, the rows are replaced, and the step is
+repeated eight times with the estimate averaged geometrically between
+rounds; the plan with the smallest error is kept. Nothing but the CONV
+line and the source is consulted.
+
+With 16 nodes around, the body's largest distance from its profile falls
+from $5.8\times10^{-3}$ to $1.0\times10^{-3}$ at 64 rows and from
+$3.7\times10^{-3}$ to $2.6\times10^{-4}$ at 96, between 6 and 14 times
+for the same nodes. Rows evenly spaced in arc length are worse again
+($3.3\times10^{-2}$ at 64 rows).
+
 \subsection{Measurements}
 
 Table~\ref{tab:unified} gives, for the body and lid sheets, the distance
@@ -503,20 +535,20 @@ it at every row that is not a crease, by one-sided finite differences.
  & & \multicolumn{2}{c|}{Distance} & Tangent & Curv. jump\\
 Sheet & Lattice & max & rms & turn max & mean rel.\\
 \hline
-Body & $24\times97$ & $2.6\times10^{-3}$ & $2.8\times10^{-4}$ & $0.23^\circ$ & 0.007\\
-Lid & $24\times49$ & $1.1\times10^{-2}$ & $1.3\times10^{-3}$ & $0.009^\circ$ & 0.002\\
+Body & $12\times73$ & $6.6\times10^{-4}$ & $1.8\times10^{-4}$ & $0.04^\circ$ & 0.003\\
+Lid & $12\times55$ & $3.1\times10^{-4}$ & $7.6\times10^{-5}$ & $0.26^\circ$ & 0.001\\
 \hline
 \end{tabular}
 \end{table}
 
 Against the per-patch lattices of Table~\ref{tab:joints}, the mean relative
-curvature jump falls from 0.16 to 0.007 on the body and 0.002 on the lid,
-with fewer nodes for those two parts (3504 against 4536). It is not zero.
-The residue sits where rows are still coarse for the feature, chiefly at
-the foot of the body, and it shrinks as rows are added: with 64 rows in
-place of 96 the body's worst tangent turn is $0.58^\circ$. The row count
-is a real parameter, and too few rows near a crease fail badly: a lid
-sheet of 32 rows has a turn of $17^\circ$ at one row.
+curvature jump falls from 0.16 to 0.003 on the body and 0.001 on the lid,
+with a third of the nodes for those two parts (1536 against 4536). It is
+not zero, and the row count is a real parameter: with 48 rows the body
+strays by $3.0\times10^{-3}$ and its normal by up to $21^\circ$ inside
+the three tight bends, which then hold too few rows to turn through.
+Twelve nodes around are enough for the round parts; the tubes, whose
+sections are not circles, take sixteen.
 
 \subsection{Joins as interpolants}
 
@@ -582,9 +614,83 @@ spout differs from the official one. What they show is that a join needs
 no new kind of surface: it is the same blend between two continuous
 surfaces that CONV already uses between its two factor orders.
 
-The unified teapot has 5392 nodes in eight lattices, against 5346 in 66.
-A $640\times400$ frame of it takes 31.4\,ms by transport and 41.5\,ms
-per ray without edge samples.
+The unified teapot has 3104 nodes in eight lattices, against 5346 in 66,
+and every sheet lies within $7.5\times10^{-4}$ of its source. (Placed by
+radius of curvature the same sheets took 5392 nodes and strayed by up to
+$1.1\times10^{-2}$.) A $640\times400$ frame of it takes 44\,ms by
+transport and 56\,ms per ray without edge samples.
+
+\section{How Many Nodes}
+\label{sec:budget}
+
+Is a CONV lattice an economical description? Against the form the teapot
+was born in, no better than equal: the 1976 patches have about 300
+control points, a seamed lattice of 324 nodes is within
+$2.9\times10^{-5}$ of them, and exact reproduction takes 560. But that
+target is native to B\'ezier patches. The fair question gives every
+method the same points on a surface that is native to none and asks what
+surface each makes of them. We use three targets: an analytic surface of
+revolution with a trigonometric profile, half a torus, and the 2026 body
+with its interior, rows placed as above; and five methods: the nodes
+joined bilinearly; the Catmull--Rom bicubic~\cite{catmullrom1974}; the
+uniform bicubic B-spline with the nodes as its control points, which on
+a regular grid is also the Catmull--Clark limit
+surface~\cite{catmullclark1978} of the node mesh; the same B-spline
+solved to pass through the nodes, which is the $C^2$ interpolating
+spline and needs a global solve along every line; and CONV. Every method
+is cut at the body's crease.
+
+\begin{table}[H]
+\caption{Fewest nodes that hold a tolerance on the distance from the
+target (model units) and on the normal (degrees). A dash: not reached by
+6192 nodes (9264 on the body)}
+\label{tab:budget}
+\centering
+\scriptsize
+\setlength{\tabcolsep}{2.4pt}
+\begin{tabular}{l|ccc|cc}
+\hline
+ & \multicolumn{3}{c|}{Distance $\le$} & \multicolumn{2}{c}{Normal $\le$}\\
+Method & $10^{-2}$ & $10^{-3}$ & $10^{-4}$ & $1^\circ$ & $0.1^\circ$\\
+\hline
+\multicolumn{6}{l}{\emph{Analytic revolution}}\\
+Facets & 1200 & -- & -- & -- & --\\
+Catmull--Rom & 156 & 528 & 2080 & 396 & 2328\\
+B-spline, nodes as control & 1584 & -- & -- & -- & --\\
+Spline through nodes (global) & 78 & 300 & 784 & 150 & 588\\
+CONV & 78 & 300 & 784 & 150 & 588\\
+\hline
+\multicolumn{6}{l}{\emph{Half torus}}\\
+Facets & 400 & 4656 & -- & -- & --\\
+Catmull--Rom & 54 & 156 & 544 & 108 & 408\\
+B-spline, nodes as control & 600 & -- & -- & 582 & --\\
+Spline through nodes (global) & 42 & 72 & 272 & 54 & 204\\
+CONV & 42 & 72 & 204 & 54 & 156\\
+\hline
+\multicolumn{6}{l}{\emph{2026 body with interior}}\\
+Facets & 4656 & -- & -- & -- & --\\
+Catmull--Rom & 588 & 2328 & 9264 & -- & --\\
+B-spline, nodes as control & 4656 & -- & -- & -- & --\\
+Spline through nodes (global) & 294 & 1040 & 4632 & 2316 & --\\
+CONV & 392 & 1164 & 3088 & 2316 & --\\
+\hline
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:budget} is read from a grid of lattice sizes, so its
+entries are steps of that grid. On the smooth targets CONV needs exactly
+what the $C^2$ spline needs, or less, and a half to a quarter of what
+Catmull--Rom needs; facets and the raw control mesh are one to two orders
+behind or never arrive. The spline reaches this by solving a banded
+system along every line, so each node influences the whole surface; CONV
+reaches it from the 6 by 6 nodes around a cell. On the body all the cubic
+methods are within a grid step of one another, because the count is set
+by the three tight bends and not by the method. CONV is the only one of
+the five whose normal is not exactly continuous where its limiter acts:
+at the coarsest sizes it shows kinks of a few degrees, which vanish as
+the lattice resolves the shape (none above $0.03^\circ$ on the torus at
+272 nodes). So the claim we can support is equality with the best
+classical interpolant at local cost, not superiority in count.
 
 \begin{figure*}[t]
 \centering
@@ -615,7 +721,7 @@ Defect of the 1976 patches & Fixed in & CONV lattice\\
 Body not round & 1992 & Improved: 233 times rounder at the same node count\\
 Kinked knob tip & mesh options & Improved: the kink is removed\\
 No bottom & 1987 & Flat cap with an exact crease; Crow's round bottom from samples\\
-Curvature jumps at patch joints & 2026 & Per patch: not reproduced. Unified sheets: mean relative jump 0.007\\
+Curvature jumps at patch joints & 2026 & Per patch: not reproduced. Unified sheets: mean relative jump 0.003\\
 Handle and spout pierce the body & 1992, 2026 & Blended joins of our own (Section~\ref{sec:unified}), not the 2026 chamfers\\
 No interior & 1992--2026 & The 2026 interior, from samples\\
 Gap around the lid & 1992 & Not addressed\\
@@ -694,7 +800,7 @@ the shape of Yuksel's, to the accuracy below, and approximately its
 normals, but it is not itself curvature continuous. Lattices that run
 across the smooth joints without a seam would be, where the limiter is
 inactive. Section~\ref{sec:unified} builds them, with rows placed by a
-projective warp, and the mean relative jump falls to 0.007.
+projective warp, and the mean relative jump falls to 0.003.
 
 \begin{table}[H]
 \caption{Across the joints of exterior lattices, 9 by 9 nodes each}
@@ -761,7 +867,9 @@ Several options of the official page concern tessellation: duplicate
 vertices along patch edges, triangles at the tips, matching normals
 across edges, the direction of triangulation. A node lattice has one node
 where patches meet, and Section~\ref{sec:transport} renders the surface
-itself. At a pole the solver's damped step and a normal taken a short
+itself. When a mesh is wanted for speed, Section~\ref{sec:baked} makes
+one from the lattice, with one vertex where pieces meet and two only
+along a crease. At a pole the solver's damped step and a normal taken a short
 distance along $v$ are the whole treatment.
 
 \section{Rays by Transport}
@@ -906,6 +1014,201 @@ more. Right: a checker mapped in patch coordinates.}
 \label{fig:work}
 \end{figure}
 
+\section{Baked Vertices}
+\label{sec:baked}
+
+Tracing evaluates the surface at every pixel. Baking evaluates it once,
+at vertices placed so that flat triangles between them stay close to it,
+and from then on a frame costs no evaluation.
+
+\subsection{Where to put the vertices}
+
+We tried four layouts on the unified teapot and measured each mesh
+against the surface at seven points in every triangle: the distance from
+the flat triangle to the surface at the same parameters, and the angle
+between the interpolated vertex normal and the true one.
+
+\emph{Uniform}: every lattice cell cut $k$ by $k$. \emph{Bounds}: a
+tensor grid in which each column and row of cells is cut as often as the
+lattice data alone require. A chord over a step $h$ of a curve with
+second derivative at most $M$ strays by at most $Mh^2/8$, and the second
+difference of the nodes is $M$ in node units, so a cell needs
+$\sqrt{M/8\varepsilon}$ cuts; no surface evaluation decides it.
+\emph{Tree}: every cell is halved, along $u$, along $v$ or both, until
+the surface at the middle of each edge and of the cell is within
+$\varepsilon$ of the flat piece, and optionally until the normal turns
+no more than a set angle along an edge. Neighbours of different depth
+are joined without cracks by triangulating each piece as a fan that
+takes in every vertex its neighbours left on its border.
+\emph{Clusters}: $k$-means over dense surface samples in position and
+normal, run with the mini-batch moving-average updates of
+e-means~\cite{emeans}, each cluster giving its most central sample as a
+vertex and the dual of the clusters on the sample grid as triangles.
+
+\begin{table}[H]
+\caption{Vertex layouts on the unified teapot (3104 nodes). Distance in
+model units; a pixel at the teapot is about 0.011}
+\label{tab:layouts}
+\centering
+\scriptsize
+\setlength{\tabcolsep}{2.6pt}
+\begin{tabular}{l|r|cc|cc}
+\hline
+ & & \multicolumn{2}{c|}{Distance} & \multicolumn{2}{c}{Normal (deg)}\\
+Layout & Vertices & max & rms & max & rms\\
+\hline
+Uniform $2\times2$ & 12786 & $2.1\times10^{-2}$ & $6.5\times10^{-3}$ & 79 & 1.21\\
+Uniform $4\times4$ & 49430 & $5.5\times10^{-3}$ & $1.6\times10^{-3}$ & 36 & 0.34\\
+Bounds, $\varepsilon=10^{-2}$ & 7351 & $1.7\times10^{-2}$ & $5.1\times10^{-3}$ & 62 & 1.68\\
+Bounds, $\varepsilon=5\times10^{-3}$ & 11060 & $9.9\times10^{-3}$ & $3.1\times10^{-3}$ & 57 & 1.61\\
+Tree, $\varepsilon=10^{-2}$ & 10506 & $2.1\times10^{-2}$ & $3.3\times10^{-3}$ & 62 & 1.38\\
+Tree, $\varepsilon=2\times10^{-2}$, $20^\circ$ & 8991 & $2.6\times10^{-2}$ & $6.4\times10^{-3}$ & 12 & 0.75\\
+Tree, $\varepsilon=10^{-2}$, $20^\circ$ & 14189 & $2.1\times10^{-2}$ & $2.9\times10^{-3}$ & 12 & 0.68\\
+Tree, $\varepsilon=5\times10^{-3}$, $10^\circ$ & 29498 & $1.3\times10^{-2}$ & $1.7\times10^{-3}$ & 7.7 & 0.40\\
+Clusters, 12000 & 11984 & $3.8\times10^{-2}$ & $3.3\times10^{-3}$ & 145 & 6.87\\
+\hline
+\end{tabular}
+\end{table}
+
+Three things came out (Table~\ref{tab:layouts}; the full sweep is in
+\texttt{results/mesh\_study.txt}). First, distance alone is the wrong
+criterion. A bend of radius 0.03 fits inside a tolerance of 0.01 as a
+single flat piece turning $60^\circ$, and the shading across it is then
+wrong however the normals are interpolated; a limit on the turn of the
+normal is what buys smoothness. The tree with $\varepsilon=10^{-2}$ and a
+$20^\circ$ limit has a third of the vertices of the uniform $4\times4$
+mesh and a third of its worst normal error. Second, the lattice data do
+bound vertex placement, and cheaply: the bounds layout is built in a
+third of the time and needs fewest vertices for a given \emph{distance},
+but being a tensor grid it cannot follow the bends locally and loses on
+the normal. Third, clustering is not competitive here. With equal
+vertices it is worse on every measure and a hundred times slower to
+build, and its dual triangulation can fold. The surface comes with a
+parameterization and an error that can be asked for, and a layout that
+uses neither gives both away. Our crude dual is partly to blame, and a
+proper restricted Delaunay triangulation might do better; we did not
+build one. The picture itself stops improving near 10\,000 vertices:
+against the traced frame, about 500 of 99\,000 surface pixels differ in
+coverage for every layout past that size. The engine's default is the
+tree with $\varepsilon=10^{-2}$ and $20^\circ$: 14\,189 vertices and
+26\,538 triangles from 49\,972 evaluations in 33\,ms. A node on a
+crease becomes two vertices, one per side, each with its side's normal.
+
+\subsection{Rasterizer}
+
+The mesh is drawn on the CPU. Edge functions are integers with eight
+bits below the pixel and a top-left fill rule, so triangles that share
+an edge neither overlap nor leave a gap; depth is $1/z$, which is affine
+on the screen; triangles are filed by bands of rows, which threads
+share out. The rasterizer writes only a visibility buffer, a triangle
+and two weights per sample at two by two samples per pixel, and shading
+follows once per pixel, or once per sample where a pixel's samples show
+different parts or depths. The techniques are those of the software
+rasterizer in PlaySuite's fish tank; the code is our own.
+
+\subsection{Light painted by the ray tracer}
+
+Each part has a light map in its own chart: around the part one way,
+arc length along it the other, so texels are spread evenly over the
+surface however its rows are graded. To bake, every texel is shaded
+exactly as the ray tracer shades a hit at that point seen from the
+camera, with its shadow, texture and traced reflection, and stored
+with a chain of half-size levels; a texel facing away from the camera
+is shaded for the mirrored view direction, so the far side holds its own
+outward lighting. A frame then reads the map between the two levels
+that match each triangle's size on screen. 601\,808 texels of 0.016
+units bake in about 130\,ms.
+
+\subsection{Reflections from emitters}
+
+A light map baked whole freezes whatever depends on the view: turn the
+camera and the highlights and the floor's reflection stay painted where
+they were (Fig.~\ref{fig:emitter}, right). So the map keeps only what
+does not depend on the view, the diffuse light and the lit fraction, and
+the rest is added at every frame. Each pixel has an interpolated normal,
+hence a mirror direction, and that direction is answered by emitters and
+not by tracing. Above the horizon it is the sky and its window. Below,
+it is a stand-in for the floor: an object that is never drawn, whose
+pattern is the floor's in closed form at the point the mirror ray
+reaches, and whose shadow was baked once into a small texture with the
+exact shadow edges described below. The drawn floor and the
+emitter are separate things that agree. The result follows the camera
+at the cost of a few arithmetic operations per pixel: 11\,ms for a
+$960\times600$ chrome frame against 141\,ms traced (34 against 483 on
+one thread). What
+it lacks is the teapot reflected in itself: the knob on the lid, the
+handle in the body. Those need a ray.
+
+\subsection{The mesh as a seed}
+
+The mesh also serves the ray tracer. Each visible sample names a
+triangle and weights, hence a parameter pair within the mesh's tolerance
+of where the ray meets the surface, and one Newton solve from there
+lands on the surface itself. Transport gathers up to six predictions per
+pixel and solves several; a seeded ray solves one. Where the mesh
+catches a ray that the surface does not, which happens within the
+tolerance of a silhouette, the mesh's own point is shown.
+
+\begin{table}[H]
+\caption{One $960\times600$ frame of the unified teapot, medians of 9}
+\label{tab:methods}
+\centering
+\scriptsize
+\begin{tabular}{l|cc|c}
+\hline
+ & \multicolumn{2}{c|}{Time (ms)} & Evaluations\\
+Method & all threads & one thread & per surface pixel\\
+\hline
+Per ray, hierarchy & 150 & 410 & 4.1\\
+Transport & 91 & 261 & 3.8\\
+Seeded by the mesh & 37 & 125 & 2.0\\
+Mesh, shaded per pixel & 15 & 45 & 0.16\\
+Mesh, baked light and emitters & 11 & 36 & 0.08\\
+\hline
+\end{tabular}
+\end{table}
+
+The evaluations left in the last two rows of Table~\ref{tab:methods},
+and 0.6 of those in the row above, are shadow rays (next subsection). In
+a browser, on one thread in WebAssembly, the same frame takes about
+450\,ms by transport, 200\,ms seeded and 40\,ms from the mesh with
+baked light; traced chrome takes 750\,ms there and the mesh with
+emitters 50.
+
+\subsection{Shadow edges on the surface}
+
+Shadows are looked up in a depth image drawn from the light. Its texels
+are larger than a pixel, and a shadow's edge followed them in
+stair-steps. Blending the lookup only rounds the steps. The edge belongs
+to the surface, so that is where we now find it: each depth texel also
+records which part it saw and where, and at a point whose surrounding
+texels disagree the light ray is traced by Newton from those
+records, two rays on a rotated grid inside the pixel and two more if
+they differ. A texel that saw the receiving surface's own neighbourhood
+is not counted as disagreement, which keeps the wide band of doubt along
+a terminator from being traced. The edge is then as sharp as the surface
+makes it at any zoom, for 0.1 to 0.6 evaluations per surface pixel.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.98\textwidth]{figures/fig_emitter.png}
+\caption{Chrome. Left: traced, one bounce. Middle: the baked mesh, its
+reflections taken per frame from emitters, the sky above and a stand-in
+floor below; only the teapot's reflection of itself is missing. Right:
+the same mesh with reflections baked from another viewpoint and left
+there.}
+\label{fig:emitter}
+\end{figure*}
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=0.98\textwidth]{figures/fig_mesh.png}
+\caption{Left: traced by transport. Middle: the baked mesh, 14\,189
+vertices, with its triangles drawn. Right: the same mesh lit from the
+light map painted by the ray tracer.}
+\label{fig:mesh}
+\end{figure*}
+
 \section{Motion}
 
 Since every node is a surface point, the collision shape of the teapot
@@ -922,6 +1225,13 @@ spout, rocks back over its base and is asleep within 1.5\,s
 (Fig.~\ref{fig:drop}). The body is treated as solid porcelain, which is
 not how a teapot is made; a shell would need the interior that this model
 lacks.
+
+Taking hold of the teapot is a pin at the point that was picked: a
+critically damped spring of 8\,Hz between that point of the body and the
+pointer, applied as an implicit impulse at the point each engine frame,
+with the engine's contacts solved after it. Lifted by its handle the
+teapot turns through $90^\circ$ and hangs from the handle, its centre
+below the hand; it is not carried level by its centre of mass.
 
 \begin{figure*}[t]
 \centering
@@ -943,9 +1253,13 @@ root without proving it the nearest, and both use lattice triangles as
 predictors, so a feature thinner than a lattice cell on screen can be
 missed. The hierarchy's boxes are padded by a fraction of their diagonal,
 which is a heuristic and not an enclosure. Timings are of one
-implementation on one shared machine. In a browser the engine runs on one
-thread in WebAssembly at about 80\,ms for a plain $640\times400$ frame
-without edge samples.
+implementation on one shared machine, and vary by a quarter between
+sessions. The baked mesh is flat between its vertices: its silhouette is
+the surface's only to the tolerance it was baked at, a light map holds
+the diffuse light of one pose, and the emitters that answer its mirror
+directions do not include the teapot itself. The node-count comparison covers surfaces that suit a
+lattice; it says nothing about shapes of arbitrary topology, where
+subdivision surfaces are at home.
 
 \section{Conclusion}
 
@@ -959,7 +1273,13 @@ lattices. Across their seams those lattices do not carry curvature
 continuity. Whole sheets do far better: the body with its interior is one
 lattice, the lid another, with rows placed by a projective warp, and the
 handle and spout meet the body in joins that are blends of the two
-surfaces. What remains unfinished is stated above: a residue of curvature
+surfaces. With rows placed by CONV's own error the whole teapot is 3104
+nodes, and on targets native to no method a CONV lattice needs as few
+nodes as the globally solved $C^2$ spline while reading only the nodes
+around a cell. When speed matters more than exactness the lattice bakes
+to a mesh whose vertices its own error places, lit by a texture the ray
+tracer paints, at a tenth of the cost of tracing. What remains unfinished
+is stated above: a residue of curvature
 jump where rows are coarse, a rough interior join, and joins that are
 ours and not the chamfers Yuksel designed.
 
@@ -978,7 +1298,7 @@ generator, without trimming or chamfers.
 Substantial portions of this work were generated with the assistance of
 Anthropic Claude models.
 
-\begin{thebibliography}{9}
+\begin{thebibliography}{99}
 \scriptsize
 \bibitem{newell1975}
 M. E. Newell, ``The utilization of procedure models in digital image
@@ -1007,6 +1327,24 @@ Nov. 11, 2026).
 \bibitem{convpaper}
 ``Compact Ordered Nodal Variation,'' 2026.
 \url{https://github.com/malkuth-software/papers}.
+\bibitem{deboor1973}
+C. de Boor, ``Good approximation by splines with variable knots,'' in
+\emph{Spline Functions and Approximation Theory}, Birkh\"auser, 1973.
+
+\bibitem{catmullrom1974}
+E. Catmull and R. Rom, ``A class of local interpolating splines,'' in
+\emph{Computer Aided Geometric Design}, Academic Press, 1974.
+
+\bibitem{catmullclark1978}
+E. Catmull and J. Clark, ``Recursively generated B-spline surfaces on
+arbitrary topological meshes,'' \emph{Computer-Aided Design}, vol. 10,
+no. 6, 1978.
+
+\bibitem{emeans}
+S. Bessa, P.-E. Mazar\'e, G. Szilvasy, H. Touvron, D. Picard, M. Douze
+and H. J\'egou, ``e-means: outperforming k-means (in one-tenth the
+epochs),'' arXiv:2611.09501, 2026.
+
 \bibitem{kajiya1982}
 J. T. Kajiya, ``Ray tracing parametric patches,'' in \emph{Proc.
 SIGGRAPH}, 1982, pp. 245--254.

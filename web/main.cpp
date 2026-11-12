@@ -17,6 +17,8 @@ EMSCRIPTEN_KEEPALIVE const std::uint8_t* tp_draw(double dt) { return engine->dra
 EMSCRIPTEN_KEEPALIVE void tp_set(int key, double value) {
     using namespace tconv;
     Engine& e = *engine;
+    // A change to how surfaces are shaded makes a baked light map stale.
+    if ((key >= 4 && key <= 10) || (key >= 16 && key <= 18)) { e.mesh.lit = false; }
     switch (key) {
     case 0: e.geometry = Geometry(int(value)); e.rebuild(); break;
     case 1: e.per = std::size_t(value); e.rebuild(); break;
@@ -44,6 +46,15 @@ EMSCRIPTEN_KEEPALIVE void tp_set(int key, double value) {
     case 24: e.show_lid = value != 0; break;
     case 25: e.show_body = value != 0; break;
     case 26: e.show_interior = value != 0; break;
+    case 27: e.mesh_options.layout = Layout(int(value)); break;
+    case 28: e.mesh_options.tolerance = value; break;
+    case 29: e.mesh_options.angle = value; break;
+    case 30: e.render.baked_light = value != 0; break;
+    case 31: e.render.mesh_lines = value != 0; break;
+    case 32: e.render.supersample = int(value); break;
+    case 33: e.light_texel = value; break;
+    case 34: e.render.live_reflection = value != 0; e.mesh.lit = false; break;
+    case 35: e.render.exact_shadows = value != 0; e.mesh.lit = false; break;
     default: break;
     }
 }
@@ -58,6 +69,8 @@ EMSCRIPTEN_KEEPALIVE void tp_zoom(double factor) { engine->zoom(factor); }
 EMSCRIPTEN_KEEPALIVE void tp_action(int action) {
     if (action == 0) { engine->drop(); }
     if (action == 1) { engine->reset(); }
+    if (action == 2) { engine->bake_vertices(); }
+    if (action == 3) { engine->bake_light(); }
 }
 
 EMSCRIPTEN_KEEPALIVE double tp_stat(int index) {
@@ -76,6 +89,12 @@ EMSCRIPTEN_KEEPALIVE double tp_stat(int index) {
     case 10: return engine->running ? 1.0 : 0.0;
     case 12: return double(engine->sim.contacts());
     case 11: return double(s.node_visits);
+    case 13: return double(engine->mesh.vertices.size());
+    case 14: return double(engine->mesh.triangle_count());
+    case 15: return engine->mesh.ms_build;
+    case 16: return engine->mesh.lit ? double(engine->mesh.texels) : 0.0;
+    case 17: return engine->mesh.ms_light;
+    case 18: return double(engine->mesh.evaluations);
     default: return 0.0;
     }
 }

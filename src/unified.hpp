@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <functional>
 #include <vector>
 
 namespace tconv {
@@ -178,7 +179,12 @@ struct SheetPlan {
 // Rows for a profile: about `rows` intervals in all, spacing proportional to
 // the local radius of curvature within [finest, coarsest], and a row exactly
 // on every crease.
-inline SheetPlan plan_rows(const ProfileCurve& profile, std::size_t rows, double finest, double coarsest) {
+//
+// `shape`, when given, replaces the radius of curvature: it returns the
+// wanted spacing at an arc length, up to one common scale. `growth` bounds
+// how fast the spacing may change along the profile.
+inline SheetPlan plan_rows(const ProfileCurve& profile, std::size_t rows, double finest, double coarsest, double growth = 0.08,
+                           const std::function<double(double)>* shape = nullptr) {
     // Sections between creases (and the two ends).
     std::vector<double> breaks{0.0};
     for (std::size_t run = 1; run < profile.runs.size(); ++run) {
@@ -195,7 +201,7 @@ inline SheetPlan plan_rows(const ProfileCurve& profile, std::size_t rows, double
             double radius = 1e9;
             for (int j = -2; j <= 2; ++j) {
                 const double q = std::min(b, std::max(a, s + j * 0.25 * (b - a) / n));
-                radius = std::min(radius, profile.radius(q, 0.001 * profile.length));
+                radius = std::min(radius, shape != nullptr ? (*shape)(q) : profile.radius(q, 0.001 * profile.length));
             }
             const double spacing = std::min(coarsest, std::max(finest, scale * radius));
             g.station.push_back(s);
@@ -203,7 +209,6 @@ inline SheetPlan plan_rows(const ProfileCurve& profile, std::size_t rows, double
         }
         // Limit how fast the spacing may change between stations, both ways:
         // neighbouring rows then differ in spacing by at most about a sixth.
-        const double growth = 0.08;
         for (int pass = 0; pass < 2; ++pass) {
             for (std::size_t k = 1; k < g.root.size(); ++k) {
                 const double d = g.station[k] - g.station[k - 1];
@@ -217,8 +222,8 @@ inline SheetPlan plan_rows(const ProfileCurve& profile, std::size_t rows, double
         return g;
     };
     // One scale for the whole profile, found by bisection on the row count.
-    double low = 1e-3, high = 1e3;
-    for (int iteration = 0; iteration < 60; ++iteration) {
+    double low = 1e-9, high = 1e9;
+    for (int iteration = 0; iteration < 120; ++iteration) {
         const double mid = std::sqrt(low * high);
         double count = 0.0;
         for (std::size_t k = 0; k + 1 < breaks.size(); ++k) {
@@ -242,6 +247,99 @@ inline SheetPlan plan_rows(const ProfileCurve& profile, std::size_t rows, double
     plan.row_arc.push_back(profile.length);
     plan.row_seam.push_back(0);
     return plan;
+}
+
+// One open CONV line through values with cuts.
+inline double cut_line(const std::vector<double>& y, const std::vector<unsigned char>& seams, std::size_t cell, double t) {
+    const LineLayout layout{y.size(), false, Closure::cubic, seams.data()};
+    double w[8] = {};
+    for (int k = 0; k < 8; ++k) {
+        const long index = long(cell) - 3 + k;
+        if (index >= 0 && index < long(y.size())) { w[k] = y[std::size_t(index)]; }
+    }
+    return eval_cell(compile_cell(w, cell_shape(layout, cell), Bubble::continuous), t);
+}
+
+// Rows placed by CONV's own error.
+//
+// The curve through the current rows is a pair of CONV lines. Each cell's
+// distance from the profile, divided by the fourth power of the cell's
+// length, measures how hard the profile is there; its fourth root is the
+// density of rows that evens the error out. plan_rows turns that density
+// into a smooth projective grading, and the step is repeated, keeping the
+// plan with the smallest error. `error`, when given, receives that error.
+// `on_axis` marks profiles whose two ends are poles (x = 0).
+inline SheetPlan plan_rows_by_error(const ProfileCurve& source, std::size_t rows, bool on_axis, double growth = 0.2, int iterations = 8,
+                                    double* error = nullptr) {
+    ProfileCurve profile = source;
+    profile.build_table(32);
+    const double length = profile.length;
+    const auto truth = [&](double arc, double& x, double& y) {
+        std::size_t run = 0;
+        double t = 0.0;
+        profile.locate(std::min(length, std::max(0.0, arc)), run, t);
+        profile.point_on_run(run, t, x, y);
+    };
+    const auto distance = [&](double x, double y, double arc, double reach) {
+        const auto first = std::lower_bound(profile.table_s.begin(), profile.table_s.end(), arc - reach);
+        std::size_t k = first == profile.table_s.begin() ? 0 : std::size_t(first - profile.table_s.begin()) - 1;
+        double best = 1e30;
+        for (; k + 1 < profile.table_s.size() && profile.table_s[k] <= arc + reach; ++k) {
+            const double ax = profile.table_x[k], ay = profile.table_y[k];
+            const double bx = profile.table_x[k + 1] - ax, by = profile.table_y[k + 1] - ay;
+            const double len2 = bx * bx + by * by;
+            const double t = len2 > 0.0 ? std::max(0.0, std::min(1.0, ((x - ax) * bx + (y - ay) * by) / len2)) : 0.0;
+            best = std::min(best, std::hypot(ax + t * bx - x, ay + t * by - y));
+        }
+        return best;
+    };
+    const double finest = length / (400.0 * double(rows)), coarsest = 6.0 * length / double(rows);
+    SheetPlan plan = plan_rows(profile, rows, length / (40.0 * double(rows)), 4.0 * length / double(rows), growth);
+    SheetPlan best = plan;
+    double best_error = 1e30;
+    std::vector<double> hardness_s, hardness;
+    for (int iteration = 0; iteration <= iterations; ++iteration) {
+        const std::size_t n = plan.row_arc.size();
+        std::vector<double> x(n), y(n);
+        for (std::size_t k = 0; k < n; ++k) {
+            truth(plan.row_arc[k], x[k], y[k]);
+            if (on_axis && (k == 0 || k + 1 == n)) { x[k] = 0.0; }
+        }
+        double worst = 0.0;
+        std::vector<double> cell_s, cell_g;
+        for (std::size_t cell = 0; cell + 1 < n; ++cell) {
+            const double h = plan.row_arc[cell + 1] - plan.row_arc[cell];
+            double e = 0.0;
+            for (double t : {0.1, 0.25, 0.4, 0.5, 0.6, 0.75, 0.9}) {
+                e = std::max(e, distance(cut_line(x, plan.row_seam, cell, t), cut_line(y, plan.row_seam, cell, t), plan.row_arc[cell] + t * h, 2.0 * h));
+            }
+            worst = std::max(worst, e);
+            cell_s.push_back(0.5 * (plan.row_arc[cell] + plan.row_arc[cell + 1]));
+            cell_g.push_back(std::max(1e-7, e) / (h * h * h * h));
+        }
+        if (worst < best_error) {
+            best_error = worst;
+            best = plan;
+        }
+        if (iteration == iterations) { break; }
+        const auto cell_of = [](const std::vector<double>& at, double s) {
+            const auto upper = std::upper_bound(at.begin(), at.end(), s);
+            return upper == at.begin() ? std::size_t(0) : std::min(at.size() - 1, std::size_t(upper - at.begin()) - 1);
+        };
+        // Blend with the previous estimate so the iteration settles.
+        if (!hardness.empty()) {
+            for (std::size_t k = 0; k < cell_g.size(); ++k) { cell_g[k] = std::sqrt(cell_g[k] * hardness[cell_of(hardness_s, cell_s[k])]); }
+        }
+        hardness_s = cell_s;
+        hardness = cell_g;
+        const std::function<double(double)> shape = [&](double s) {
+            const std::size_t j = cell_of(hardness_s, s), j1 = std::min(hardness.size() - 1, j + 1);
+            return std::pow(std::max(hardness[j], hardness[j1]), -0.25);
+        };
+        plan = plan_rows(profile, rows, finest, coarsest, growth, &shape);
+    }
+    if (error != nullptr) { *error = best_error; }
+    return best;
 }
 
 // Chains planar runs of samples (each an edge of one source patch) into one
@@ -327,7 +425,7 @@ inline void revolve_sheet(const ProfileCurve& profile, const SheetPlan& plan, st
 // edges in the symmetry plane z = 0. The patches are chained along the tube
 // and the whole becomes one sheet, closed around.
 inline void tube_sheet(const float (*const* patches)[3], int count, int points, std::size_t rows, std::size_t around, Lattice& lattice,
-                       std::vector<double>& row_arc) {
+                       std::vector<double>& row_arc, bool rows_by_error = false) {
     const std::size_t n = std::size_t(points);
     struct Half {
         std::vector<Vec3> grid; // [b * n + a]: a around, b along
@@ -430,7 +528,7 @@ inline void tube_sheet(const float (*const* patches)[3], int count, int points, 
         surfaces[k].compile();
     }
     seam.build_table(8);
-    const SheetPlan plan = plan_rows(seam, rows, seam.length / 2000.0, seam.length / 24.0);
+    const SheetPlan plan = rows_by_error ? plan_rows_by_error(seam, rows, false) : plan_rows(seam, rows, seam.length / 2000.0, seam.length / 24.0);
     row_arc = plan.row_arc;
     lattice.wrap_u = true;
     lattice.closure = Closure::cubic;

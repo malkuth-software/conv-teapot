@@ -107,9 +107,9 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
         <label class="check"><input type="checkbox" data-key="18"> polished floor</label>
       </fieldset>
       <fieldset>
-        <legend>Ray tracing</legend>
+        <legend>Renderer</legend>
         <label class="row">Method
-          <select data-key="3"><option value="0">transport</option><option value="1">independent (BVH)</option></select></label>
+          <select data-key="3" id="method"><option value="0">ray tracing: transport</option><option value="1">ray tracing: independent (BVH)</option><option value="3">ray tracing: seeded by the baked mesh</option><option value="2">baked mesh (rasterizer)</option></select></label>
         <label class="row">Lattice / node
           <select data-key="15"><option>2</option><option selected>4</option><option>8</option></select></label>
         <label class="row">Frame
@@ -118,9 +118,25 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
         <label class="check"><input type="checkbox" data-key="11"> show solver work</label>
       </fieldset>
       <fieldset>
+        <legend>Baked mesh</legend>
+        <button class="primary" id="bakeVertices">Bake vertices</button><button id="bakeLight">Bake light</button>
+        <label class="row">Layout
+          <select data-key="27"><option value="0">uniform 4 × 4</option><option value="1">bounds (from the nodes)</option><option value="2" selected>tree (adaptive)</option></select></label>
+        <label class="row">Tolerance
+          <select data-key="28"><option>0.02</option><option selected>0.01</option><option>0.005</option><option>0.002</option></select></label>
+        <label class="row">Normal turn
+          <select data-key="29"><option value="0">no limit</option><option value="30">30°</option><option value="20" selected>20°</option><option value="10">10°</option></select></label>
+        <label class="row">Light texel
+          <select data-key="33"><option>0.032</option><option selected>0.016</option><option>0.008</option></select></label>
+        <label class="check"><input type="checkbox" data-key="30" checked> show baked light</label>
+        <label class="check"><input type="checkbox" data-key="34" checked> moving reflections</label>
+        <label class="check"><input type="checkbox" data-key="31"> show triangles</label>
+        <p class="hint">Bake vertices samples the CONV surfaces once to a triangle mesh, drawn by a CPU rasterizer with no surface evaluation per frame. Bake light then has the ray tracer shade every texel of a light map as seen from the camera now; with moving reflections on, the map keeps only light that does not depend on the view, and highlights and the floor’s reflection are added each frame from emitters along the mirror direction: the sky and window above, and below an invisible stand-in for the floor that carries its baked shadow.</p>
+      </fieldset>
+      <fieldset>
         <legend>Simulation</legend>
         <button class="primary" id="drop">Drop</button><button id="pause">Run</button><button id="reset">Reset</button>
-        <p class="hint">The drop is a rigid-body simulation shown at half speed. Drag the teapot to lift and carry it. Drag the background, or hold <kbd>Shift</kbd>, to orbit. Scroll to zoom. Double-click to poke.</p>
+        <p class="hint">The drop is a rigid-body simulation shown at half speed. Drag the teapot: it is held at the point you picked and swings from there. Drag the background, or hold <kbd>Shift</kbd>, to orbit. Scroll to zoom. Double-click to poke.</p>
       </fieldset>
     </div>
   </div>
@@ -157,7 +173,12 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
       const s = (k) => engine._tp_stat(k);
       smooth = smooth === 0 ? s(0) : 0.85 * smooth + 0.15 * s(0);
       const hits = Math.max(1, s(4));
-      stats.textContent =
+      const methodNow = document.getElementById('method').value, raster = methodNow === '2' || methodNow === '3';
+      stats.textContent = raster ?
+        `${smooth.toFixed(1)} ms/frame (rasterize ${s(2).toFixed(1)}, shade ${s(3).toFixed(1)}` +
+        (running() ? `, physics ${s(9).toFixed(2)}, ${s(12)} contacts` : '') + `)\n` +
+        `${s(8)} nodes \u2192 ${s(13)} vertices · ${s(14)} triangles, baked in ${s(15).toFixed(0)} ms from ${s(18)} surface evaluations · ` +
+        (methodNow === '3' ? `${(s(6) / hits).toFixed(2)} evaluations per surface pixel` : s(16) > 0 ? `light map: ${s(16)} texels in ${s(17).toFixed(0)} ms` : 'light not baked: shaded per pixel') :
         `${smooth.toFixed(1)} ms/frame (lattice ${s(1).toFixed(1)}, predict ${s(2).toFixed(1)}, solve+shade ${s(3).toFixed(1)}` +
         (running() ? `, physics ${s(9).toFixed(2)}, ${s(12)} contacts` : '') + `)\n` +
         `${s(8)} nodes · ${s(7)} lattice points · ${s(4)} surface pixels · ${(s(6) / hits).toFixed(2)} evaluations per surface pixel` +
@@ -197,6 +218,9 @@ kbd { background: var(--key); border: 1px solid var(--line); border-radius: 4px;
     const [w, h] = event.target.value.split('x').map(Number);
     resize(w, h);
   });
+  const useMesh = () => { const m = document.getElementById('method'); if (m.value !== '2') { m.value = '2'; engine._tp_set(3, 2); } };
+  document.getElementById('bakeVertices').addEventListener('click', () => { useMesh(); engine._tp_action(2); dirty = true; });
+  document.getElementById('bakeLight').addEventListener('click', () => { useMesh(); engine._tp_action(3); dirty = true; });
   document.getElementById('drop').addEventListener('click', () => { engine._tp_action(0); dirty = true; });
   document.getElementById('reset').addEventListener('click', () => { engine._tp_action(1); dirty = true; });
   pauseButton.addEventListener('click', () => { engine._tp_set(12, running() ? 0 : 1); dirty = true; });

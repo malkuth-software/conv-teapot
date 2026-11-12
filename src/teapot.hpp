@@ -68,7 +68,13 @@ struct TeapotOptions {
     // Unified version: blend the handle and spout into the body.
     bool joins = true;
     // Unified sheets: rows along the profile and nodes around.
-    std::size_t sheet_rows = 96, sheet_around = 24;
+    // The lid takes three quarters of the body's rows, the spout half, the
+    // handle a third; the tubes have their own count around. The defaults
+    // hold every sheet within about 1e-3 of its source (tools/unified_study).
+    std::size_t sheet_rows = 72, sheet_around = 12, tube_around = 16;
+    // Unified sheets: place rows by CONV's own error (plan_rows_by_error)
+    // instead of by the profile's radius of curvature.
+    bool rows_by_error = true;
 };
 
 struct TeapotPart {
@@ -345,8 +351,9 @@ inline Teapot make_teapot(const TeapotOptions& options) {
                 runs.push_back(run);
             }
             const ProfileCurve profile = chain_runs(runs);
-            const std::size_t rows = std::string(group) == "body" ? options.sheet_rows : options.sheet_rows / 2;
-            const SheetPlan plan = plan_rows(profile, rows, profile.length / 3000.0, profile.length / 30.0);
+            const std::size_t rows = std::string(group) == "body" ? options.sheet_rows : options.sheet_rows * 3 / 4;
+            const SheetPlan plan = options.rows_by_error ? plan_rows_by_error(profile, rows, true)
+                                                         : plan_rows(profile, rows, profile.length / 3000.0, profile.length / 30.0);
             auto part = std::make_unique<TeapotPart>();
             part->name = group;
             part->group = group;
@@ -372,7 +379,7 @@ inline Teapot make_teapot(const TeapotOptions& options) {
             part->sampled = true;
             part->hull = is_handle ? 2 : 3;
             tube_sheet(patches.data(), count, utah::dense_tube_points, is_handle ? options.sheet_rows / 3 : options.sheet_rows / 2,
-                       std::max<std::size_t>(8, options.sheet_around * 2 / 3), part->conv.lattice, part->row_param);
+                       std::max<std::size_t>(8, (options.tube_around + 1) / 2 * 2), part->conv.lattice, part->row_param, options.rows_by_error);
             for (Vec3& node : part->conv.lattice.nodes) { node.y *= y_scale; }
             part->per_u = part->per_v = 0;
             part->conv.bubble = options.bubble;

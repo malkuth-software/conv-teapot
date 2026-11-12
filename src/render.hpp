@@ -14,6 +14,7 @@
 // lattice cells) is kept as the comparison.
 #pragma once
 #include "blend.hpp"
+#include "raster.hpp"
 #include "surface.hpp"
 #include <algorithm>
 #include <atomic>
@@ -40,7 +41,10 @@ struct RenderPart {
     std::vector<const Trim*> trims;   // regions of this surface that are not shown
 };
 
-enum class Method : unsigned char { transport, independent };
+// transport and independent trace the surface itself; raster draws the baked
+// mesh; seeded traces the surface itself, each ray starting from where the
+// rasterized mesh says it lands.
+enum class Method : unsigned char { transport, independent, raster, seeded };
 enum class Wire : unsigned char { off, overlay, only };
 enum class TextureFilter : unsigned char { nearest, bilinear, conv };
 enum class TextureMap : unsigned char { part, patch };
@@ -66,6 +70,20 @@ struct RenderOptions {
     // Newton step and is accepted without a second evaluation; the step's
     // own error is second order in that residual. 0 always re-evaluates.
     double one_step_px = 0.35;
+    // Method::raster: the baked mesh drawn by the CPU rasterizer.
+    int supersample = 2;      // visibility samples per pixel, each way
+    bool baked_light = true;  // show the mesh's light maps when it has them
+    bool mesh_lines = false;  // draw the triangle edges
+    // Where the shadow map's texels disagree, trace the light ray to the
+    // surface itself: a shadow's edge is then as sharp as the surface makes
+    // it, whatever the map's resolution.
+    bool exact_shadows = true;
+    // Baked light: keep in the light map only what does not depend on the
+    // view, and add reflections per frame from emitters along each pixel's
+    // mirror direction (the sky and window above, a stand-in for the floor
+    // below), so highlights move with the camera.
+    bool live_reflection = true;
+    bool diffuse_only = false; // set by the bake: shade_surface stops before the view-dependent terms
 };
 
 struct RenderStats {
@@ -109,6 +127,7 @@ struct Scene {
     std::vector<RenderPart> parts;
     std::vector<const Texture*> textures;
     double ground_y = 0.0;
+    Mesh* mesh = nullptr; // baked geometry, for Method::raster and for light baking
     Vec3 light = normalize(Vec3{-0.45, 0.85, 0.35}); // direction towards the light
 };
 
@@ -298,31 +317,72 @@ struct ShadowMap {
     Vec3 x, y, z, centre;
     double radius = 1.0;
     std::vector<float> depth;
+    // What each texel saw nearest the light: the part and where on it.
+    // A shadow's edge is settled on the surface itself from these.
+    std::vector<float> u, v;
+    std::vector<std::uint16_t> part; // 0xffff: nothing
+    void clear(int n) {
+        size = n;
+        depth.assign(std::size_t(n) * std::size_t(n), 1e30f);
+        u.assign(depth.size(), 0.0f);
+        v.assign(depth.size(), 0.0f);
+        part.assign(depth.size(), std::uint16_t(0xffff));
+    }
+    // Do the texels around p agree? 1: all say lit, 0: all say shadowed,
+    // -1: they differ. `own(part, u, v)` is true for a texel that saw the
+    // receiving surface's own neighbourhood, which cannot shade it; such a
+    // texel counts as lit, so the band of doubt along a terminator is not
+    // mistaken for a shadow's edge.
+    template<class Own> int settled(Vec3 p, double bias, Own own) const {
+        double sx, sy, sz;
+        project(p, sx, sy, sz);
+        const int ix = int(std::floor(sx)), iy = int(std::floor(sy));
+        int open = 0, shut = 0;
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                const int tx = ix + dx, ty = iy + dy;
+                if (tx < 0 || ty < 0 || tx >= size || ty >= size) {
+                    ++open;
+                    continue;
+                }
+                const std::size_t index = std::size_t(ty) * std::size_t(size) + std::size_t(tx);
+                if (sz - bias <= double(depth[index]) || own(part[index], u[index], v[index])) {
+                    ++open;
+                } else {
+                    ++shut;
+                }
+            }
+        }
+        return shut == 0 ? 1 : open == 0 ? 0 : -1;
+    }
     void project(Vec3 p, double& sx, double& sy, double& sz) const {
         const Vec3 d = p - centre;
         sx = (dot(d, x) / radius * 0.5 + 0.5) * double(size);
         sy = (dot(d, y) / radius * 0.5 + 0.5) * double(size);
         sz = -dot(d, z); // grows away from the light
     }
+    // The lit fraction at p. The four depth texels around p are each tested
+    // and the results blended by p's position between their centres, so the
+    // answer changes continuously as p moves: a shadow's edge is a ramp one
+    // texel wide, not a staircase of texels.
     double lit(Vec3 p, double bias) const {
         if (size == 0) { return 1.0; }
         double sx, sy, sz;
         project(p, sx, sy, sz);
-        double sum = 0.0;
-        for (int k = 0; k < 4; ++k) {
-            const int ix = int(std::floor(sx + (k & 1 ? 0.35 : -0.35)));
-            const int iy = int(std::floor(sy + (k & 2 ? 0.35 : -0.35)));
-            if (ix < 0 || iy < 0 || ix >= size || iy >= size) {
-                sum += 1.0;
-                continue;
-            }
-            sum += sz - bias <= double(depth[std::size_t(iy) * std::size_t(size) + std::size_t(ix)]) ? 1.0 : 0.0;
-        }
-        return 0.25 * sum;
+        const double x = sx - 0.5, y = sy - 0.5;
+        const double fx = std::floor(x), fy = std::floor(y);
+        const double ax = x - fx, ay = y - fy;
+        const int ix = int(fx), iy = int(fy);
+        const auto open = [&](int tx, int ty) {
+            if (tx < 0 || ty < 0 || tx >= size || ty >= size) { return 1.0; }
+            return sz - bias <= double(depth[std::size_t(ty) * std::size_t(size) + std::size_t(tx)]) ? 1.0 : 0.0;
+        };
+        return (open(ix, iy) * (1.0 - ax) + open(ix + 1, iy) * ax) * (1.0 - ay) + (open(ix, iy + 1) * (1.0 - ax) + open(ix + 1, iy + 1) * ax) * ay;
     }
 };
 
-inline void raster_depth(ShadowMap& map, const double* a, const double* b, const double* c) {
+// Corners are (x, y, depth, u, v).
+inline void raster_depth(ShadowMap& map, const double* a, const double* b, const double* c, std::uint16_t part) {
     const double area = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
     if (std::fabs(area) < 1e-12) { return; }
     const int x0 = std::max(0, int(std::floor(std::min({a[0], b[0], c[0]}))));
@@ -337,8 +397,13 @@ inline void raster_depth(ShadowMap& map, const double* a, const double* b, const
             const double w2 = 1.0 - w0 - w1;
             if (w0 < -0.02 || w1 < -0.02 || w2 < -0.02) { continue; }
             const float z = float(w0 * a[2] + w1 * b[2] + w2 * c[2]);
-            float& slot = map.depth[std::size_t(y) * std::size_t(map.size) + std::size_t(x)];
-            if (z < slot) { slot = z; }
+            const std::size_t index = std::size_t(y) * std::size_t(map.size) + std::size_t(x);
+            if (z < map.depth[index]) {
+                map.depth[index] = z;
+                map.u[index] = float(w0 * a[3] + w1 * b[3] + w2 * c[3]);
+                map.v[index] = float(w0 * a[4] + w1 * b[4] + w2 * c[4]);
+                map.part[index] = part;
+            }
         }
     }
 }
@@ -358,9 +423,15 @@ inline double smoothstep(double a, double b, double x) {
     return t * t * (3.0 - 2.0 * t);
 }
 
+// Linear light to a display byte (gamma 2), by table: 65536 steps of light
+// are finer than a byte everywhere.
 inline std::uint8_t to_byte(double linear) {
-    const double c = linear <= 0.0 ? 0.0 : linear >= 1.0 ? 1.0 : std::sqrt(linear); // gamma 2
-    return std::uint8_t(c * 255.0 + 0.5);
+    static const std::vector<std::uint8_t> table = [] {
+        std::vector<std::uint8_t> t(65536);
+        for (int k = 0; k < 65536; ++k) { t[std::size_t(k)] = std::uint8_t(std::sqrt((k + 0.5) / 65536.0) * 255.0 + 0.5); }
+        return t;
+    }();
+    return linear <= 0.0 ? std::uint8_t(0) : linear >= 1.0 ? std::uint8_t(255) : table[std::size_t(linear * 65536.0)];
 }
 
 } // namespace detail
@@ -374,6 +445,11 @@ public:
         stats = RenderStats{};
         const double start = now_ms();
         const View view(camera, frame.width, frame.height);
+        if ((options.method == Method::raster || options.method == Method::seeded) && scene.mesh != nullptr) {
+            render_mesh(scene, view, options, frame);
+            stats.ms_total = now_ms() - start;
+            return;
+        }
         // The eye mirrored in the floor: its view of the scene is the floor's reflection.
         View mirror = view;
         mirror.eye.y = 2.0 * scene.ground_y - view.eye.y;
@@ -448,6 +524,7 @@ private:
 
     void build_shadow_map(const Scene& scene, const RenderOptions& options) {
         shadow_.size = 0;
+        shadow_version_ = 0;
         if (!options.shadows || !options.lighting) { return; }
         Vec3 low{1e30, 1e30, 1e30}, high{-1e30, -1e30, -1e30};
         for (const detail::PartLattice& lattice : lattices_) {
@@ -462,18 +539,20 @@ private:
         const Vec3 helper = std::fabs(scene.light.y) < 0.9 ? Vec3{0, 1, 0} : Vec3{1, 0, 0};
         shadow_.x = normalize(cross(helper, shadow_.z));
         shadow_.y = cross(shadow_.z, shadow_.x);
-        shadow_.size = 512;
-        shadow_.depth.assign(std::size_t(shadow_.size) * std::size_t(shadow_.size), 1e30f);
-        for (const detail::PartLattice& lattice : lattices_) {
+        shadow_.clear(512);
+        for (std::size_t part = 0; part < lattices_.size(); ++part) {
+            const detail::PartLattice& lattice = lattices_[part];
             for (int j = 0; j + 1 < lattice.nv; ++j) {
                 for (int i = 0; i + 1 < lattice.nu; ++i) {
-                    double corner[4][3];
+                    double corner[4][5];
                     for (int c = 0; c < 4; ++c) {
                         const std::size_t index = std::size_t(j + (c >> 1)) * std::size_t(lattice.nu) + std::size_t(i + (c & 1));
                         shadow_.project(lattice.p[index], corner[c][0], corner[c][1], corner[c][2]);
+                        corner[c][3] = double(i + (c & 1)) * lattice.step;
+                        corner[c][4] = double(j + (c >> 1)) * lattice.step;
                     }
-                    detail::raster_depth(shadow_, corner[0], corner[1], corner[3]);
-                    detail::raster_depth(shadow_, corner[0], corner[3], corner[2]);
+                    detail::raster_depth(shadow_, corner[0], corner[1], corner[3], std::uint16_t(part));
+                    detail::raster_depth(shadow_, corner[0], corner[3], corner[2], std::uint16_t(part));
                 }
             }
         }
@@ -854,12 +933,83 @@ private:
         return sky(scene, origin, unit);
     }
 
-    Vec3 floor_colour(const Scene& scene, const RenderOptions& options, Vec3 p, double t) const {
+    // Is the light visible from q? The shadow map's texels around q name
+    // the surfaces that may be in the way and where; each is tried by a
+    // Newton solve of the light ray against the surface itself.
+    template<class Own>
+    bool light_ray_open(const Scene& scene, const RenderOptions& options, const detail::View& primary, Vec3 q, Own own, Work& work) const {
+        double sx, sy, sz;
+        shadow_.project(q, sx, sy, sz);
+        const int ix = int(std::floor(sx)), iy = int(std::floor(sy));
+        struct Seed {
+            std::uint16_t part;
+            float u, v;
+        };
+        Seed tried[9];
+        int count = 0;
+        detail::View view = primary;
+        view.eye = q;
+        view.forward = scene.light;
+        for (int dy = -1; dy <= 1; ++dy) {
+            for (int dx = -1; dx <= 1; ++dx) {
+                const int tx = ix + dx, ty = iy + dy;
+                if (tx < 0 || ty < 0 || tx >= shadow_.size || ty >= shadow_.size) { continue; }
+                const std::size_t index = std::size_t(ty) * std::size_t(shadow_.size) + std::size_t(tx);
+                const Seed seed{shadow_.part[index], shadow_.u[index], shadow_.v[index]};
+                if (seed.part >= scene.parts.size() || !(double(shadow_.depth[index]) < sz - 0.01) || own(seed.part, seed.u, seed.v)) { continue; }
+                bool repeat = false;
+                for (int k = 0; k < count; ++k) {
+                    repeat = repeat || (tried[k].part == seed.part && std::fabs(tried[k].u - seed.u) < 0.75f && std::fabs(tried[k].v - seed.v) < 0.75f);
+                }
+                if (repeat) { continue; }
+                tried[count++] = seed;
+                detail::Solve solve;
+                solve.u = double(seed.u);
+                solve.v = double(seed.v);
+                ++work.solves;
+                const bool hit = detail::solve_ray(*scene.parts[seed.part].surface, view, scene.light, options.tolerance_px * 4.0, options.one_step_px, 2.5, solve);
+                work.evaluations += std::size_t(solve.evaluations);
+                if (hit && solve.t > 0.03 && !hidden(scene.parts[seed.part], solve.u, solve.v)) { return false; }
+            }
+        }
+        return true;
+    }
+
+    // The lit fraction at p. `pixel` is the size of a pixel there and t1, t2
+    // two directions in the surface. Where the shadow map's texels differ,
+    // light rays are traced from a rotated grid inside the pixel: two
+    // first, and the other two only if those disagree. `self` is the part p
+    // lies on (0xffff: none, the floor) and (self_u, self_v) where.
+    double shadow_lit(const Scene& scene, const RenderOptions& options, const detail::View& primary, Vec3 p, double bias, double pixel, Vec3 t1, Vec3 t2,
+                      std::uint16_t self, double self_u, double self_v, Work& work) const {
+        if (!options.exact_shadows || !(pixel > 0.0) || shadow_.part.empty()) { return shadow_.lit(p, bias); }
+        const double turn = self < scene.parts.size() && scene.parts[self].surface->periodic_u() ? double(scene.parts[self].surface->cells_u()) : 0.0;
+        const auto own = [&](std::uint16_t part, float u, float v) {
+            if (part != self) { return false; }
+            double du = std::fabs(double(u) - self_u);
+            if (turn > 0.0) {
+                du = std::fmod(du, turn);
+                du = std::min(du, turn - du);
+            }
+            return du < 0.75 && std::fabs(double(v) - self_v) < 0.75;
+        };
+        const int agreed = shadow_.settled(p, bias, own);
+        if (agreed >= 0) { return double(agreed); }
+        static constexpr double grid[4][2] = {{-0.375, -0.125}, {0.375, 0.125}, {0.125, -0.375}, {-0.125, 0.375}};
+        const auto ray = [&](int k) { return light_ray_open(scene, options, primary, p + t1 * (grid[k][0] * pixel) + t2 * (grid[k][1] * pixel), own, work) ? 1.0 : 0.0; };
+        const double first = ray(0), second = ray(1);
+        if (first == second) { return first; }
+        return 0.25 * (first + second + ray(2) + ray(3));
+    }
+
+    Vec3 floor_colour(const Scene& scene, const RenderOptions& options, Vec3 p, double t, const detail::View* primary = nullptr, Work* work = nullptr) const {
         const long ix = long(std::floor(p.x)), iz = long(std::floor(p.z));
         const Vec3 base = ((ix + iz) & 1) != 0 ? Vec3{0.50, 0.52, 0.55} : Vec3{0.66, 0.68, 0.71};
         double light = 1.0;
         if (options.lighting) {
-            const double lit = options.shadows ? shadow_.lit(p, 0.02) : 1.0;
+            const double lit = !options.shadows ? 1.0
+                               : primary != nullptr ? shadow_lit(scene, options, *primary, p + Vec3{0.0, 0.004, 0.0}, 0.02, t / primary->focal, Vec3{1, 0, 0}, Vec3{0, 0, 1}, std::uint16_t(0xffff), 0.0, 0.0, *work)
+                                                    : shadow_.lit(p, 0.02);
             light = 0.55 + 0.45 * lit * std::fmax(0.0, scene.light.y);
         }
         const double fade = detail::smoothstep(18.0, 60.0, t);
@@ -867,7 +1017,7 @@ private:
     }
 
     Vec3 shade_surface(const Scene& scene, const RenderOptions& options, const detail::View& primary, Vec3 dir, const detail::Solve& solve,
-                       std::uint16_t part_index, int depth, Work& work) const {
+                       std::uint16_t part_index, int depth, Work& work, double* lit_out = nullptr) const {
         const RenderPart& part = scene.parts[part_index];
         const Surface& surface = *part.surface;
         Vec3 normal = cross(solve.point.du, solve.point.dv);
@@ -919,12 +1069,20 @@ private:
         Vec3 colour = base;
         if (options.lighting) {
             const double n_l = dot(normal, scene.light);
-            const double lit = options.shadows && n_l > 0.0 ? shadow_.lit(solve.point.p + normal * 0.02, 0.035) : 1.0;
+            double lit = 1.0;
+            if (options.shadows && n_l > 0.0) {
+                const double lu = length(solve.point.du), lv = length(solve.point.dv);
+                lit = depth == 0 && lu > 1e-9 && lv > 1e-9
+                          ? shadow_lit(scene, options, primary, solve.point.p + normal * 0.02, 0.035, solve.t / primary.focal, solve.point.du * (1.0 / lu),
+                                       solve.point.dv * (1.0 / lv), part_index, solve.u, solve.v, work)
+                          : shadow_.lit(solve.point.p + normal * 0.02, 0.035);
+            }
             const double diffuse = std::fmax(0.0, n_l) * lit;
             const double up = 0.5 * (normal.y + 1.0);
             const Vec3 ambient = Vec3{0.30, 0.28, 0.26} * (1.0 - up) + Vec3{0.46, 0.50, 0.56} * up;
             colour = Vec3{base.x * (ambient.x + 0.80 * diffuse), base.y * (ambient.y + 0.78 * diffuse), base.z * (ambient.z + 0.74 * diffuse)};
-            if (options.wire != Wire::only) {
+            if (lit_out != nullptr) { *lit_out = lit; }
+            if (options.wire != Wire::only && !options.diffuse_only) {
                 const double n_v = std::fmax(0.0, dot(normal, to_eye));
                 const double f0 = chrome ? 0.86 : 0.05;
                 const double fresnel = f0 + (1.0 - f0) * std::pow(1.0 - n_v, 5.0);
@@ -1022,7 +1180,7 @@ private:
         }
         if (!(ground_t > 0.0)) { return options.gloss || options.floor_reflection ? sky(scene, view.eye, dir) : background(dir); }
         const Vec3 p = view.eye + dir * ground_t;
-        Vec3 colour = floor_colour(scene, options, p, ground_t);
+        Vec3 colour = floor_colour(scene, options, p, ground_t, &view, &work);
         if (options.floor_reflection && options.lighting && view.eye.y > scene.ground_y) {
             // A polished floor: the reflected view is the view from the eye
             // mirrored in the floor, so its rays are as coherent as the
@@ -1137,6 +1295,363 @@ private:
         }
     }
 
+    // ---- baked mesh ------------------------------------------------------
+public:
+    // Paint the mesh's light maps: every texel is shaded as the ray tracer
+    // shades a hit there, seen from the camera, and the result is stored
+    // with its chain of half-size levels. A texel that faces away from the
+    // camera is shaded for the mirror image of the view direction, so the
+    // far side holds its own outward lighting. `texel` is the texel size in
+    // model units.
+    void bake_light(const Scene& scene, const Camera& camera, const RenderOptions& options, int width, int height, double texel = 0.016) {
+        using namespace detail;
+        Mesh& mesh = *scene.mesh;
+        const double start = now_ms();
+        const View view(camera, width, height);
+        RenderOptions bake = options;
+        bake.diffuse_only = options.live_reflection && options.material != 2 && options.wire != Wire::only && options.lighting;
+        mesh.lit_diffuse_only = bake.diffuse_only;
+        transport_lattices(scene, view, nullptr, options);
+        build_shadow_map(scene, options);
+        nodes_.clear();
+        if (options.gloss && options.lighting) { build_bvh(); }
+        mesh.texels = 0;
+        for (std::size_t k = 0; k < mesh.parts.size() && k < scene.parts.size(); ++k) {
+            MeshPart& part = mesh.parts[k];
+            const Surface& surface = *scene.parts[k].surface;
+            // The outward side: at the vertex furthest along x the normal points along x.
+            double facing = 1.0;
+            if (scene.parts[k].two_sided && part.vertex_count > 0) {
+                std::size_t far = part.first_vertex;
+                for (std::size_t index = part.first_vertex; index < part.first_vertex + part.vertex_count; ++index) {
+                    if (mesh.vertices[index].p.x > mesh.vertices[far].p.x) { far = index; }
+                }
+                facing = mesh.vertices[far].n.x * scene.parts[k].orientation < 0.0 ? -1.0 : 1.0;
+            }
+            LightMap::Level level;
+            level.width = std::min(2048, std::max(32, int(part.world_around / texel + 15.0) / 16 * 16));
+            level.height = std::min(2048, std::max(16, int(part.world_along / texel + 0.5)));
+            level.texel.resize(std::size_t(level.width) * std::size_t(level.height));
+            const double cu = double(surface.cells_u()), cv = double(surface.cells_v());
+            parallel_rows(level.height, options.threads, [&](int begin, int end, int) {
+                Work work;
+                for (int y = begin; y < end; ++y) {
+                    const double v = part.v_of((y + 0.5) / double(level.height));
+                    for (int x = 0; x < level.width; ++x) {
+                        Solve solve;
+                        solve.u = (x + 0.5) / double(level.width) * cu;
+                        solve.v = v;
+                        solve.point = surface.eval(solve.u, solve.v);
+                        solve.grad_u = cu / double(level.width);
+                        solve.grad_v = cv / double(level.height);
+                        Vec3 dir = solve.point.p - view.eye;
+                        solve.t = dot(dir, view.forward);
+                        const Vec3 normal = normalize(cross(solve.point.du, solve.point.dv)) * (scene.parts[k].orientation * facing);
+                        const double towards = dot(normal, dir);
+                        if (towards > 0.0) { dir = dir - normal * (2.0 * towards); }
+                        double lit = 1.0;
+                        const Vec3 colour = shade_surface(scene, bake, view, dir, solve, std::uint16_t(k), 0, work, &lit);
+                        level.texel[std::size_t(y) * std::size_t(level.width) + std::size_t(x)] =
+                            std::uint32_t(to_byte(colour.x)) | std::uint32_t(to_byte(colour.y)) << 8 | std::uint32_t(to_byte(colour.z)) << 16 |
+                            std::uint32_t(lit * 255.0 + 0.5) << 24;
+                    }
+                }
+            });
+            mesh.texels += level.texel.size();
+            part.light.wrap = surface.periodic_u();
+            part.light.levels.clear();
+            part.light.levels.push_back(std::move(level));
+            part.light.build_levels();
+        }
+        // The floor emitter: the shadow on the floor, over the square it can reach.
+        mesh.floor = FloorEmitter{};
+        if (options.shadows && options.lighting && options.ground && shadow_.size != 0 && scene.light.y > 0.05) {
+            FloorEmitter& floor = mesh.floor;
+            const Vec3 foot = shadow_.centre - scene.light * ((shadow_.centre.y - scene.ground_y) / scene.light.y);
+            const double half = shadow_.radius / scene.light.y + 0.25;
+            floor.size = 384;
+            floor.extent = 2.0 * half;
+            floor.x0 = foot.x - half;
+            floor.z0 = foot.z - half;
+            floor.lit.assign(std::size_t(floor.size) * std::size_t(floor.size), 1.0f);
+            const double texel_size = floor.extent / double(floor.size);
+            parallel_rows(floor.size, options.threads, [&](int begin, int end, int) {
+                Work work;
+                for (int y = begin; y < end; ++y) {
+                    for (int x = 0; x < floor.size; ++x) {
+                        const Vec3 p{floor.x0 + (x + 0.5) * texel_size, scene.ground_y + 0.004, floor.z0 + (y + 0.5) * texel_size};
+                        floor.lit[std::size_t(y) * std::size_t(floor.size) + std::size_t(x)] =
+                            float(shadow_lit(scene, options, view, p, 0.02, texel_size, Vec3{1, 0, 0}, Vec3{0, 0, 1}, std::uint16_t(0xffff), 0.0, 0.0, work));
+                    }
+                }
+            });
+            mesh.texels += floor.lit.size();
+        }
+        mesh.lit = true;
+        mesh.ms_light = now_ms() - start;
+    }
+
+private:
+    void build_shadow_map_mesh(const Scene& scene, const RenderOptions& options) {
+        const Mesh& mesh = *scene.mesh;
+        if (!options.shadows || !options.lighting || mesh.vertices.empty()) {
+            shadow_.size = 0;
+            shadow_version_ = 0;
+            return;
+        }
+        if (shadow_version_ == mesh.version && shadow_.size != 0) { return; }
+        Vec3 low{1e30, 1e30, 1e30}, high{-1e30, -1e30, -1e30};
+        for (const MeshVertex& vertex : mesh.vertices) {
+            low = {std::min(low.x, vertex.p.x), std::min(low.y, vertex.p.y), std::min(low.z, vertex.p.z)};
+            high = {std::max(high.x, vertex.p.x), std::max(high.y, vertex.p.y), std::max(high.z, vertex.p.z)};
+        }
+        shadow_.centre = (low + high) * 0.5;
+        shadow_.radius = 0.5 * length(high - low) * 1.02 + 1e-6;
+        shadow_.z = scene.light;
+        const Vec3 helper = std::fabs(scene.light.y) < 0.9 ? Vec3{0, 1, 0} : Vec3{1, 0, 0};
+        shadow_.x = normalize(cross(helper, shadow_.z));
+        shadow_.y = cross(shadow_.z, shadow_.x);
+        shadow_.clear(1024); // drawn once per pose, not per frame
+        std::vector<double> projected(mesh.vertices.size() * 5);
+        for (std::size_t k = 0; k < mesh.vertices.size(); ++k) {
+            shadow_.project(mesh.vertices[k].p, projected[k * 5], projected[k * 5 + 1], projected[k * 5 + 2]);
+            projected[k * 5 + 3] = double(mesh.vertices[k].u);
+            projected[k * 5 + 4] = double(mesh.vertices[k].v);
+        }
+        for (std::size_t t = 0; t < mesh.triangle_count(); ++t) {
+            detail::raster_depth(shadow_, &projected[std::size_t(mesh.triangles[t * 3]) * 5], &projected[std::size_t(mesh.triangles[t * 3 + 1]) * 5],
+                                 &projected[std::size_t(mesh.triangles[t * 3 + 2]) * 5], mesh.triangle_part[t]);
+        }
+        shadow_version_ = mesh.version;
+    }
+
+    // One sample of the visibility buffer, shaded. (sx, sy) is its position in pixels.
+    Vec3 shade_visible(const Scene& scene, const RenderOptions& options, const detail::View& view, const VisibilitySample& sample, double sx, double sy,
+                       Hit& hit, Work& work) const {
+        using namespace detail;
+        const Mesh& mesh = *scene.mesh;
+        const Vec3 dir = view.ray(sx, sy);
+        hit = Hit{};
+        double ground_t = -1.0;
+        if (options.ground && std::fabs(dir.y) > 1e-9) { ground_t = (scene.ground_y - view.eye.y) / dir.y; }
+        const double depth = sample.triangle != 0xffffffffu ? 1.0 / double(sample.iz) : 0.0;
+        if (sample.triangle == 0xffffffffu || (ground_t > 0.0 && ground_t < depth - 1e-4 && view.eye.y > scene.ground_y)) {
+            if (!(ground_t > 0.0)) { return options.gloss || options.floor_reflection ? sky(scene, view.eye, dir) : background(dir); }
+            return floor_colour(scene, options, view.eye + dir * ground_t, ground_t, &view, &work);
+        }
+        float w[3];
+        corner_weights(visibility_, mesh, sample, w);
+        const std::uint32_t* corner = &mesh.triangles[std::size_t(sample.triangle) * 3];
+        const MeshVertex &a = mesh.vertices[corner[0]], &b = mesh.vertices[corner[1]], &c = mesh.vertices[corner[2]];
+        const std::uint16_t part = mesh.triangle_part[sample.triangle];
+        hit.u = w[0] * a.u + w[1] * b.u + w[2] * c.u;
+        hit.v = w[0] * a.v + w[1] * b.v + w[2] * c.v;
+        hit.t = float(depth);
+        hit.part = part;
+        hit.solves = 0;
+        Vec3 colour;
+        if (options.method == Method::seeded) {
+            // The mesh says where the ray lands; Newton puts it on the surface itself.
+            Solve solve;
+            solve.u = double(hit.u);
+            solve.v = double(hit.v);
+            ++work.solves;
+            const bool ok = solve_ray(*scene.parts[part].surface, view, dir, options.tolerance_px, options.one_step_px, 1.5, solve);
+            work.evaluations += std::size_t(solve.evaluations);
+            if (ok && !hidden(scene.parts[part], solve.u, solve.v)) {
+                hit.u = float(solve.u);
+                hit.v = float(solve.v);
+                hit.t = float(solve.t);
+                hit.solves = 1;
+                return shade_surface(scene, options, view, dir, solve, part, 0, work);
+            }
+            // A ray the mesh catches and the surface does not (the mesh's
+            // tolerance at a silhouette): the mesh's own point is shown.
+        }
+        if (options.method == Method::raster && options.baked_light && mesh.lit && !mesh.parts[part].light.levels.empty()) {
+            float rgb[4];
+            mesh.parts[part].light.sample(w[0] * a.s + w[1] * b.s + w[2] * c.s, w[0] * a.t + w[1] * b.t + w[2] * c.t, triangle_lod_[sample.triangle], rgb);
+            // Stored display-encoded (gamma 2): back to linear.
+            colour = {double(rgb[0] * rgb[0]) / 65025.0, double(rgb[1] * rgb[1]) / 65025.0, double(rgb[2] * rgb[2]) / 65025.0};
+            if (mesh.lit_diffuse_only) {
+                // What depends on the view, as shade_surface has it, with the
+                // mirror direction answered by emitters instead of traced.
+                const double lit = double(rgb[3]) / 255.0;
+                Vec3 normal = normalize(a.n * double(w[0]) + b.n * double(w[1]) + c.n * double(w[2])) * scene.parts[part].orientation;
+                const Vec3 incoming = normalize(dir), to_eye = incoming * -1.0;
+                if (dot(normal, to_eye) < 0.0) { normal = normal * -1.0; }
+                const bool chrome = options.material == 1 && options.texture == 0;
+                const double f0 = chrome ? 0.86 : 0.05;
+                const double fresnel = f0 + (1.0 - f0) * std::pow(1.0 - std::fmax(0.0, dot(normal, to_eye)), 5.0);
+                const Vec3 reflected = incoming - normal * (2.0 * dot(incoming, normal));
+                if (options.gloss) {
+                    const Vec3 p = a.p * double(w[0]) + b.p * double(w[1]) + c.p * double(w[2]) + normal * 2e-3;
+                    Vec3 mirror;
+                    if (options.ground && reflected.y < -1e-9 && p.y > scene.ground_y) {
+                        // The stand-in floor: its pattern in closed form, its shadow from the bake.
+                        const double reach = (scene.ground_y - p.y) / reflected.y;
+                        const Vec3 q = p + reflected * reach;
+                        const long ix = long(std::floor(q.x)), iz = long(std::floor(q.z));
+                        const Vec3 base = ((ix + iz) & 1) != 0 ? Vec3{0.50, 0.52, 0.55} : Vec3{0.66, 0.68, 0.71};
+                        const double light = 0.55 + 0.45 * mesh.floor.lit_at(q.x, q.z) * std::fmax(0.0, scene.light.y);
+                        const double fade = smoothstep(18.0, 60.0, reach);
+                        mirror = base * light * (1.0 - fade) + Vec3{0.80, 0.84, 0.90} * fade;
+                    } else {
+                        mirror = sky(scene, p, reflected);
+                    }
+                    const Vec3 tint = chrome ? Vec3{0.95, 0.96, 0.98} : Vec3{1, 1, 1};
+                    const Vec3 under = chrome ? Vec3{0, 0, 0} : colour;
+                    colour = under * (1.0 - fresnel) + Vec3{mirror.x * tint.x, mirror.y * tint.y, mirror.z * tint.z} * (fresnel * (lit * 0.5 + 0.5));
+                } else {
+                    const Vec3 half = normalize(scene.light + to_eye);
+                    const double specular = std::pow(std::fmax(0.0, dot(normal, half)), 90.0) * lit;
+                    colour = colour * (1.0 - 0.6 * fresnel) + environment(reflected) * (0.6 * fresnel) + Vec3{1, 1, 1} * (0.55 * specular);
+                }
+            }
+        } else {
+            Solve solve;
+            solve.u = double(hit.u);
+            solve.v = double(hit.v);
+            solve.t = depth;
+            solve.point.p = a.p * double(w[0]) + b.p * double(w[1]) + c.p * double(w[2]);
+            // The interpolated normal, as a pair of tangents whose cross product it is.
+            const Vec3 normal = normalize(a.n * double(w[0]) + b.n * double(w[1]) + c.n * double(w[2]));
+            const Vec3 helper = std::fabs(normal.y) < 0.9 ? Vec3{0, 1, 0} : Vec3{1, 0, 0};
+            solve.point.du = normalize(cross(helper, normal));
+            solve.point.dv = cross(normal, solve.point.du);
+            // Parameter change per pixel, from the triangle's own slopes.
+            const double scale = double(visibility_.scale);
+            const double x0 = visibility_.sx[corner[0]], y0 = visibility_.sy[corner[0]];
+            const double x1 = visibility_.sx[corner[1]] - x0, y1 = visibility_.sy[corner[1]] - y0, x2 = visibility_.sx[corner[2]] - x0, y2 = visibility_.sy[corner[2]] - y0;
+            const double det = x1 * y2 - x2 * y1;
+            if (std::fabs(det) > 1e-9) {
+                const auto slope = [&](double f1, double f2) { return std::hypot((f1 * y2 - f2 * y1) / det, (f2 * x1 - f1 * x2) / det) * scale; };
+                solve.grad_u = slope(double(b.u) - double(a.u), double(c.u) - double(a.u));
+                solve.grad_v = slope(double(b.v) - double(a.v), double(c.v) - double(a.v));
+            }
+            colour = shade_surface(scene, options, view, dir, solve, part, 0, work);
+        }
+        if (options.mesh_lines) {
+            // Distance to the nearest edge of the triangle, in pixels.
+            const double scale = double(visibility_.scale);
+            const double x[3] = {visibility_.sx[corner[0]], visibility_.sx[corner[1]], visibility_.sx[corner[2]]};
+            const double y[3] = {visibility_.sy[corner[0]], visibility_.sy[corner[1]], visibility_.sy[corner[2]]};
+            const double area2 = std::fabs((x[1] - x[0]) * (y[2] - y[0]) - (x[2] - x[0]) * (y[1] - y[0]));
+            const double l[3] = {1.0 - double(sample.l1) - double(sample.l2), double(sample.l1), double(sample.l2)};
+            double nearest = 1e30;
+            for (int k = 0; k < 3; ++k) {
+                const double edge = std::hypot(x[(k + 1) % 3] - x[(k + 2) % 3], y[(k + 1) % 3] - y[(k + 2) % 3]);
+                nearest = std::min(nearest, l[k] * area2 / (edge > 1e-9 ? edge : 1e-9) / scale);
+            }
+            const double ink = 1.0 - smoothstep(0.2, 0.9, nearest);
+            colour = colour * (1.0 - 0.7 * ink) + Vec3{0.10, 0.22, 0.42} * (0.7 * ink);
+        }
+        return colour;
+    }
+
+    void render_mesh(const Scene& scene, const detail::View& view, const RenderOptions& options, Frame& frame) {
+        using namespace detail;
+        const Mesh& mesh = *scene.mesh;
+        const double start = now_ms();
+        build_shadow_map_mesh(scene, options);
+        nodes_.clear();
+        if (options.method == Method::seeded && options.gloss && options.lighting) {
+            // The traced bounce needs the lattices and their tree.
+            transport_lattices(scene, view, nullptr, options);
+            build_bvh();
+        }
+        stats.ms_lattice = now_ms() - start;
+        const double raster_start = now_ms();
+        const int scale = std::max(1, std::min(3, options.supersample));
+        visibility_.resize(frame.width, frame.height, scale);
+        rasterize(
+            mesh, [&](Vec3 p, double& x, double& y, double& z) { view.project(p, x, y, z); },
+            [&](std::uint16_t part, double u, double v) { return hidden(scene.parts[part], u, v); },
+            [&](int rows, const std::function<void(int, int)>& body) { parallel_rows(rows, options.threads, [&](int begin, int end, int) { body(begin, end); }); },
+            visibility_);
+        // Level of the light map for every triangle: texels per pixel.
+        const bool textured = options.method == Method::raster && options.baked_light && mesh.lit;
+        if (textured) {
+            triangle_lod_.assign(mesh.triangle_count(), 0.0f);
+            for (std::size_t t = 0; t < mesh.triangle_count(); ++t) {
+                const std::uint32_t* corner = &mesh.triangles[t * 3];
+                if (visibility_.iz[corner[0]] == 0.0f || visibility_.iz[corner[1]] == 0.0f || visibility_.iz[corner[2]] == 0.0f) { continue; }
+                const LightMap& light = mesh.parts[mesh.triangle_part[t]].light;
+                if (light.levels.empty()) { continue; }
+                const MeshVertex &a = mesh.vertices[corner[0]], &b = mesh.vertices[corner[1]], &c = mesh.vertices[corner[2]];
+                const double x1 = visibility_.sx[corner[1]] - visibility_.sx[corner[0]], y1 = visibility_.sy[corner[1]] - visibility_.sy[corner[0]];
+                const double x2 = visibility_.sx[corner[2]] - visibility_.sx[corner[0]], y2 = visibility_.sy[corner[2]] - visibility_.sy[corner[0]];
+                const double pixels = std::fabs(x1 * y2 - x2 * y1) / double(scale * scale);
+                const double s1 = (double(b.s) - double(a.s)) * light.levels[0].width, t1 = (double(b.t) - double(a.t)) * light.levels[0].height;
+                const double s2 = (double(c.s) - double(a.s)) * light.levels[0].width, t2 = (double(c.t) - double(a.t)) * light.levels[0].height;
+                const double texels = std::fabs(s1 * t2 - s2 * t1);
+                triangle_lod_[t] = pixels > 1e-9 && texels > 0.0 ? float(0.5 * std::log2(texels / pixels)) : 0.0f;
+            }
+        }
+        stats.ms_predict = now_ms() - raster_start;
+        const double shade_start = now_ms();
+        const int width = frame.width, height = frame.height;
+        std::vector<Work> totals(64);
+        parallel_rows(height, options.threads, [&](int begin, int end, int worker) {
+            Work work;
+            std::size_t hits = 0, edges = 0;
+            for (int y = begin; y < end; ++y) {
+                for (int x = 0; x < width; ++x) {
+                    const std::size_t pixel = std::size_t(y) * std::size_t(width) + std::size_t(x);
+                    // A pixel whose samples all show one part at one depth is shaded once.
+                    const VisibilitySample& first = visibility_.at(x * scale, y * scale);
+                    bool flat = true;
+                    for (int k = 1; k < scale * scale && flat; ++k) {
+                        const VisibilitySample& other = visibility_.at(x * scale + k % scale, y * scale + k / scale);
+                        const bool a = first.triangle != 0xffffffffu, b = other.triangle != 0xffffffffu;
+                        if (a != b) {
+                            flat = false;
+                        } else if (a && other.triangle != first.triangle) {
+                            flat = mesh.triangle_part[other.triangle] == mesh.triangle_part[first.triangle] && std::fabs(other.iz - first.iz) < 0.004f * first.iz;
+                        }
+                    }
+                    Hit hit;
+                    Vec3 colour;
+                    if (flat && !options.mesh_lines) {
+                        // Seeded rays go through the pixel's centre; the mesh alone is read at its first sample.
+                        const double offset = options.method == Method::seeded ? 0.5 : 0.5 / scale;
+                        colour = shade_visible(scene, options, view, first, x + offset, y + offset, hit, work);
+                    } else {
+                        Vec3 sum{};
+                        for (int k = 0; k < scale * scale; ++k) {
+                            Hit other;
+                            sum = sum + shade_visible(scene, options, view, visibility_.at(x * scale + k % scale, y * scale + k / scale),
+                                                      x + (k % scale + 0.5) / scale, y + (k / scale + 0.5) / scale, k == 0 ? hit : other, work);
+                            if (k > 0 && hit.t <= 0.0f && other.t > 0.0f) { hit = other; }
+                        }
+                        colour = sum * (1.0 / double(scale * scale));
+                        if (!flat) { ++edges; }
+                    }
+                    if (hit.t > 0.0f) { ++hits; }
+                    frame.hits[pixel] = hit;
+                    std::uint8_t* out = &frame.rgba[pixel * 4];
+                    out[0] = to_byte(colour.x);
+                    out[1] = to_byte(colour.y);
+                    out[2] = to_byte(colour.z);
+                    out[3] = 255;
+                }
+            }
+            Work& total = totals[std::size_t(worker)];
+            total.hits += hits;
+            total.edges += edges;
+            total.solves += work.solves;
+            total.evaluations += work.evaluations;
+        });
+        for (const Work& total : totals) {
+            stats.hit_pixels += total.hits;
+            stats.edge_pixels += total.edges;
+            stats.solves += total.solves;
+            stats.iterations += total.evaluations;
+        }
+        stats.lattice_points = mesh.vertices.size();
+        stats.ms_solve = now_ms() - shade_start;
+    }
+
     static Vec3 background(Vec3 dir) {
         const double t = 0.5 * (normalize(dir).y + 1.0);
         return Vec3{0.84, 0.86, 0.89} * (1.0 - t) + Vec3{0.93, 0.95, 0.98} * t;
@@ -1144,6 +1659,9 @@ private:
 
     std::vector<detail::PartLattice> lattices_;
     detail::ShadowMap shadow_;
+    std::uint64_t shadow_version_ = 0; // mesh version the shadow map was drawn from; 0: from the lattices
+    Visibility visibility_;
+    std::vector<float> triangle_lod_;
     std::vector<Candidate> candidates_, mirror_candidates_;
     std::vector<std::uint8_t> counts_, mirror_counts_;
     std::vector<Quad> quads_;

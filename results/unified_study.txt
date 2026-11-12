@@ -1,17 +1,30 @@
-rows  32  body  runs 9  length 8.511  lattice 24x33 = 792 nodes, 1 crease rows | distance from profile max 3.79e-02 rms 5.99e-03 | along profile: tangent turn max 4.9131 deg, curvature jump max 2.686e+01, mean relative 0.0122
-rows  32  lid   runs 5  length 3.366  lattice 24x31 = 744 nodes, 1 crease rows | distance from profile max 2.82e-02 rms 3.96e-03 | along profile: tangent turn max 1.2554 deg, curvature jump max 7.581e-02, mean relative 0.0049
-rows  48  body  runs 9  length 8.511  lattice 24x49 = 1176 nodes, 1 crease rows | distance from profile max 2.17e-02 rms 2.06e-03 | along profile: tangent turn max 0.6334 deg, curvature jump max 5.697e-01, mean relative 0.0238
-rows  48  lid   runs 5  length 3.366  lattice 24x31 = 744 nodes, 1 crease rows | distance from profile max 2.82e-02 rms 3.96e-03 | along profile: tangent turn max 1.2554 deg, curvature jump max 7.581e-02, mean relative 0.0049
-   body joint turns (deg): 0.00 0.00 0.00 115.46 0.02 0.01 0.00 0.00; worst distance at row 9.45, r 1.493 y 0.131; worst turn at row 10, r 1.506 y 0.167, spacing before 0.0706 after 0.0723
-rows  64  body  runs 9  length 8.511  lattice 24x65 = 1560 nodes, 1 crease rows | distance from profile max 4.54e-03 rms 5.38e-04 | along profile: tangent turn max 0.5844 deg, curvature jump max 2.354e-01, mean relative 0.0092
-   lid joint turns (deg): 0.00 0.01 90.00 0.00; worst distance at row 10.50, r 1.148 y 2.195; worst turn at row 12, r 1.234 y 2.243, spacing before 0.0782 after 0.0662
-rows  64  lid   runs 5  length 3.366  lattice 24x33 = 792 nodes, 1 crease rows | distance from profile max 1.96e-02 rms 3.24e-03 | along profile: tangent turn max 17.0202 deg, curvature jump max 3.828e+00, mean relative 0.0151
-rows  96  body  runs 9  length 8.511  lattice 24x97 = 2328 nodes, 1 crease rows | distance from profile max 2.56e-03 rms 2.78e-04 | along profile: tangent turn max 0.2289 deg, curvature jump max 1.331e+00, mean relative 0.0070
-rows  96  lid   runs 5  length 3.366  lattice 24x49 = 1176 nodes, 1 crease rows | distance from profile max 1.09e-02 rms 1.25e-03 | along profile: tangent turn max 0.0085 deg, curvature jump max 2.944e-02, mean relative 0.0021
+rows  32  body  runs 9  length 8.511  lattice 12x33 = 396 nodes, 1 crease rows | distance from profile max 1.26e-02 rms 2.67e-03 | along profile: tangent turn max 2.8444 deg, curvature jump max 2.028e+00, mean relative 0.0365
+rows  32  lid   runs 5  length 3.366  lattice 12x25 = 300 nodes, 1 crease rows | distance from profile max 6.40e-03 rms 1.55e-03 | along profile: tangent turn max 3.4140 deg, curvature jump max 3.007e-01, mean relative 0.0039
+rows  48  body  runs 9  length 8.511  lattice 12x49 = 588 nodes, 1 crease rows | distance from profile max 2.96e-03 rms 7.50e-04 | along profile: tangent turn max 1.4885 deg, curvature jump max 2.106e+00, mean relative 0.0064
+rows  48  lid   runs 5  length 3.366  lattice 12x37 = 444 nodes, 1 crease rows | distance from profile max 1.64e-03 rms 3.40e-04 | along profile: tangent turn max 0.3748 deg, curvature jump max 3.596e+00, mean relative 0.0295
+   body joint turns (deg): 0.00 0.00 0.00 115.46 0.02 0.01 0.00 0.00; worst distance at row 59.65, r 1.215 y 0.230; worst turn at row 35, r 1.353 y 2.400, spacing before 0.0467 after 0.0544
+rows  64  body  runs 9  length 8.511  lattice 12x65 = 780 nodes, 1 crease rows | distance from profile max 1.08e-03 rms 2.63e-04 | along profile: tangent turn max 0.1771 deg, curvature jump max 2.524e-02, mean relative 0.0020
+   lid joint turns (deg): 0.00 0.01 90.00 0.00; worst distance at row 20.35, r 1.299 y 2.258; worst turn at row 19, r 1.275 y 2.249, spacing before 0.0321 after 0.0248
+rows  64  lid   runs 5  length 3.366  lattice 12x49 = 588 nodes, 1 crease rows | distance from profile max 3.39e-04 rms 1.01e-04 | along profile: tangent turn max 0.3970 deg, curvature jump max 5.728e-02, mean relative 0.0027
+rows  72  body  runs 9  length 8.511  lattice 12x73 = 876 nodes, 1 crease rows | distance from profile max 6.60e-04 rms 1.79e-04 | along profile: tangent turn max 0.0442 deg, curvature jump max 2.518e-02, mean relative 0.0028
+rows  72  lid   runs 5  length 3.366  lattice 12x55 = 660 nodes, 1 crease rows | distance from profile max 3.12e-04 rms 7.56e-05 | along profile: tangent turn max 0.2564 deg, curvature jump max 4.972e-02, mean relative 0.0014
+rows  96  body  runs 9  length 8.511  lattice 12x97 = 1164 nodes, 1 crease rows | distance from profile max 4.06e-04 rms 1.16e-04 | along profile: tangent turn max 1.5009 deg, curvature jump max 1.628e-01, mean relative 0.0028
+rows  96  lid   runs 5  length 3.366  lattice 12x73 = 876 nodes, 1 crease rows | distance from profile max 1.26e-04 rms 4.98e-05 | along profile: tangent turn max 0.0411 deg, curvature jump max 2.011e-02, mean relative 0.0024
 
 Joins (unified version, default sizes): the band's edge on the body
-   parts 8, nodes 5392 (body 2328, lid 1176, handle 528, spout 784, joins 576)
-   handle_join  edge on the body: gap max 3.70e-04, normal mismatch max 1.598 deg; the join turns the normal by up to 89.5 deg across the band
-   handle_join  edge on the body: gap max 1.40e-04, normal mismatch max 4.177 deg; the join turns the normal by up to 88.6 deg across the band
-   spout_join   edge on the body: gap max 4.63e-04, normal mismatch max 1.298 deg; the join turns the normal by up to 89.8 deg across the band
-   spout_join   edge on the body: gap max 4.21e-04, normal mismatch max 17.119 deg; the join turns the normal by up to 90.0 deg across the band
+   parts 8, nodes 3104 (body 876, lid 660, handle 400, spout 592, joins 576)
+   handle_join  edge on the body: gap max 3.69e-04, normal mismatch max 1.668 deg; the join turns the normal by up to 89.5 deg across the band
+   handle_join  edge on the body: gap max 1.66e-04, normal mismatch max 4.019 deg; the join turns the normal by up to 88.4 deg across the band
+   spout_join   edge on the body: gap max 8.57e-04, normal mismatch max 1.705 deg; the join turns the normal by up to 89.8 deg across the band
+   spout_join   edge on the body: gap max 1.49e-04, normal mismatch max 17.366 deg; the join turns the normal by up to 89.9 deg across the band
+Unified sheets, node count against deviation (distance max in model units / normal max in degrees)
+rows by   rows around |  nodes | body                   | lid                    | handle                 | spout                 
+radius      96  24/16 |   5392 | 2328: 2.56e-03   6.69 | 1752: 5.52e-04   5.17 |  528: 2.61e-04   1.92 |  784: 8.08e-04  38.74 |
+error       96  24/16 |   5392 | 2328: 2.49e-04   3.07 | 1752: 7.91e-05   1.01 |  528: 2.71e-04   1.91 |  784: 8.02e-04  37.48 |
+error       96  16/16 |   4032 | 1552: 2.58e-04   3.07 | 1168: 7.56e-05   1.01 |  528: 2.71e-04   1.91 |  784: 8.02e-04  37.48 |
+error       96  12/16 |   3352 | 1164: 4.06e-04   3.07 |  876: 1.26e-04   1.16 |  528: 2.71e-04   1.91 |  784: 8.02e-04  37.48 |
+error       72  12/16 |   2528 |  876: 6.53e-04   6.81 |  660: 3.08e-04   2.40 |  400: 3.43e-04   1.92 |  592: 7.47e-04  33.69 |
+error       72  12/12 |   2280 |  876: 6.53e-04   6.81 |  660: 3.08e-04   2.40 |  300: 6.18e-04   2.49 |  444: 1.36e-03  29.45 |
+error       64  12/16 |   2248 |  780: 1.03e-03   6.78 |  588: 3.37e-04   2.62 |  352: 3.68e-04   1.91 |  528: 9.17e-04  28.32 |
+error       48  12/12 |   1536 |  588: 2.96e-03  20.93 |  444: 1.62e-03   6.43 |  204: 7.18e-04   2.47 |  300: 2.53e-03  38.95 |
+error       32   8/8  |    688 |  264: 1.28e-02  31.18 |  200: 5.36e-03  20.62 |   88: 2.13e-03   3.73 |  136: 5.06e-03  51.78 |

@@ -2,10 +2,154 @@
 // profile, and continuity along the profile.
 #include "../src/teapot.hpp"
 #include <cstdio>
+#include <string>
 using namespace tconv;
 
-int main() {
-    for (std::size_t rows : {32u, 48u, 64u, 96u}) {
+namespace {
+
+ProfileCurve reference_profile(bool is_body) {
+    std::vector<ProfileCurve::Run> runs;
+    for (int r = 0; r < (is_body ? utah::dense_body_runs : utah::dense_lid_runs); ++r) {
+        ProfileCurve::Run run;
+        for (int k = 0; k < utah::dense_profile_points; ++k) {
+            const float* p = is_body ? utah::dense_body_profile[r][k] : utah::dense_lid_profile[r][k];
+            run.x.push_back(double(p[0]));
+            run.y.push_back(double(p[1]));
+        }
+        runs.push_back(run);
+    }
+    ProfileCurve profile = chain_runs(runs);
+    profile.build_table(32);
+    return profile;
+}
+
+// Largest distance of a sheet of revolution from its profile, and the
+// largest angle between its normal and the profile's.
+void revolved_error(const TeapotPart& part, const ProfileCurve& profile, double& worst, double& worst_angle) {
+    worst = worst_angle = 0.0;
+    const Lattice& lattice = part.conv.lattice;
+    for (std::size_t cell = 0; cell + 1 < lattice.nv; ++cell) {
+        for (double f : {0.1, 0.3, 0.5, 0.7, 0.9}) {
+            const double v = double(cell) + f;
+            const SurfacePoint point = part.conv.eval(0.37, v);
+            const double r = std::hypot(point.p.x, point.p.z);
+            const double arc = part.row_param[cell] + f * (part.row_param[cell + 1] - part.row_param[cell]);
+            const double reach = 2.0 * (part.row_param[cell + 1] - part.row_param[cell]);
+            const auto first = std::lower_bound(profile.table_s.begin(), profile.table_s.end(), arc - reach);
+            std::size_t k = first == profile.table_s.begin() ? 0 : std::size_t(first - profile.table_s.begin()) - 1;
+            double best = 1e30, tx = 1.0, ty = 0.0;
+            for (; k + 1 < profile.table_s.size() && profile.table_s[k] <= arc + reach; ++k) {
+                const double ax = profile.table_x[k], ay = profile.table_y[k];
+                const double bx = profile.table_x[k + 1] - ax, by = profile.table_y[k + 1] - ay;
+                const double len2 = bx * bx + by * by;
+                const double t = len2 > 0.0 ? std::max(0.0, std::min(1.0, ((r - ax) * bx + (point.p.y - ay) * by) / len2)) : 0.0;
+                const double d = std::hypot(ax + t * bx - r, ay + t * by - point.p.y);
+                if (d < best && len2 > 0.0) {
+                    best = d;
+                    tx = bx / std::sqrt(len2);
+                    ty = by / std::sqrt(len2);
+                }
+            }
+            worst = std::max(worst, best);
+            const double c = r > 1e-9 ? point.p.x / r : 1.0, s = r > 1e-9 ? point.p.z / r : 0.0;
+            const Vec3 truth{ty * c, -tx, ty * s};
+            const Vec3 normal = normalize(cross(point.du, point.dv));
+            worst_angle = std::max(worst_angle, std::acos(std::min(1.0, std::fabs(dot(normal, truth)))) * 180.0 / M_PI);
+        }
+    }
+}
+
+// A cloud of points with normals over a finely sampled sheet.
+struct Cloud {
+    std::vector<Vec3> p, n;
+    explicit Cloud(const TeapotPart& part) {
+        for (double v = 0.0; v <= double(part.conv.cells_v()); v += 0.25) {
+            for (double u = 0.0; u < double(part.conv.cells_u()); u += 0.25) {
+                const SurfacePoint point = part.conv.eval(u, v);
+                p.push_back(point.p);
+                n.push_back(normalize(cross(point.du, point.dv)));
+            }
+        }
+    }
+    // Distance from the sheet under the nearest cloud point, along its
+    // normal, and the angle to that normal.
+    void compare(const TeapotPart& part, double& worst, double& worst_angle) const {
+        worst = worst_angle = 0.0;
+        const std::size_t cu = part.conv.cells_u();
+        for (std::size_t column : {std::size_t(0), cu / 4, cu / 2, (3 * cu) / 4}) {
+            for (double fu : {0.2, 0.5, 0.8}) {
+                for (std::size_t cell = 1; cell + 2 < part.conv.lattice.nv; ++cell) {
+                    for (double fv : {0.2, 0.5, 0.8}) {
+                        const SurfacePoint point = part.conv.eval(double(column) + fu, double(cell) + fv);
+                        std::size_t best = 0;
+                        double best_d = 1e30;
+                        for (std::size_t k = 0; k < p.size(); ++k) {
+                            const Vec3 d = p[k] - point.p;
+                            const double d2 = dot(d, d);
+                            if (d2 < best_d) {
+                                best_d = d2;
+                                best = k;
+                            }
+                        }
+                        worst = std::max(worst, std::fabs(dot(point.p - p[best], n[best])));
+                        const Vec3 normal = normalize(cross(point.du, point.dv));
+                        worst_angle = std::max(worst_angle, std::acos(std::min(1.0, std::fabs(dot(normal, n[best])))) * 180.0 / M_PI);
+                    }
+                }
+            }
+        }
+    }
+};
+
+// Node count against deviation for the whole unified teapot.
+void budget() {
+    const ProfileCurve body_profile = reference_profile(true), lid_profile = reference_profile(false);
+    TeapotOptions fine;
+    fine.version = Version::v2026_unified;
+    fine.blinn_scale = true;
+    fine.joins = false;
+    fine.sheet_rows = 480;
+    fine.sheet_around = 72;
+    fine.tube_around = 48;
+    const Teapot reference = make_teapot(fine);
+    const Cloud handle(*reference.parts[2]), spout(*reference.parts[3]);
+    std::printf("Unified sheets, node count against deviation (distance max in model units / normal max in degrees)\n");
+    std::printf("%-9s %4s %6s | %6s | %-22s | %-22s | %-22s | %-22s\n", "rows by", "rows", "around", "nodes", "body", "lid", "handle", "spout");
+    struct Case {
+        bool by_error;
+        std::size_t rows, around, tube;
+    };
+    for (const Case c : {Case{false, 96, 24, 16}, Case{true, 96, 24, 16}, Case{true, 96, 16, 16}, Case{true, 96, 12, 16}, Case{true, 72, 12, 16}, Case{true, 72, 12, 12},
+                         Case{true, 64, 12, 16}, Case{true, 48, 12, 12}, Case{true, 32, 8, 8}}) {
+        TeapotOptions o = fine;
+        o.rows_by_error = c.by_error;
+        o.sheet_rows = c.rows;
+        o.sheet_around = c.around;
+        o.tube_around = c.tube;
+        const Teapot teapot = make_teapot(o);
+        std::size_t nodes = 0;
+        for (const auto& part : teapot.parts) { nodes += part->conv.lattice.nodes.size(); }
+        double d[4], a[4];
+        revolved_error(*teapot.parts[0], body_profile, d[0], a[0]);
+        revolved_error(*teapot.parts[1], lid_profile, d[1], a[1]);
+        handle.compare(*teapot.parts[2], d[2], a[2]);
+        spout.compare(*teapot.parts[3], d[3], a[3]);
+        std::printf("%-9s %4zu %3zu/%-2zu | %6zu |", c.by_error ? "error" : "radius", c.rows, c.around, c.tube, nodes);
+        for (int k = 0; k < 4; ++k) {
+            std::printf(" %4zu: %8.2e %6.2f |", teapot.parts[std::size_t(k)]->conv.lattice.nodes.size(), d[k], a[k]);
+        }
+        std::printf("\n");
+    }
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    if (argc > 1 && std::string(argv[1]) == "budget") {
+        budget();
+        return 0;
+    }
+    for (std::size_t rows : {32u, 48u, 64u, 72u, 96u}) {
         TeapotOptions o;
         o.version = Version::v2026_unified;
         o.sheet_rows = rows;

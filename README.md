@@ -63,6 +63,43 @@ mirrored eye), chrome, reflection lines, edge samples.
 the lattice nodes and simulated by `third_party/zc_phys`, the rigid-body
 engine of PlaySuite's rock-stacking game (wrench-transport solver).
 
+## Node budget, baked mesh, and the rest (second round)
+
+- **How many nodes.** `tools/budget.cpp` gives five methods the same
+  on-surface nodes on targets native to none of them
+  (`results/node_budget.txt`). CONV needs as few nodes as the globally solved
+  C2 interpolating spline, and a half to a quarter of what Catmull-Rom needs,
+  while reading only the nodes around a cell. Against the Bezier form the
+  teapot was born in it is no better than equal (about 300 control points
+  against 324 to 560 nodes). That is the honest size of the claim.
+- **Rows by CONV's own error.** The unified sheets place their rows by
+  equidistributing the CONV line's own error (`plan_rows_by_error` in
+  `src/unified.hpp`). The 2026 teapot went from 5392 nodes within 1.1e-2 of
+  its source to 3104 nodes within 7.5e-4.
+- **Baked mesh and CPU rasterizer** (`src/raster.hpp`). *Bake vertices*
+  samples the surfaces once to triangles; three layouts are offered and a
+  fourth (k-means clustering, with e-means updates) was tried and lost
+  (`tools/mesh_study.cpp`, `results/mesh_study.txt`). The default is an
+  adaptive tree with a distance tolerance and a limit on how far the normal
+  may turn along an edge.
+- **Baked light.** *Bake light* has the ray tracer shade every texel of a
+  light map. With *moving reflections* the map keeps only view-independent
+  light, and reflections are added per frame from emitters along each pixel's
+  mirror direction: the sky and window above, and below a stand-in for the
+  floor that is never drawn (its pattern in closed form, its shadow baked).
+  The teapot's reflection of itself is not included there; that needs a ray.
+- **Seeded ray tracing.** The rasterized mesh tells each ray where it lands,
+  and one Newton solve puts it on the surface itself.
+- **Shadow edges** are found on the surface: where the shadow map's texels
+  disagree, the light ray is traced from what those texels saw.
+- **Grab.** Dragging holds the teapot at the point you picked (a soft pin
+  there), so it swings from the hand. This needed one addition to the vendored
+  engine, `World::add_velocity`; see `third_party/zc_phys/PROVENANCE.md`.
+
+One 960 x 600 frame of the unified teapot, all threads / one thread: per-ray
+150 / 410 ms, transport 91 / 261, seeded 37 / 125, mesh shaded per pixel
+15 / 45, mesh with baked light and emitters 11 / 36.
+
 ## Build
 
 ```sh
@@ -108,7 +145,7 @@ models built here are Modified Utah Teapots.
 
 ## Notes
 
-`third_party/zc_phys` is used unchanged. Its hull builder reads out of bounds
+`third_party/zc_phys` is used with one addition (`World::add_velocity`, for the grab). Its hull builder reads out of bounds
 (hull.cpp, the boundary-loop walk near line 258) when given a point set that
 does not close into a hull, before it reports "hull is not closed".
 `src/sim.hpp` avoids such sets (it drops coincident nodes and uses one hull
