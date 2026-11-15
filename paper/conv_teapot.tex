@@ -285,9 +285,7 @@ two coefficients whenever one exists.
 
 On a line this is a jump in the data-to-value map. On a surface it is a
 crack: the second factor's inputs vary continuously with $u$, and where
-one of its coefficients changes sign the surface position jumps. The
-defect was observed in an earlier cloth experiment; here is its cause and
-a cure.
+one of its coefficients changes sign the surface position jumps. Its cause and a cure follow.
 
 \begin{theorem}[Symmetric limiter]
 \label{thm:symmetric}
@@ -659,10 +657,7 @@ then a piece of the surface it names. At the band's edge the blend
 weight and its first two derivatives vanish, so the band has the body's
 position, normal and curvature there by construction; the measured gap
 of $10^{-7}$ and mismatch of $0.005^\circ$ in Table~\ref{tab:joinedges}
-are the offset at which they were sampled. An earlier version stored
-the two sides as points near the surfaces and met the body within
-$1^\circ$, which chrome showed as a line along the join from some
-angles. The four joins take 384 nodes in place of 704. To whoever
+are the offset at which they were sampled. The four joins take 384 nodes. To whoever
 samples the surface by its cells the band presents four cells for each
 interval between its rows, since it turns the normal through $90^\circ$
 across two intervals.
@@ -686,17 +681,14 @@ Rows a side & Nodes & Distance & Normal\\
 \end{tabular}
 \end{table}
 
-Before this change the joins held 22\% of the teapot's nodes on 1.6\% of
-its surface; they now hold 13\%. Creases cost less than that: rows
+The joins hold 13\% of the teapot's nodes on 1.6\% of its surface. Creases cost less than that: rows
 within 0.1 of a crease or an end of a sheet are 11\% of the body's rows
 on 5\% of its length and 18\% of the lid's on 12\%. In the baked mesh
 of Section~\ref{sec:baked} the joins have 1051 of 13\,663 vertices; the
 count there is set by the angle the band turns through, not by its rows.
 
-The interior join was at first built at the wrong place. The
-spout's channel continues past the body's inner wall into the cavity,
-and the join was made at the end of that stub, which left a lip standing
-in the cavity that the 2026 model does not have. The part of a tube to
+The spout's channel continues past the body's inner wall into the
+cavity. The part of a tube to
 remove is the part nearer the axis than the wall it meets, at both ends:
 inside the body at the spout's base, inside the cavity at the end of the
 channel. Cut where it crosses the inner wall and blended to the wall
@@ -1116,14 +1108,13 @@ and from then on a frame costs no evaluation.
 
 \subsection{Where to put the vertices}
 
-We tried five layouts on the unified teapot and measured each mesh
+Five layouts are compared on the unified teapot. Each mesh is measured
 against its four sheets at seven points in every triangle: the distance
 from the flat triangle to the nearest point of the surface, found by
 sliding along the surface from the point with the same parameters and
 never across a crease, and the angle between the interpolated vertex
-normal and the surface's normal there. The join bands are left out of
-the measure: the interior spout join folds on itself, a fault of that
-join which would be charged to whichever layout met it.
+normal and the surface's normal there. The join bands are left out of the
+measure.
 
 \emph{Uniform}: every lattice cell cut $k$ by $k$. \emph{Bounds}: a
 tensor grid in which each column and row of cells is cut as often as the
@@ -1195,9 +1186,9 @@ The uniform $4\times4$ mesh is the most faithful of the fixed layouts
 and costs three and a half times the tree's vertices. The picture itself
 stops improving near 10\,000 vertices: against the traced frame, about
 500 of 99\,000 surface pixels differ in coverage for every layout past
-that size. The engine's default is the tree with $\varepsilon=10^{-2}$
-and $20^\circ$: 14\,189 vertices and 26\,538 triangles from 49\,972
-evaluations in 33\,ms. A node on a crease becomes two vertices, one per
+that size. The tree with $\varepsilon=10^{-2}$
+and $20^\circ$ gives 14\,189 vertices and 26\,538 triangles from 49\,972
+evaluations. A node on a crease becomes two vertices, one per
 side, each with its side's normal.
 
 \subsection{What sets the count}
@@ -1234,8 +1225,7 @@ magnitude, in the limit.
 \subsection{Layouts from the metric}
 \label{sec:layouts}
 
-To see how much of that can be had, we built the layout the formulas
-describe. From the nodes, with $\mathrm{I}$, $\mathrm{II}$ and
+The layout the formulas describe is built as follows. From the nodes, with $\mathrm{I}$, $\mathrm{II}$ and
 $\mathrm{III}=\mathrm{II}\,\mathrm{I}^{-1}\mathrm{II}$ the three
 fundamental forms in $(u,v)$,
 \begin{equation}
@@ -1247,8 +1237,7 @@ are placed; their cells are grown over a grid of samples by shortest
 paths in $M$, so each is one connected piece; the seeds may then be
 moved toward the means of their cells with the moving-average updates
 of e-means~\cite{emeans}; and the triangles are the dual of the cells.
-Creases, ends and poles are pinned rows with seeds of their own. Three
-ways of placing the seeds were tried: at random; \emph{nucleated}, one at
+Creases, ends and poles are pinned rows with seeds of their own. The seeds are placed in one of three ways: at random; \emph{nucleated}, one at
 a time, each where the surface is furthest in $M$ from every seed so
 far; and at the \emph{lattice nodes} themselves, whose rows CONV's own
 error has already crowded where the shape is hard.
@@ -1270,10 +1259,7 @@ Checked in this way, nucleated seeds reach the quality of the tree with
 $\varepsilon=2\times10^{-2}$ and $20^\circ$ from 5586 vertices in place
 of 8991, and have no advantage left at 14\,000, where a few triangles
 also remain out of tolerance because the refinement did not converge.
-To pass the check at the coarse setting nucleated seeds needed 5354
-vertices, random ones 6174 and lattice nodes 6550; moving averages
-brought the random start to 5626 and did nothing for the other two. The
-lattice nodes give the most uniform result: no triangle is far
+The lattice nodes give the most uniform result: no triangle is far
 out of tolerance at either setting, and at the fine one they give a
 worst normal error of $5.4^\circ$ from 12\,464 vertices, which the tree
 does not reach with 29\,498. Their distance is the weaker side, and the
@@ -1286,7 +1272,7 @@ others, so it can be meshed alone. All of these
 cost about a second and a million evaluations to build, against 30\,ms
 and 50\,000. The gain is well below the asymptotic limit. Creases,
 poles and lines of zero curvature, where the limit's assumptions fail,
-cover much of the teapot. The engine uses the tree.
+cover much of the teapot.
 
 \subsection{Rasterizer}
 
@@ -1297,24 +1283,22 @@ on the screen; triangles are filed by bands of rows, which threads
 share out. The rasterizer writes only a visibility buffer, a triangle
 and two weights per sample at two by two samples per pixel, and shading
 follows once per pixel, or once per sample where a pixel's samples show
-different parts or depths. The techniques are those of the software
-rasterizer in PlaySuite's fish tank; the code is our own.
+different parts or depths. 
 
 \subsection{One line where a join meets a part}
 
 Along each of its edges a join's band lies on another part's surface,
 but the two meshes have their own vertices there. Flat pieces of
 different sizes do not agree on where that surface is or which way it
-faces, and from some angles the edge showed as a line. Three things
-remove it. A part is meshed to an eighth of the tolerance and half the
+faces, and from some angles the edge shows as a line unless three things are
+done. A part is meshed to an eighth of the tolerance and half the
 angle wherever a band's edge crosses it. Every vertex on a band's edge
 takes the position and the normal that the other part's mesh has at the
 same parameters, the point of that part's triangle and its interpolated
 normal, so the band's edge is a line drawn on the other mesh. And where
 the band and the part are both drawn, in the strip the trim leaves
 under the band, the band is drawn: its vertices are projected 0.15\%
-nearer the eye. The mesh of the unified teapot goes from 13\,663 to
-16\,431 vertices.
+nearer the eye. This adds 2768 vertices to the unified teapot's 13\,663.
 
 \subsection{Light painted by the ray tracer}
 
@@ -1356,24 +1340,19 @@ While the body turns, the lit fraction and the floor's shadow are read
 from the shadow map, drawn from the mesh at $512^2$, with no traced
 edges. When it comes to rest the lit fraction is found again with exact
 edges. The first bake keeps every texel's point and normal in the body's
-frame, so this pass evaluates no surface: 207\,ms on one thread against
-571 for the first bake (about 290\,ms against 1090 in the browser).
+frame, so this pass evaluates no surface and takes about a third of the first
+bake's time.
 Against the same poses shaded per pixel with no bake, the picture after
 a shift of the body differs by more than 8 of 255 in 651 of 576\,000
-pixels, and after a turn of $40^\circ$ in 385 before the lit fraction is
-found again and 816 after. In the browser at $960\times600$ the shading
-of a moving frame takes 8\,ms with the bake and 13 without (frames of 21
-and 25\,ms), and a frame at rest 51\,ms against 65, or 50 against 71
-with gloss and the floor's reflection on.
+pixels, and after a turn of $40^\circ$ in 816.
 
 \subsection{What each point sees of the room}
 
 The room's diffuse light above is a function of the normal alone, as if
-nothing were in the way. That is wrong wherever the body is in its own
-way: the inside of the teapot received the whole sky, darkened by a
-constant; under the knob, in the gap around the lid and down the spout's
-channel nothing darkened at all. A second bake, optional and at four
-times the texel size, stores for every texel and side the fraction of
+nothing were in the way. That is wrong wherever the body is in its
+own way: inside the teapot, under the knob, in the gap around the lid
+and down the spout's channel. A second bake, at four times the texel
+size, stores for every texel and side the fraction of
 its cosine-weighted hemisphere that 32 rays find open past the body, and
 the mean open direction in the body's frame. The set is turned by a different
 angle at each texel and the map is smoothed, so the resolution of 1/32
@@ -1383,12 +1362,9 @@ the pose turns it. This holds for any motion of the body.
 
 With that alone the lid, the knob and the channel are shaded by their
 own geometry, and the interior is nearly black: most of what reaches the
-inside of a white pot has bounced off the pot. Two ways of adding that
-were tried. One value for the whole cavity, the light entering it
-divided by what a bounce loses, makes the interior bright and uniform
-and the channel as bright as the cavity. The other keeps, for every
-texel, the texels on which its blocked rays land. This transfer belongs
-to the body. Whenever the sun or the room turns relative to the body,
+inside of a white pot has bounced off the pot. It is added through a transfer
+that belongs to the body: for every texel, the texels on which its
+blocked rays land. Whenever the sun or the room turns relative to the body,
 the direct light $E_0$ of every texel is found (room light through the
 open fraction, and the sun by the shadow map) and
 $E=E_0+\rho\,T E$ is solved by six gathers through the transfer with
@@ -1396,21 +1372,17 @@ albedo $\rho=0.9$; $E-E_0$ is stored and added at each pixel. The
 interior then has the level a white cavity in sun should have, and the
 channel and the knob's underside receive what their surroundings throw
 on them. The gather is part of the pass that finds the lit fraction
-again and that pass still takes about 190\,ms. The bake is where the cost is, and three things brought it
-down. Of 32 directions a quarter are tried first and the rest only if
+again. Three things keep the bake short. Of 32 directions a quarter are tried first and the rest only if
 those differ. Every second texel of every second row is done first, and
 a texel between four that see the whole room is taken to see it too, as
 is, on a closed solid, a texel between four that see nothing (the side
 of a sheet that is inside the material). And a part whose one side is
 found by trial to be wholly inside the material has nothing baked for
-that side. In the browser the bake takes 0.7\,s without the open
-fraction, 1.1\,s with it and 1.3\,s with the transfer (0.7, 1.9 and
-3.3\,s before), and the baked renderer now uses the transfer by default.
-A frame at rest costs 43, 46 and 48\,ms. While the body turns the
+that side. While the body turns the
 gathered light is not refreshed; it turns with the body until the body
-rests. The option to leave the surface's pattern off whatever faces the
-cavity is separate. These modes exist only in the baked renderer; the
-ray-traced renderers still use the normal alone.
+rests. The maps are indexed by the surface's own parameters and not by
+the triangles they were baked through, so a ray tracer reads them at a
+hit's $(u,v)$ as well.
 
 \subsection{Reflections from emitters}
 
@@ -1429,10 +1401,8 @@ emitter are separate things that agree. The result follows the camera
 at the cost of a few arithmetic operations per pixel: 11\,ms for a
 $960\times600$ chrome frame against 141\,ms traced (34 against 483 on
 one thread). The
-emitters do not include the teapot itself, so the knob is not
-reflected in the lid nor the handle in the body. For the body, the
-handle and the spout (the lid is left out for now), the mirror ray is
-now met with the baked mesh's own triangles and followed from piece to
+emitters do not include the teapot itself. For the body, the handle and
+the spout the mirror ray is also met with the baked mesh's own triangles and followed from piece to
 piece up to three times: the spout in the body, the body in that spout,
 the spout in that body. Each point it reaches is shaded from its light
 map, and the last one's mirror is answered by the emitters, so the
@@ -1448,12 +1418,8 @@ tree in another, and the cell in a cone, and a cell is marked only if
 its cone meets the angle some box's sphere fills, for boxes in front of
 the triangle's tangent planes. A ray in an unmarked cell leaves the
 pieces at once and is not walked; the picture is the same with the
-routes as without them, pixel for pixel. The bake takes 0.12\,s on six
-threads (0.41\,s on one). A chrome frame at $960\times600$ takes
-29\,ms with three bounces, against 34\,ms for one bounce walked without
-routes and 21\,ms with the emitters alone. The routes mark which
-directions may land, not where: storing the landing point too, so that
-a bounce is a lookup instead of a walk, is left for later.
+routes as without them, pixel for pixel. The routes mark which
+directions may land, not where.
 
 \subsection{The mesh as a seed}
 
@@ -1485,18 +1451,14 @@ Mesh, baked light, emitters & 11 & 36 & 0.08\\
 \end{table}
 
 The evaluations left in the last two rows of Table~\ref{tab:methods},
-and 0.6 of those in the row above, are shadow rays (next subsection). In
-a browser, on one thread in WebAssembly, the same frame takes about
-450\,ms by transport, 200\,ms seeded and 40\,ms from the mesh with
-baked light; traced chrome takes 750\,ms there and the mesh with
-emitters 50.
+and 0.6 of those in the row above, are shadow rays (next subsection). 
 
 \subsection{Shadow edges on the surface}
 
 Shadows are looked up in a depth image drawn from the light. Its texels
-are larger than a pixel, and a shadow's edge followed them in
-stair-steps. Blending the lookup only rounds the steps. The edge belongs
-to the surface, so that is where we now find it: each depth texel also
+are larger than a pixel, and a shadow's edge follows them in
+stair-steps; blending the lookup only rounds the steps. The edge belongs
+to the surface and is found there: each depth texel also
 records which part it saw and where, and at a point whose surrounding
 texels disagree the light ray is traced by Newton from those
 records, two rays on a rotated grid inside the pixel and two more if
@@ -1513,7 +1475,8 @@ shadow falls across a terminator, as the body's does across the base of
 the spout: the depth image's one-texel ramp is drawn out by the grazing
 angle into streaks. When a texel near the point holds something more
 than 0.3 nearer the light, the traced ray is used in full; it meets that
-occluder squarely. The streaks go, and a frame at rest costs 4\% more.
+occluder squarely. This removes the streaks for 4\% of a
+resting frame.
 In the light map the same edge is limited by the texel, 0.016 units,
 which shows as steps when the camera is flown close.
 
@@ -1540,8 +1503,7 @@ light map painted by the ray tracer.}
 \subsection{Reflections of the floor, and work that is skipped}
 
 A curved mirror shows the floor's checker much reduced, and a point
-sample of it aliases: the lower body of a glazed teapot showed a
-speckle that looked like facets. The checker is the product of two
+sample of it aliases. The checker is the product of two
 square waves, and each can be averaged exactly over an interval, so a
 mirror ray is answered with the checker averaged over the square its
 pixel covers on the floor. The side of that square is the distance
@@ -1563,8 +1525,7 @@ are left out of prediction, of the shadow map and of the tree for
 incoherent rays, so no ray is solved against them. The lattice points,
 the shadow map and that tree depend on the surfaces and not on the
 camera, and are kept from frame to frame while the surfaces stay where
-they are: 23\,ms of a frame without gloss and 33\,ms with it, on one
-thread. The times of Table~\ref{tab:methods} were taken before this.
+they are.
 
 \subsection{Cutaway}
 
@@ -1577,7 +1538,7 @@ the first surface in the kept half. The count is made by drawing the
 surface in the removed half as triangles and counting, at each sample,
 how many cover it: the baked mesh's triangles, or for the ray tracers
 the cells of the transported lattice. Counting the hits among a pixel's
-solved predictions was tried first and is not reliable, because the
+solved predictions is not reliable, because the
 list is short and a missed or repeated hit changes the answer along
 every silhouette. Lattice cells wholly in the removed half are also
 left out of prediction, so they do not displace the cells that are
@@ -1599,23 +1560,22 @@ a group of nodes is a convex piece of the teapot. For the 1975 to 1987
 versions we use eleven hulls, one for the body, two for the lid, and four
 each along the handle and spout; for the 2026 version, one hull per
 group of exterior lattices. A hull is not taken through the nodes of a ring: with 12 nodes to a
-ring that hull lies inside the surface by 3\% of the radius, and a teapot
-resting on its side showed the floor through its wall. Each ring gives
+ring that hull lies inside the surface by 3\% of the radius. Each ring gives
 the hull at least 16 points of the surface (20 on the body and lid),
 moved out from the ring's centre so that the hull's flat sides touch the
 ring; a round part gives the 16 rings of its profile's convex outline,
 sampled between rows as well, that leave the least of the outline
 outside. Dropped at tilts from upright to upside down, the resting
 surface is then within 0.007 of the floor in the unified version and
-0.001 in the 1976 version, where it had been 0.015 and 0.018 into it.
+0.001 in the 1976 version.
 The renderers let the floor hide the surface only where the surface is
 more than 0.012 below it. We hand the hulls to the rigid-body engine of a rock-stacking game,
 whose wrench-transport solver resolves contact, friction and rolling
 resistance in one solve per frame. One model unit is taken as 7\,cm. The
 engine returns a pose. The lattice stays at rest and the pose is applied
 to the surface: every evaluated point and derivative is turned and
-shifted. An earlier version applied the pose to the nodes and built CONV
-through the moved nodes. That is a different surface. Admission and the
+shifted. Applying the pose to the nodes and building CONV
+through the moved nodes gives a different surface. Admission and the
 bubble act on each coordinate separately, so they do not commute with a
 rotation, and a monotone coordinate of the lattice at rest need not be
 monotone after a turn. Table~\ref{tab:rotation} measures the difference
@@ -1730,8 +1690,7 @@ edge alone, so the two cells that share it agree; a cell's inside takes
 the largest count each way, and its border vertices are placed at the
 edge's own steps, so neighbours meet. Then one fragment a triangle
 corner evaluates the surface. With $\varepsilon=0.003$ and
-$\alpha=8^\circ$ the unified teapot is 73\,560 triangles, where the
-grid used before had 132\,096.
+$\alpha=8^\circ$ the unified teapot is 73\,560 triangles.
 
 Over the mesh stands a tree of boxes written in the order a ray walks
 it. A node is one texel of four whole numbers: its box in 65\,535ths of
@@ -1759,18 +1718,14 @@ pixel holds no decision that was made before the frame began.
 Against the CPU ray tracer at $960\times600$, the share of pixels that
 differ by more than 8 of 255 is 0.25\% for porcelain, 0.25\% with the
 polished floor, 0.39\% with a texture, 0.55\% for chrome and 0.96\% for a
-cutaway. Without the traced mirror ray chrome differed in 3.6\%. Those
-figures are for the grid and the pyramid of boxes used first; against
-that build the present one differs in 0.15\% to 0.6\% of pixels in
-seven views, along edges, and in 1.65\% seen from above in chrome,
-where the spout shows the body's rim and the lid's knob, which the
-pyramid's walk missed. A frame takes 3.8\,ms at $960\times600$ at the
-page's settings, in a headless browser on the laptop used throughout
-(10\,ms with the grid and pyramid). At $2560\times1600$ with chrome,
-the polished floor, traced rays and a shadow map of $4096^2$ it takes
-65\,ms (111 before), and 15\,ms without traced rays (45 before). The
-CPU's baked renderer takes 21\,ms for a moving frame and 43 to 50\,ms
-for a resting one at $960\times600$.
+cutaway. Those figures were measured with a uniform grid over each part in place
+of the mesh above; the picture from the mesh differs from the grid's in
+0.15\% to 0.6\% of pixels in seven views, along edges, and in 1.65\% in
+one view of chrome from above. A frame takes 3.8\,ms at $960\times600$
+at the page's settings, in a headless browser on the laptop used
+throughout. At $2560\times1600$ with chrome, the polished floor, traced
+rays and a shadow map of $4096^2$ it takes 65\,ms, and 15\,ms without
+traced rays.
 
 \subsection{Room light without rays}
 
@@ -1820,12 +1775,7 @@ about 3 units high); over a grab at the handle, dragged and released,
 $4\times10^{-5}$. The state is written through four render targets, so
 that six fragments run the frame. Both come to rest in the same pose to
 $3\times10^{-4}$. A frame of the shader's solver takes 1.4 to 2.4\,ms
-with the read-back of the state, against 0.13\,ms on the CPU. An
-earlier, simpler step (a mean over the contact points of the impulse
-each asks for, with contact points found on the GPU as the farthest
-points of the surface in each direction from the centre of mass) is kept
-as an option; it reaches the same resting pose for the drop within 0.16
-units but is not the same solver.
+with the read-back of the state, against 0.13\,ms on the CPU. 
 
 The body's mass, centre of mass and inertia are computed by a shader
 that sums signed tetrahedra over the faces of the collision hulls. They
@@ -1899,7 +1849,7 @@ its right and none lies between the two. Each side, with the
 lowest-numbered corner of its face, is a triangle of a fan over the
 face, and the fans are the hull's surface. The fans close only if every
 fragment agrees on which points are on a plane. With 32-bit floats they
-do not: the hulls came out with holes. So the points are put on a grid
+do not, so the points are put on a grid
 of whole numbers, 16\,000 steps to the set's farthest coordinate, and
 the side of a plane a point is on is the sign of a determinant computed
 exactly in 32-bit integers, the normal in three parts of twelve bits.
@@ -1935,8 +1885,8 @@ which is a heuristic and not an enclosure. Timings are of one
 implementation on one shared machine, and vary by a quarter between
 sessions. The baked mesh is flat between its vertices: its silhouette is
 the surface's only to the tolerance it was baked at, a light map holds
-the diffuse light of one pose, and the emitters that answer its mirror
-directions do not include the teapot itself. The vertex-count limits quoted are asymptotic and assume
+the diffuse light of one pose, and its mirror directions are answered by emitters and by the mesh's
+own triangles, not by the surface. The vertex-count limits quoted are asymptotic and assume
 elliptic points; their constants are derived here for a paraboloid. The
 node-count comparison covers surfaces that suit a
 lattice; it does not cover shapes of arbitrary topology, which

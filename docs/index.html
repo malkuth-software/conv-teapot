@@ -251,7 +251,13 @@ var TeapotEngine=(()=>{var _scriptName=globalThis.document?.currentScript?.src;r
   });
   const useMesh = () => { const m = document.getElementById('method'); if (m.value !== '2') { m.value = '2'; engine._tp_set(3, 2); } };
   document.getElementById('bakeVertices').addEventListener('click', () => { useMesh(); engine._tp_action(2); dirty = true; });
-  document.getElementById('bakeLight').addEventListener('click', () => { useMesh(); engine._tp_action(3); dirty = true; });
+  // With a ray tracer selected the light is baked for it to read, and it stays selected.
+  document.getElementById('bakeLight').addEventListener('click', () => {
+    const traced = ['0', '1'].includes(document.getElementById('method').value);
+    if (!traced) { useMesh(); }
+    engine._tp_action(3);
+    dirty = true;
+  });
   document.getElementById('objSave').addEventListener('click', () => {
     const length = engine._tp_export(Number(document.getElementById('objUp').value));
     const pointer = engine._tp_export_data();
