@@ -253,6 +253,10 @@ public:
             if (mesh.vertices.empty() || mesh_signature_ != signature()) { bake_vertices(); }
             sync_mesh(scene);
             scene.mesh = &mesh;
+        } else if (render.traced_baked_light && !mesh.vertices.empty() && mesh_signature_ == signature() && mesh.lit && mesh.lit_diffuse_only) {
+            // The ray tracer reads the light maps of a bake that is still good.
+            sync_mesh(scene);
+            scene.mesh = &mesh;
         }
         // Sampled versions carry twice the nodes per patch: halve the lattice
         // samples per node interval so the transported lattice stays the same.

@@ -99,6 +99,10 @@ struct RenderOptions {
     // With live reflections, the mirror ray is also met with the mesh's own triangles, so the body
     // shows the handle, the spout and the lid in itself. Off: only the emitters answer it.
     bool mirror_traced = true;
+    // The ray tracer reads a baked light map where there is one: the lit fraction and the room's
+    // light at a hit come from the maps at the hit's own (u, v), not from a light ray and a formula.
+    // The surface, its silhouettes, normals and reflections stay the traced ones.
+    bool traced_baked_light = true;
     // Use the baked routes to pass over mirror rays that leave the pieces at once (off only to check that they change nothing).
     bool mirror_routes = true;
     // Baked light, experimental: how the room's diffuse light reaches a point.
@@ -1847,7 +1851,26 @@ private:
         Vec3 colour = base;
         if (options.lighting) {
             const double n_l = dot(normal, scene.light);
-            const double lit = surface_lit(scene, options, primary, solve, normal, part_index, depth, solve.t / primary.focal, work);
+            // The baked maps of this part, if the ray tracer may read them (not while they are being baked).
+            const MeshPart* maps = nullptr;
+            float map_s = 0.0f, map_t = 0.0f;
+            bool map_back = false;
+            if (options.traced_baked_light && !options.diffuse_only && scene.mesh != nullptr && scene.mesh->lit && scene.mesh->lit_diffuse_only &&
+                part_index < scene.mesh->parts.size() && !scene.mesh->parts[part_index].light.levels.empty()) {
+                maps = &scene.mesh->parts[part_index];
+                const double around = solve.u / double(surface.cells_u());
+                map_s = float(surface.periodic_u() ? around - std::floor(around) : around);
+                map_t = float(maps->t_of(solve.v));
+                map_back = dot(cross(solve.point.du, solve.point.dv), dir) > 0.0;
+            }
+            double lit;
+            if (maps != nullptr && light_holds(scene)) {
+                float texel[4];
+                (map_back ? maps->light_back : maps->light).sample_level(0, map_s, map_t, texel);
+                lit = options.shadows ? double(texel[3]) / 255.0 : 1.0;
+            } else {
+                lit = surface_lit(scene, options, primary, solve, normal, part_index, depth, solve.t / primary.focal, work);
+            }
                 // Where the light only grazes the surface a traced light ray
                 // meets it at a glancing angle and its answer is unreliable,
                 // so the traced edge is used in proportion to how squarely
@@ -1858,7 +1881,26 @@ private:
                 // it: the depth allowance grows with the tangent of that angle.
             const double diffuse = std::fmax(0.0, n_l) * lit;
             const double up = 0.5 * (normal.y + 1.0);
-            const Vec3 ambient = Vec3{0.30, 0.28, 0.26} * (1.0 - up) + Vec3{0.46, 0.50, 0.56} * up;
+            Vec3 ambient = Vec3{0.30, 0.28, 0.26} * (1.0 - up) + Vec3{0.46, 0.50, 0.56} * up;
+            if (maps != nullptr && scene.mesh->ambient > 0 && !maps->open.levels.empty()) {
+                // As the baked renderer has it: the room's light through what the point sees of
+                // it, and the light the body throws on the point.
+                float seen[4];
+                (map_back ? maps->open_back : maps->open).sample_level(0, map_s, map_t, seen);
+                const double open = double(seen[3]) / 255.0;
+                Vec3 bent = scene.pose.direction({double(seen[0]) / 127.5 - 1.0, double(seen[1]) / 127.5 - 1.0, double(seen[2]) / 127.5 - 1.0});
+                bent = length(bent) > 0.2 ? normalize(bent) : normal;
+                const Vec3 through = ambient_of(bent) * open;
+                Vec3 from_body{};
+                if (scene.mesh->ambient > 2 && !maps->bounce.levels.empty()) {
+                    float thrown[4];
+                    (map_back ? maps->bounce_back : maps->bounce).sample_level(0, map_s, map_t, thrown);
+                    from_body = {double(thrown[0] * thrown[0]) / 32512.5, double(thrown[1] * thrown[1]) / 32512.5, double(thrown[2] * thrown[2]) / 32512.5};
+                } else if (scene.mesh->ambient > 1) {
+                    from_body = (part.faces_cavity(solve.v) ? scene.mesh->cavity_light : ambient * 0.5) * (0.9 * (1.0 - open));
+                }
+                ambient = through + from_body;
+            }
             colour = Vec3{base.x * (ambient.x + 0.80 * diffuse), base.y * (ambient.y + 0.78 * diffuse), base.z * (ambient.z + 0.74 * diffuse)};
             if (lit_out != nullptr) { *lit_out = lit; }
             if (options.wire != Wire::only && !options.diffuse_only) {

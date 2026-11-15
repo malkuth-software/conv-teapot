@@ -1,5 +1,6 @@
 // Headless capture: renders the teapot to a PNG and prints the work counters.
 // Arguments are key=value pairs; see `usage` below.
+#include <chrono>
 #include "../src/image.hpp"
 #include "../src/sim.hpp"
 #include "../src/teapot.hpp"
@@ -206,8 +207,9 @@ int main(int argc, char** argv) {
     frame.resize(width, height);
     Renderer renderer;
     Mesh mesh;
-    if (options.method == Method::raster || options.method == Method::seeded) {
-        // Bake the surfaces to vertices, and with light=1 the lighting to light maps.
+    options.traced_baked_light = number("bakedlight", 1) != 0;
+    if (options.method == Method::raster || options.method == Method::seeded || number("light", 0) != 0) {
+        // Bake the surfaces to vertices, and with light=1 the lighting to light maps (which the ray tracer reads too).
         MeshOptions mesh_options;
         const std::string layout = get("layout", "tree");
         mesh_options.layout = layout == "uniform" ? Layout::uniform : layout == "bounds" ? Layout::bounds : Layout::tree;
@@ -235,6 +237,64 @@ int main(int argc, char** argv) {
             }
             renderer.bake_light(scene, bake_camera, options, width, height, number("texel", 0.016));
             std::printf("light: %zu texels, %.2f ms\n", mesh.texels, mesh.ms_light);
+            if (number("lightsheet", 0) != 0) {
+                // Study: the baked light held at every n-th texel and joined again, by CONV and bilinearly,
+                // against the map itself: the lit fraction, which has the shadows' edges in it.
+                for (int stride : {2, 4, 8}) {
+                    double conv_sq[2] = {0, 0}, linear_sq[2] = {0, 0}, conv_worst[2] = {0, 0}, linear_worst[2] = {0, 0}, over = 0.0;
+                    std::size_t count = 0, nodes = 0;
+                    double conv_ns = 0.0;
+                    for (const MeshPart& part : mesh.parts) {
+                        if (part.light.levels.empty()) { continue; }
+                        const LightMap::Level& lit = part.light.levels[0];
+                        const LightMap::Level& open = lit;   // the room's open fraction is kept at a quarter of this size: not studied
+                        if (lit.width != open.width || lit.height != open.height || lit.width < 8 * stride || lit.height < 8 * stride) { continue; }
+                        const int nu = lit.width / stride, nv = (lit.height - 1) / stride + 1;
+                        if (nu * stride != lit.width) { continue; }
+                        const auto field = [&](int which, int x, int y) {
+                            const LightMap::Level& level = which == 0 ? lit : open;
+                            return double(level.texel[std::size_t(y) * std::size_t(level.width) + std::size_t(x)] >> 24) / 255.0;
+                        };
+                        ConvSurface sheet;
+                        sheet.lattice.nu = std::size_t(nu);
+                        sheet.lattice.nv = std::size_t(nv);
+                        sheet.lattice.wrap_u = part.light.wrap;
+                        if (!sheet.lattice.wrap_u) { continue; }
+                        sheet.lattice.nodes.resize(std::size_t(nu) * std::size_t(nv));
+                        for (int j = 0; j < nv; ++j) {
+                            for (int i = 0; i < nu; ++i) { sheet.lattice.at(std::size_t(i), std::size_t(j)) = {field(0, i * stride, j * stride), field(1, i * stride, j * stride), 0.0}; }
+                        }
+                        sheet.compile();
+                        nodes += std::size_t(nu) * std::size_t(nv);
+                        const auto started = std::chrono::steady_clock::now();
+                        for (int y = 0; y <= (nv - 1) * stride; ++y) {
+                            for (int x = 0; x < lit.width; ++x) {
+                                const Vec3 joined = sheet.position(double(x) / stride, double(y) / stride);
+                                const int i0 = x / stride, j0 = std::min(y / stride, nv - 2), i1 = (i0 + 1) % nu;
+                                const double fx = double(x) / stride - i0, fy = double(y) / stride - j0;
+                                for (int which = 0; which < 2; ++which) {
+                                    const double truth = field(which, x, y);
+                                    const double value = which == 0 ? joined.x : joined.y;
+                                    const double flat = (field(which, i0 * stride, j0 * stride) * (1 - fx) + field(which, i1 * stride, j0 * stride) * fx) * (1 - fy) +
+                                                        (field(which, i0 * stride, (j0 + 1) * stride) * (1 - fx) + field(which, i1 * stride, (j0 + 1) * stride) * fx) * fy;
+                                    conv_sq[which] += (value - truth) * (value - truth);
+                                    linear_sq[which] += (flat - truth) * (flat - truth);
+                                    conv_worst[which] = std::max(conv_worst[which], std::fabs(value - truth));
+                                    linear_worst[which] = std::max(linear_worst[which], std::fabs(flat - truth));
+                                    over = std::max(over, std::max(value - 1.0, -value));
+                                }
+                                ++count;
+                            }
+                        }
+                        conv_ns += std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - started).count();
+                    }
+                    if (count == 0) { continue; }
+                    std::printf("light sheet, every %d texels (%zu nodes for %zu texels): lit fraction rms CONV %.4f bilinear %.4f, worst %.3f %.3f; "
+                                "CONV beyond [0,1] by at most %.4f; %.0f ns a CONV lookup\n",
+                                stride, nodes, count, std::sqrt(conv_sq[0] / count), std::sqrt(linear_sq[0] / count), conv_worst[0], linear_worst[0], over,
+                                conv_ns / count);
+                }
+            }
         }
     }
     if (args.count("shift") != 0 || args.count("turn") != 0) {
