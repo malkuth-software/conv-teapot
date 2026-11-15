@@ -82,6 +82,9 @@ struct RenderOptions {
     // Newton step and is accepted without a second evaluation; the step's
     // own error is second order in that residual. 0 always re-evaluates.
     double one_step_px = 0.35;
+    // The error, in pixels, that one step from a prediction may leave: sets how far off a prediction
+    // may be for its size on screen (see solve_ray). 0: the fixed bound above only.
+    double one_step_error_px = 0.02;
     // Method::raster: the baked mesh drawn by the CPU rasterizer.
     int supersample = 2;      // visibility samples per pixel, each way
     bool baked_light = true;  // show the mesh's light maps when it has them
@@ -285,7 +288,7 @@ struct Solve {
 };
 
 inline bool solve_ray(const Surface& surface, const View& view, Vec3 dir, double tolerance_px, double one_step_px,
-                      double reach, Solve& s) {
+                      double reach, Solve& s, double cell = 0.0, double step_error_px = 0.0) {
     const Vec3 unit = normalize(dir);
     const Vec3 helper = std::fabs(unit.y) < 0.9 ? Vec3{0, 1, 0} : Vec3{1, 0, 0};
     const Vec3 e1 = normalize(cross(unit, helper));
@@ -322,7 +325,17 @@ inline bool solve_ray(const Surface& surface, const View& view, Vec3 dir, double
             finish();
             return true;
         }
-        if (iteration == 0 && residual <= one_step_px * pixel && std::fabs(jacobian) > 1e-12 * (std::fabs(a * d) + std::fabs(b * c))) {
+        // How far off a prediction may be and still be settled by one step. The step's own error
+        // is of second order: for a prediction made on a flat piece `cell` wide, which is h pixels
+        // on screen, a residual of r pixels leaves about 4 r^3 / h^2. A fixed bound on r is
+        // right at one size on screen only; seen close, h is large and a residual of a pixel or
+        // two is still a step whose error is far under a pixel.
+        double one_step = one_step_px;
+        if (iteration == 0 && cell > 0.0 && step_error_px > 0.0 && one_step_px > 0.0) {
+            const double h = cell * std::fmin(std::hypot(a, c), std::hypot(b, d)) / pixel;
+            one_step = std::fmax(one_step_px, std::cbrt(0.25 * step_error_px * h * h));
+        }
+        if (iteration == 0 && residual <= one_step * pixel && std::fabs(jacobian) > 1e-12 * (std::fabs(a * d) + std::fabs(b * c))) {
             // Close prediction: one exact Newton step, no second evaluation.
             const double du = -(d * f1 - b * f2) / jacobian;
             const double dv = -(a * f2 - c * f1) / jacobian;
@@ -1967,7 +1980,8 @@ private:
             attempt.v = list[k].v;
             const double reach = 3.0 * lattices_[list[k].part].step + 0.5;
             ++work.solves;
-            const bool ok = detail::solve_ray(*scene.parts[list[k].part].surface, view, dir, options.tolerance_px, options.one_step_px, reach, attempt);
+            const bool ok = detail::solve_ray(*scene.parts[list[k].part].surface, view, dir, options.tolerance_px, options.one_step_px, reach, attempt,
+                                              lattices_[list[k].part].step, options.one_step_error_px);
             work.evaluations += std::size_t(attempt.evaluations);
             if (ok && scene.removed(attempt.point.p)) {
                 if (hidden(scene.parts[list[k].part], attempt.u, attempt.v, true)) { continue; }

@@ -258,8 +258,10 @@ public:
             sync_mesh(scene);
             scene.mesh = &mesh;
         }
-        // Sampled versions carry twice the nodes per patch: halve the lattice
-        // samples per node interval so the transported lattice stays the same.
+        // The 2026 version sampled at 8 nodes a patch carries twice the nodes per patch: halve the
+        // lattice samples per node interval so the transported lattice stays the same. (Not the
+        // unified teapot: its rows are few and far apart, and half the samples made its predictions
+        // too coarse, so that seen close most pixels took a second evaluation or a second solve.)
         RenderOptions options = render;
         // One visibility sample per pixel while the picture is changing; the full count when it rests.
         const bool moving = running || sim.grabbing() || orbiting_ || flying_;
@@ -296,7 +298,7 @@ public:
             }
             return frame.rgba.data();
         }
-        if ((version == Version::v2026 && per >= 8) || version == Version::v2026_unified) { options.subdivision = std::max(1, render.subdivision / 2); }
+        if (version == Version::v2026 && per >= 8) { options.subdivision = std::max(1, render.subdivision / 2); }
         renderer.render(scene, camera(), options, frame);
         return frame.rgba.data();
     }
