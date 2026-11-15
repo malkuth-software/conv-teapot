@@ -75,6 +75,10 @@ struct RenderOptions {
     bool floor_reflection = false; // polished floor, by transport from the mirrored eye
     int material = 0;         // 0: porcelain, 1: chrome, 2: reflection lines (when untextured)
     bool edge_samples = true; // four more samples for pixels on a silhouette or part boundary
+    // How such a pixel is finished. 1: four more samples, each solved. 2: no more samples: the pixel
+    // is a mix of its own colour and its neighbour's across the edge, by how much of the pixel the
+    // nearer surface covers; that is found from where the nearer surface ends (resolve_and_shade).
+    int edge_mode = 2;
     int subdivision = 4;      // lattice samples per node interval
     int threads = 0;          // 0: all hardware threads
     double tolerance_px = 0.01;
@@ -1094,6 +1098,7 @@ private:
     // ---- solve and shade -------------------------------------------------
     struct Work {
         std::size_t solves = 0, evaluations = 0, visits = 0, hits = 0, edges = 0;
+        double facing = 1.0, grad_u = 0.0, grad_v = 0.0;   // of the last surface hit shaded for a pixel
         // Where the floor was reached by the mirror rays of the pixel to the
         // left and of the pixel above: their distance from this pixel's is
         // the size of the pixel's image on the floor. x < 0: not tracked.
@@ -2052,6 +2057,12 @@ private:
             hit.v = float(best.v);
             hit.t = float(best.t);
             hit.part = best_part;
+            // For the edge pass: how squarely the surface faces the ray, and the parameters' change per pixel.
+            const Vec3 across = cross(best.point.du, best.point.dv);
+            const double size = length(across);
+            work.facing = size > 1e-12 ? std::fabs(dot(across, normalize(dir))) / size : 1.0;
+            work.grad_u = best.grad_u;
+            work.grad_v = best.grad_v;
             return shade_surface(scene, options, view, dir, best, best_part, 0, work);
         }
         if (!(ground_t > 0.0)) { return options.gloss || options.floor_reflection ? sky(scene, view.eye, dir) : background(dir); }
@@ -2098,6 +2109,8 @@ private:
             out[2] = to_byte(colour.z);
             out[3] = 255;
         };
+        const bool blend_edges = options.edge_samples && !options.show_work && options.edge_mode == 2 && !scene.cut;
+        if (blend_edges) { edge_side_.resize(std::size_t(width) * std::size_t(height) * 6); }
         parallel_rows(height, options.threads, [&](int begin, int end, int worker) {
             Work work;
             for (int y = begin; y < end; ++y) {
@@ -2108,6 +2121,15 @@ private:
                     work.x = x;
                     Vec3 colour = sample(scene, view, mirror, mirror_ready, options, x + 0.5, y + 0.5, pixel, work, hit);
                     if (hit.t > 0.0f) { ++work.hits; }
+                    if (blend_edges) {
+                        float* side = &edge_side_[pixel * 6];
+                        side[0] = float(colour.x);
+                        side[1] = float(colour.y);
+                        side[2] = float(colour.z);
+                        side[3] = float(work.facing);
+                        side[4] = float(work.grad_u);
+                        side[5] = float(work.grad_v);
+                    }
                     if (options.show_work) {
                         const int amount = hit.solves;
                         colour = amount == 0 ? colour * 0.35 : amount <= 1 ? Vec3{0.20, 0.45, 0.85} : amount <= 2 ? Vec3{0.95, 0.65, 0.15} : Vec3{0.85, 0.15, 0.2};
@@ -2122,7 +2144,82 @@ private:
             total.visits += work.visits;
             total.hits += work.hits;
         });
-        if (options.edge_samples && !options.show_work) {
+        if (blend_edges) {
+            // Edges by their two sides. Across an edge the two pixels' rays are already solved and
+            // shaded: one shows the nearer surface, the other what lies behind it. The pixel the
+            // edge passes through is a mix of the two colours by how much of it the nearer surface
+            // covers. That surface ends s pixels from its own pixel's centre toward the other, and
+            // covers min(1, 1/2 + s) of its own pixel and max(0, s - 1/2) of the other.
+            parallel_rows(height, options.threads, [&](int begin, int end, int worker) {
+                std::size_t edges = 0;
+                Work work;
+                for (int y = begin; y < end; ++y) {
+                    for (int x = 0; x < width; ++x) {
+                        const std::size_t pixel = std::size_t(y) * std::size_t(width) + std::size_t(x);
+                        const Hit& here = frame.hits[pixel];
+                        const float* mine = &edge_side_[pixel * 6];
+                        const bool a = here.t > 0.0f && here.part != 0xffff;
+                        // Where the surface at pixel (px, py) ends, in pixels from its centre toward (dx, dy):
+                        // rays between the two centres are tried against that surface, each starting from
+                        // the pixel's own hit; two halvings place the end to an eighth of a pixel.
+                        const auto ends_at = [&](int px, int py, int dx, int dy) {
+                            const Hit& hit = frame.hits[std::size_t(py) * std::size_t(width) + std::size_t(px)];
+                            const auto covers = [&](double s) {
+                                Solve attempt;
+                                attempt.u = hit.u;
+                                attempt.v = hit.v;
+                                ++work.solves;
+                                const bool ok = solve_ray(*scene.parts[hit.part].surface, view, view.ray(px + 0.5 + dx * s, py + 0.5 + dy * s), options.tolerance_px,
+                                                          options.one_step_px + 0.45, 3.0 * lattices_[hit.part].step + 0.5, attempt, lattices_[hit.part].step,
+                                                          options.one_step_error_px);
+                                work.evaluations += std::size_t(attempt.evaluations);
+                                return ok && !hidden(scene.parts[hit.part], attempt.u, attempt.v) && std::fabs(attempt.t - double(hit.t)) <= 0.02 * double(hit.t) + 0.05;
+                            };
+                            double low = 0.0, high = 1.0;
+                            for (int step = 0; step < 2; ++step) {
+                                const double middle = 0.5 * (low + high);
+                                if (covers(middle)) { low = middle; } else { high = middle; }
+                            }
+                            return 0.5 * (low + high);
+                        };
+                        double weight[4] = {0, 0, 0, 0}, total = 0.0;
+                        const int offsets[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+                        for (int k = 0; k < 4; ++k) {
+                            const int nx = x + offsets[k][0], ny = y + offsets[k][1];
+                            if (nx < 0 || ny < 0 || nx >= width || ny >= height) { continue; }
+                            const Hit& there = frame.hits[std::size_t(ny) * std::size_t(width) + std::size_t(nx)];
+                            const bool b = there.t > 0.0f && there.part != 0xffff;
+                            if (!a && !b) { continue; }
+                            const bool jump = a != b || std::fabs(here.t - there.t) > 0.004f * here.t + 0.02f;
+                            if (!jump) { continue; }   // the same sheet, or two sheets meeting: no edge of coverage
+                            const bool mine_nearer = a && (!b || here.t < there.t);
+                            if (mine_nearer) {
+                                const double s = ends_at(x, y, offsets[k][0], offsets[k][1]);
+                                weight[k] = s < 0.5 ? 0.5 - s : 0.0;          // the part of this pixel past the surface's end
+                            } else {
+                                const double s = ends_at(nx, ny, -offsets[k][0], -offsets[k][1]);
+                                weight[k] = s > 0.5 ? s - 0.5 : 0.0;          // the part of this pixel the neighbour's surface covers
+                            }
+                            total += weight[k];
+                        }
+                        if (!(total > 0.0)) { continue; }
+                        ++edges;
+                        const double scale = total > 0.75 ? 0.75 / total : 1.0;
+                        Vec3 colour = Vec3{mine[0], mine[1], mine[2]} * (1.0 - total * scale);
+                        for (int k = 0; k < 4; ++k) {
+                            if (weight[k] > 0.0) {
+                                const float* other = &edge_side_[(std::size_t(y + offsets[k][1]) * std::size_t(width) + std::size_t(x + offsets[k][0])) * 6];
+                                colour = colour + Vec3{other[0], other[1], other[2]} * (weight[k] * scale);
+                            }
+                        }
+                        write(pixel, colour);
+                    }
+                }
+                totals[std::size_t(worker)].edges += edges;
+                totals[std::size_t(worker)].solves += work.solves;
+                totals[std::size_t(worker)].evaluations += work.evaluations;
+            });
+        } else if (options.edge_samples && !options.show_work) {
             // Edges: a pixel whose neighbour shows another part, another sheet
             // or no surface gets four more samples on a rotated grid. Their
             // rays stay within the reach of the pixel's own predictions.
@@ -2721,6 +2818,7 @@ private:
     int lattice_k_ = 0;
     std::uint64_t shadow_version_ = 0; // mesh version the shadow map was drawn from; 0: from the lattices
     Visibility visibility_, cut_visibility_;
+    std::vector<float> edge_side_;   // per pixel: its linear colour, the cosine at its hit, and u's and v's change per pixel
     Mesh cut_mesh_;
     std::vector<float> triangle_lod_;
 

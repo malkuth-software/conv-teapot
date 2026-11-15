@@ -1,0 +1,24 @@
+Edges by their two sides, 2026-11-15 (ray tracer, transport; unified teapot, 960x600; a loaded machine)
+
+An edge pixel was finished by four more samples, each solved from the pixel's predictions.
+Now (RenderOptions::edge_mode 2) it is a mix of its own colour and its neighbour's across the edge,
+by how much of the pixel the nearer surface covers. Where that surface ends between the two pixel
+centres is found by two rays tried against it from the nearer pixel's own hit (to an eighth of a pixel).
+
+Against a reference of nine samples a pixel (2880x1800 averaged), rms error in 8-bit units over the
+pixels the four samples change:
+  view            no edges   four samples   two sides
+  default           13.5         9.5           9.7
+  close             16.4         9.9          11.0
+  from above        17.9        12.5          11.3
+  1976 version      14.2         9.2          10.7
+On the further pixels only the new way changes: 11.7 -> 6.0 (default), 16.0 -> 5.0 (from above),
+8.8 -> 8.4 (close), 7.4 -> 7.8 (1976).
+
+Surface evaluations a frame, default view: 179 398 with no edges, 366 323 with four samples,
+242 864 with two sides. Frame on one thread: 151 to 189 ms -> 115 to 122 ms (default view),
+354 to 393 -> 266 to 318 ms (chrome on a polished floor), unchanged in a close view.
+
+Tried first and dropped: placing the edge with no rays, from the cosine at the hit and at the pixel
+one further in (c^2 = 2 k s) and from the hit's distance to the end of its sheet. It fails where the
+surface's curvature changes within a pixel (rims, lips): rms 11.6 where four samples give 9.5.

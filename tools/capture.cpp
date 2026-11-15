@@ -192,6 +192,7 @@ int main(int argc, char** argv) {
     options.material = int(number("material", 0));
     options.subdivision = int(number("k", 4));
     options.one_step_error_px = number("steperror", 0.02);
+    options.edge_mode = int(number("edges", 2));
     options.threads = int(number("threads", 0));
     options.one_step_px = number("onestep", 0.35);
 
