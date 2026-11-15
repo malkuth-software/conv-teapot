@@ -1,0 +1,22 @@
+Bakes for the ray tracer, 2026-11-15 (a loaded machine: ratios are firmer than times)
+
+1. Cells baked as polynomials (src/surface.hpp, bake_linear)
+   Where the admission across the rows clips nothing for any s of a cell and the bubble's fitted
+   amplitude is within its bound, the cell's coordinate is sum_k L_k(t) w_k(s). Found once at
+   compile() by bounding every compared quantity over each quarter of the cell from its Bernstein
+   controls. 64 to 87% of (cell, coordinate) pairs pass on the unified teapot.
+   tools/eval_bench: body 427 -> 283 ns, joins about 2100 -> 950 ns, checksums equal to 1e-15.
+   Traced pictures byte-identical in four views. Traced frame, 960x600, one thread: 405 -> 252 ms
+   of processor time.
+
+2. Ray tracer reads the baked light maps (RenderOptions::traced_baked_light, page key 44)
+   The lit fraction and the room's light at a hit come from the maps at the hit's (u, v).
+   The traced picture gains the baked renderer's occlusion and thrown light. 3% fewer surface
+   evaluations (229 137 -> 221 436 at 640x400): no real change in time.
+
+3. Light as a CONV sheet: not adopted (capture ... light=1 lightsheet=1)
+   The lit fraction held at every n-th texel, joined by CONV against bilinear joining:
+     n = 2: rms 0.0493 against 0.0485
+     n = 4: rms 0.0771 against 0.0756
+     n = 8: rms 0.1164 against 0.1112
+   CONV went outside [0, 1] by up to 0.28 at shadow edges; about 150 ns a lookup.

@@ -1100,42 +1100,6 @@ Skipping tree boxes behind the tangent plane a mirror ray leaves gained
 nothing, since the boxes such a ray meets are those round its own
 origin, and was withdrawn.
 
-\subsection{Cells baked as polynomials}
-
-Across the rows a cell's coordinate is admitted from eight row values at
-every evaluation, because those values depend on the parameter along the
-row. Where the admission clips nothing for any value of that parameter in
-the cell, and the bubble's fitted amplitude is within its bound, the
-admitted currents are the raw ones and the coordinate is a fixed
-combination of the rows, $\sum_k L_k(t)\,w_k(s)$: a polynomial. Such
-pairs of cell and coordinate are found once when the surface is compiled.
-Every quantity the admission compares is itself a polynomial in $s$, a
-combination of the rows' cells; its range over each quarter of the cell
-is bounded from its Bernstein controls, and the comparisons are required
-to hold between those ranges. A pair that passes is evaluated as the
-polynomial and is the same surface to rounding; the others keep the
-admission. On the unified teapot 64 to 87\,\% of the pairs pass. An
-evaluation on the body goes from 427 to 283\,ns and on a join from 2100
-to 950 (the same run on a loaded machine), the traced pictures are
-byte-identical in four views, and a traced frame at $960\times600$ on one
-thread takes 252\,ms of processor time where it took 405.
-
-\subsection{Baked light under traced rays}
-
-The light maps are indexed by the surface's own parameters, not by the
-triangles they were baked through, so the ray tracer can read them at a
-hit's $(u,v)$. With a bake that is still good it takes the lit fraction
-and the room's light from the maps and keeps everything else traced: the
-surface, its silhouettes, normals and reflections. The traced picture
-then has the occlusion and thrown light that only the baked renderer had.
-It saves little time, 3\,\% of the surface evaluations, since most
-shadow answers already came from the shadow map. Holding the lit
-fraction at every $n$-th texel and joining it again by CONV was tried
-against joining it bilinearly ($n=2,4,8$): its error was no smaller
-(rms 0.049 against 0.049, 0.077 against 0.076, 0.116 against 0.111), it
-went outside $[0,1]$ by up to 0.28 at shadow edges, and a lookup cost
-150\,ns. Light stays in texels.
-
 \section{Baked Vertices}
 \label{sec:baked}
 
