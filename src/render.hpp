@@ -2501,22 +2501,27 @@ private:
             }
             colour = shade_surface(scene, options, view, dir, solve, part, 0, work);
         }
-        if (options.mesh_lines) {
-            // Distance to the nearest edge of the triangle, in pixels.
-            const double scale = double(visibility_.scale);
-            const double x[3] = {visibility_.sx[corner[0]], visibility_.sx[corner[1]], visibility_.sx[corner[2]]};
-            const double y[3] = {visibility_.sy[corner[0]], visibility_.sy[corner[1]], visibility_.sy[corner[2]]};
-            const double area2 = std::fabs((x[1] - x[0]) * (y[2] - y[0]) - (x[2] - x[0]) * (y[1] - y[0]));
-            const double l[3] = {1.0 - double(sample.l1) - double(sample.l2), double(sample.l1), double(sample.l2)};
-            double nearest = 1e30;
-            for (int k = 0; k < 3; ++k) {
-                const double edge = std::hypot(x[(k + 1) % 3] - x[(k + 2) % 3], y[(k + 1) % 3] - y[(k + 2) % 3]);
-                nearest = std::min(nearest, l[k] * area2 / (edge > 1e-9 ? edge : 1e-9) / scale);
-            }
-            const double ink = 1.0 - smoothstep(0.2, 0.9, nearest);
-            colour = colour * (1.0 - 0.7 * ink) + Vec3{0.10, 0.22, 0.42} * (0.7 * ink);
-        }
         return colour;
+    }
+
+    // The triangle edges are a drawing of their own, laid over the shaded picture: how much
+    // ink one sample of the visibility buffer carries (0 where it shows no triangle). It reads
+    // only the buffer, so drawing the edges shades nothing again.
+    double line_ink(const Mesh& mesh, const VisibilitySample& sample) const {
+        if (sample.triangle == 0xffffffffu) { return 0.0; }
+        const std::uint32_t* corner = &mesh.triangles[std::size_t(sample.triangle) * 3];
+        // Distance to the nearest edge of the triangle, in pixels.
+        const double scale = double(visibility_.scale);
+        const double x[3] = {visibility_.sx[corner[0]], visibility_.sx[corner[1]], visibility_.sx[corner[2]]};
+        const double y[3] = {visibility_.sy[corner[0]], visibility_.sy[corner[1]], visibility_.sy[corner[2]]};
+        const double area2 = std::fabs((x[1] - x[0]) * (y[2] - y[0]) - (x[2] - x[0]) * (y[1] - y[0]));
+        const double l[3] = {1.0 - double(sample.l1) - double(sample.l2), double(sample.l1), double(sample.l2)};
+        double nearest = 1e30;
+        for (int k = 0; k < 3; ++k) {
+            const double edge = std::hypot(x[(k + 1) % 3] - x[(k + 2) % 3], y[(k + 1) % 3] - y[(k + 2) % 3]);
+            nearest = std::min(nearest, l[k] * area2 / (edge > 1e-9 ? edge : 1e-9) / scale);
+        }
+        return 1.0 - detail::smoothstep(0.2, 0.9, nearest);
     }
 
     void render_mesh(const Scene& scene, const detail::View& view, const RenderOptions& options, Frame& frame) {
@@ -2596,20 +2601,32 @@ private:
                     Hit hit;
                     Vec3 colour;
                     work.x = flat ? x : -1;
-                    if (flat && !options.mesh_lines) {
+                    double ink = 0.0;   // of the triangle edges, over the samples that show the mesh
+                    const auto shows_mesh = [](const Hit& h) { return h.t > 0.0f && h.part != 0xffff; };
+                    if (flat) {
                         // Seeded rays go through the pixel's centre; the mesh alone is read at its first sample.
                         const double offset = options.method == Method::seeded ? 0.5 : 0.5 / scale;
                         colour = shade_visible(scene, options, view, first, x + offset, y + offset, hit, work);
+                        if (options.mesh_lines && shows_mesh(hit)) {
+                            for (int k = 0; k < scale * scale; ++k) { ink += line_ink(mesh, visibility_.at(x * scale + k % scale, y * scale + k / scale)); }
+                        }
                     } else {
                         Vec3 sum{};
                         for (int k = 0; k < scale * scale; ++k) {
                             Hit other;
                             sum = sum + shade_visible(scene, options, view, visibility_.at(x * scale + k % scale, y * scale + k / scale),
                                                       x + (k % scale + 0.5) / scale, y + (k / scale + 0.5) / scale, k == 0 ? hit : other, work);
+                            if (options.mesh_lines && shows_mesh(k == 0 ? hit : other)) {
+                                ink += line_ink(mesh, visibility_.at(x * scale + k % scale, y * scale + k / scale));
+                            }
                             if (k > 0 && hit.t <= 0.0f && other.t > 0.0f) { hit = other; }
                         }
                         colour = sum * (1.0 / double(scale * scale));
                         if (!flat) { ++edges; }
+                    }
+                    if (ink > 0.0) {
+                        ink *= 0.7 / double(scale * scale);
+                        colour = colour * (1.0 - ink) + Vec3{0.10, 0.22, 0.42} * ink;
                     }
                     if (hit.t > 0.0f) { ++hits; }
                     frame.hits[pixel] = hit;
