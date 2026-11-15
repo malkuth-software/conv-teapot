@@ -1296,8 +1296,9 @@ private:
         const Vec3 base = checker(p, width);
         double light = 1.0;
         if (options.lighting) {
-            const bool baked = options.method == Method::raster && options.baked_light && scene.mesh != nullptr && scene.mesh->lit && scene.mesh->lit_diffuse_only &&
-                               scene.mesh->floor.size != 0;
+            // The floor's shadow from the bake: for the baked renderer, and for a ray tracer that reads the bake.
+            const bool baked = ((options.method == Method::raster && options.baked_light) || (options.traced_baked_light && !options.diffuse_only)) &&
+                               scene.mesh != nullptr && scene.mesh->lit && scene.mesh->lit_diffuse_only && scene.mesh->floor.size != 0;
             const double lit = !options.shadows ? 1.0
                                : baked ? floor_lit_baked(scene, p)
                                : primary != nullptr ? shadow_lit(scene, options, *primary, p + Vec3{0.0, 0.004, 0.0}, 0.02, t / primary->focal, Vec3{1, 0, 0}, Vec3{0, 0, 1}, std::uint16_t(0xffff), 0.0, 0.0, *work)
