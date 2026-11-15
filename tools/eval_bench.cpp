@@ -30,7 +30,8 @@ int main(int argc, char** argv) {
             }
             best = std::min(best, std::chrono::duration<double, std::nano>(std::chrono::steady_clock::now() - start).count() / count);
         }
-        std::printf("%-12s %7.1f ns an evaluation, sum %.17g\n", part->name.c_str(), best, sum);
+        std::printf("%-12s %7.1f ns an evaluation, sum %.17g, %.1f%% of cells' coordinates baked as polynomials\n", part->name.c_str(), best, sum,
+                    100.0 * part->conv.linear_share());
     }
     return 0;
 }

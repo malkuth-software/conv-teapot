@@ -413,6 +413,49 @@ template<class T> Cell<T> compile_cell(const T* w, const CellShape& shape, Bubbl
     return cell;
 }
 
+// The part of a cell that is linear in its window: the raw currents, what the
+// admission compares them with, and the bubble's fitted amplitude when nothing
+// has been clipped (then the admitted currents are the raw ones). T needs only
+// sums, differences and products with numbers.
+template<class T> struct RawCell {
+    T a[5];
+    T delta, prev_delta, next_delta, prev_last, next_first, fit;
+};
+
+template<class T> RawCell<T> raw_cell(const T* w, const CellShape& shape, Bubble bubble) {
+    RawCell<T> raw;
+    const T zero(0.0);
+    T ml, ql, mr, qr;
+    detail::jet(w + 3, shape.left, ml, ql);
+    detail::jet(w + 4, shape.right, mr, qr);
+    raw.delta = w[4] - w[3];
+    raw.a[0] = ml / 5.0;
+    raw.a[1] = ml / 5.0 + ql / 20.0;
+    raw.a[3] = mr / 5.0 - qr / 20.0;
+    raw.a[4] = mr / 5.0;
+    raw.a[2] = raw.delta - raw.a[0] - raw.a[1] - raw.a[3] - raw.a[4];
+    raw.prev_delta = shape.has_prev ? w[3] - w[2] : zero;
+    raw.next_delta = shape.has_next ? w[5] - w[4] : zero;
+    raw.prev_last = zero;
+    raw.next_first = zero;
+    if (shape.has_prev) {
+        T m = ml, q;
+        if (shape.prev != shape.left) { detail::jet(w + 3, shape.prev, m, q); }
+        raw.prev_last = m / 5.0;
+    }
+    if (shape.has_next) {
+        T m = mr, q;
+        if (shape.next != shape.right) { detail::jet(w + 4, shape.next, m, q); }
+        raw.next_first = m / 5.0;
+    }
+    raw.fit = zero;
+    if (bubble != Bubble::none && shape.six) {
+        const T fifth = (w[6] - w[1]) + 5.0 * (w[2] - w[5]) + 10.0 * (w[4] - w[3]);
+        raw.fit = (-41.0 / 30.0) * fifth;
+    }
+    return raw;
+}
+
 // The six functions a cell is a combination of, at local parameter t:
 // tau[j] = sum of the Bernstein polynomials B_r^5 for r > j, and the bubble
 // psi = [t(1-t)]^3 (2t-1).

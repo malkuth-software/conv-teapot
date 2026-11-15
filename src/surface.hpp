@@ -128,6 +128,70 @@ struct Lattice {
 // at the query. compile() caches the admitted currents of every u-cell of
 // every row; the v-factor is admitted at each query, because its inputs
 // depend on u.
+namespace detail {
+
+// A row's cell as a function of its parameter s: six quintic Bernstein controls and the bubble's amplitude.
+struct RowPoly {
+    double c[6] = {0, 0, 0, 0, 0, 0};
+    double b = 0.0;
+    RowPoly() = default;
+    RowPoly(double value) { for (double& x : c) { x = value; } }
+};
+inline RowPoly operator+(RowPoly a, const RowPoly& o) { for (int i = 0; i < 6; ++i) { a.c[i] += o.c[i]; } a.b += o.b; return a; }
+inline RowPoly operator-(RowPoly a, const RowPoly& o) { for (int i = 0; i < 6; ++i) { a.c[i] -= o.c[i]; } a.b -= o.b; return a; }
+inline RowPoly operator*(RowPoly a, double k) { for (double& x : a.c) { x *= k; } a.b *= k; return a; }
+inline RowPoly operator*(double k, RowPoly a) { return a * k; }
+inline RowPoly operator/(RowPoly a, double k) { return a * (1.0 / k); }
+
+struct Range {
+    double lo = 0.0, hi = 0.0;
+};
+inline Range operator+(Range a, Range b) { return {a.lo + b.lo, a.hi + b.hi}; }
+inline Range operator-(Range a, Range b) { return {a.lo - b.hi, a.hi - b.lo}; }
+inline Range times(Range a, double k) { return {a.lo * k, a.hi * k}; }   // k >= 0
+inline Range part_pos(Range a) { return {std::fmax(a.lo, 0.0), std::fmax(a.hi, 0.0)}; }
+inline Range part_neg(Range a) { return {std::fmax(-a.hi, 0.0), std::fmax(-a.lo, 0.0)}; }
+inline Range least(Range a, Range b) { return {std::fmin(a.lo, b.lo), std::fmin(a.hi, b.hi)}; }
+inline double least_size(Range a) { return a.lo <= 0.0 && a.hi >= 0.0 ? 0.0 : std::fmin(std::fabs(a.lo), std::fabs(a.hi)); }
+
+// The values a RowPoly takes for s in [s0, s1]: its controls restricted to that interval bound the
+// quintic, and the bubble is bounded from the ranges of its factors.
+inline Range range_of(const RowPoly& p, double s0, double s1) {
+    double left[6], tmp[6];
+    for (int i = 0; i < 6; ++i) { tmp[i] = p.c[i]; }
+    left[0] = tmp[0];
+    for (int r = 1; r <= 5; ++r) {          // [0, s1]
+        for (int i = 0; i <= 5 - r; ++i) { tmp[i] = tmp[i] * (1.0 - s1) + tmp[i + 1] * s1; }
+        left[r] = tmp[0];
+    }
+    const double u = s1 > 0.0 ? s0 / s1 : 0.0;
+    double right[6];
+    for (int i = 0; i < 6; ++i) { tmp[i] = left[i]; }
+    right[5] = tmp[5];
+    for (int r = 1; r <= 5; ++r) {          // [u, 1] of that
+        for (int i = 0; i <= 5 - r; ++i) { tmp[i] = tmp[i] * (1.0 - u) + tmp[i + 1] * u; }
+        right[5 - r] = tmp[5 - r];
+    }
+    Range out{right[0], right[0]};
+    for (int i = 1; i < 6; ++i) {
+        out.lo = std::fmin(out.lo, right[i]);
+        out.hi = std::fmax(out.hi, right[i]);
+    }
+    if (p.b != 0.0) {
+        const double g0 = s0 * (1.0 - s0), g1 = s1 * (1.0 - s1);
+        const double g_hi = s0 <= 0.5 && s1 >= 0.5 ? 0.25 : std::fmax(g0, g1), g_lo = std::fmin(g0, g1);
+        const double cube_lo = g_lo * g_lo * g_lo, cube_hi = g_hi * g_hi * g_hi;
+        const double f_lo = 2.0 * s0 - 1.0, f_hi = 2.0 * s1 - 1.0;
+        const double psi_lo = std::fmin(std::fmin(cube_lo * f_lo, cube_hi * f_lo), std::fmin(cube_lo * f_hi, cube_hi * f_hi));
+        const double psi_hi = std::fmax(std::fmax(cube_lo * f_lo, cube_hi * f_lo), std::fmax(cube_lo * f_hi, cube_hi * f_hi));
+        out.lo += std::fmin(p.b * psi_lo, p.b * psi_hi);
+        out.hi += std::fmax(p.b * psi_lo, p.b * psi_hi);
+    }
+    return out;
+}
+
+} // namespace detail
+
 class ConvSurface final : public Surface {
 public:
     Lattice lattice;
@@ -159,6 +223,12 @@ public:
     const std::vector<Cell<double>>& compiled_rows() const { return rows_; }
     const std::vector<CellShape>& shapes_along() const { return shapes_v_; }
     const std::vector<CellShape>& shapes_around() const { return shapes_u_; }
+    // The share of (cell, coordinate) pairs baked as plain polynomials (see bake_linear).
+    double linear_share() const {
+        std::size_t n = 0;
+        for (unsigned char flag : linear_) { n += flag; }
+        return linear_.empty() ? 0.0 : double(n) / double(linear_.size());
+    }
     bool reads_low(std::size_t cell) const { return outer_low_[cell] != 0; }
     bool reads_high(std::size_t cell) const { return outer_high_[cell] != 0; }
 
@@ -199,6 +269,101 @@ public:
                 }
                 for (int channel = 0; channel < 3; ++channel) {
                     rows_[(v * cu + cell) * 3 + std::size_t(channel)] = compile_cell(w[channel], shapes_u_[cell], bubble);
+                }
+            }
+        }
+        bake_linear();
+    }
+
+    // Where the admission across the rows clips nothing for any s of a cell, and the bubble's
+    // fitted amplitude is within its bound, the cell's coordinate is a fixed combination of its
+    // eight rows: sum_k L_k(t) w_k(s), a polynomial. Such (cell, coordinate) pairs are found here
+    // once and evaluated that way; the rest keep the admission. The test is made on ranges: each
+    // quantity the admission compares is itself a polynomial in s (a combination of the rows'),
+    // its range over each quarter of the cell is bounded from its controls, and the comparisons
+    // must hold between those ranges. A pair that passes is the same surface to rounding (the
+    // comparisons allow 1e-12 of the coordinate's size).
+    void bake_linear() {
+        const std::size_t cu = lattice.cells_u(), cv = lattice.cells_v();
+        weights_.assign(cv * 8 * 6, 0.0);
+        linear_.assign(cv * cu * 3, 0);
+        if (bubble != Bubble::none && bubble != Bubble::continuous) { return; }
+        for (std::size_t cell_v = 0; cell_v < cv; ++cell_v) {
+            for (int k = 0; k < 8; ++k) {
+                const long row = long(cell_v) - 3 + k;
+                if (row < 0 || row >= long(lattice.nv) || (k == 0 && !outer_low_[cell_v]) || (k == 7 && !outer_high_[cell_v])) { continue; }
+                double unit[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+                unit[k] = 1.0;
+                const RawCell<double> raw = raw_cell(unit, shapes_v_[cell_v], bubble);
+                for (int j = 0; j < 5; ++j) { weights_[(cell_v * 8 + std::size_t(k)) * 6 + std::size_t(j)] = raw.a[j]; }
+                weights_[(cell_v * 8 + std::size_t(k)) * 6 + 5] = raw.fit;
+            }
+            for (std::size_t cell_u = 0; cell_u < cu; ++cell_u) {
+                for (int channel = 0; channel < 3; ++channel) {
+                    detail::RowPoly w[8];
+                    double size = 0.0;
+                    for (int k = 0; k < 8; ++k) {
+                        const long row = long(cell_v) - 3 + k;
+                        if (row < 0 || row >= long(lattice.nv) || (k == 0 && !outer_low_[cell_v]) || (k == 7 && !outer_high_[cell_v])) { continue; }
+                        const Cell<double>& cell = rows_[(std::size_t(row) * cu + cell_u) * 3 + std::size_t(channel)];
+                        w[k].c[0] = cell.anchor;
+                        for (int j = 0; j < 5; ++j) { w[k].c[j + 1] = w[k].c[j] + cell.c[j]; }
+                        w[k].b = cell.bubble;
+                        for (double x : w[k].c) { size = std::fmax(size, std::fabs(x)); }
+                    }
+                    const RawCell<detail::RowPoly> raw = raw_cell(w, shapes_v_[cell_v], bubble);
+                    const detail::RowPoly d2 = (raw.a[0] + 8.0 * raw.a[1] + 6.0 * raw.a[2]) / 3.0;
+                    const detail::RowPoly d3 = raw.a[1] + 3.0 * raw.a[2] + raw.a[3];
+                    const detail::RowPoly d4 = (6.0 * raw.a[2] + 8.0 * raw.a[3] + raw.a[4]) / 3.0;
+                    const double slack = 1e-12 * (1.0 + size);
+                    bool holds = true;
+                    for (int piece = 0; piece < 4 && holds; ++piece) {
+                        using detail::Range;
+                        const double s0 = 0.25 * piece, s1 = 0.25 * (piece + 1);
+                        Range a[5];
+                        for (int j = 0; j < 5; ++j) { a[j] = detail::range_of(raw.a[j], s0, s1); }
+                        const Range delta = detail::range_of(raw.delta, s0, s1);
+                        const Range prev_delta = detail::range_of(raw.prev_delta, s0, s1), next_delta = detail::range_of(raw.next_delta, s0, s1);
+                        const Range prev_last = detail::range_of(raw.prev_last, s0, s1), next_first = detail::range_of(raw.next_first, s0, s1);
+                        Range room_pos[5], room_neg[5];
+                        Range head_pos = detail::least(detail::part_pos(prev_delta), detail::part_pos(detail::part_pos(a[0]) - detail::part_neg(prev_last)));
+                        Range head_neg = detail::least(detail::part_neg(prev_delta), detail::part_pos(detail::part_neg(a[0]) - detail::part_pos(prev_last)));
+                        for (int j = 0; j < 5; ++j) {
+                            head_pos = detail::least(head_pos, detail::part_pos(a[j]));
+                            head_neg = detail::least(head_neg, detail::part_neg(a[j]));
+                            room_pos[j] = head_pos;
+                            room_neg[j] = head_neg;
+                        }
+                        Range tail_pos = detail::least(detail::part_pos(next_delta), detail::part_pos(detail::part_pos(a[4]) - detail::part_neg(next_first)));
+                        Range tail_neg = detail::least(detail::part_neg(next_delta), detail::part_pos(detail::part_neg(a[4]) - detail::part_pos(next_first)));
+                        Range total_pos{}, total_neg{};
+                        for (int j = 4; j >= 0; --j) {
+                            tail_pos = detail::least(tail_pos, detail::part_pos(a[j]));
+                            tail_neg = detail::least(tail_neg, detail::part_neg(a[j]));
+                            room_pos[j] = room_pos[j] + tail_pos;
+                            room_neg[j] = room_neg[j] + tail_neg;
+                        }
+                        for (int j = 0; j < 5; ++j) {
+                            total_pos = total_pos + room_pos[j];
+                            total_neg = total_neg + room_neg[j];
+                        }
+                        const Range plus = detail::part_pos(delta), minus = detail::part_neg(delta);
+                        const Range upper_base = plus + detail::least(total_neg, detail::times(plus, 4.0));
+                        const Range lower_base = minus + detail::least(total_pos, detail::times(minus, 4.0));
+                        for (int j = 0; j < 5 && holds; ++j) {
+                            const double high_least = room_pos[j].lo + upper_base.lo;       // the least the upper limit can be
+                            const double low_most = -(room_neg[j].lo + lower_base.lo);      // the most the lower limit can be
+                            holds = a[j].hi <= high_least + slack && a[j].lo >= low_most - slack;
+                        }
+                        if (holds && bubble == Bubble::continuous) {
+                            const Range fit = detail::range_of(raw.fit, s0, s1);
+                            const double bound = std::fmin(std::fmin(5.0 * detail::least_size(detail::range_of(d2, s0, s1)),
+                                                                     2.5 * detail::least_size(detail::range_of(d3, s0, s1))),
+                                                           5.0 * detail::least_size(detail::range_of(d4, s0, s1)));
+                            holds = std::fmax(std::fabs(fit.lo), std::fabs(fit.hi)) <= bound + slack;
+                        }
+                    }
+                    linear_[(cell_v * cu + cell_u) * 3 + std::size_t(channel)] = holds ? 1 : 0;
                 }
             }
         }
@@ -289,7 +454,35 @@ private:
             for (int channel = 0; channel < 3; ++channel) { w[channel][k] = eval_cell(cells[channel], basis_s); }
         }
         double p[3], du[3], dv[3];
+        const unsigned char* baked = &linear_[(cell_v * cu + cell_u) * 3];
+        double weight[8], slope[8];
+        if (baked[0] | baked[1] | baked[2]) {
+            // L_k(t) and its derivative: the same for the three coordinates.
+            const double* table = &weights_[cell_v * 8 * 6];
+            for (int k = 0; k < 8; ++k) {
+                const double* row = table + k * 6;
+                double value = k == 3 ? 1.0 : 0.0, rate = 0.0;
+                for (int j = 0; j < 5; ++j) {
+                    value += row[j] * basis_t.tau[j].v;
+                    rate += row[j] * basis_t.tau[j].d;
+                }
+                weight[k] = value + row[5] * basis_t.psi.v;
+                slope[k] = rate + row[5] * basis_t.psi.d;
+            }
+        }
         for (int channel = 0; channel < 3; ++channel) {
+            if (baked[channel]) {
+                double value = 0.0, along = 0.0, across = 0.0;
+                for (int k = 0; k < 8; ++k) {
+                    value += weight[k] * w[channel][k].v;
+                    along += weight[k] * w[channel][k].d;
+                    across += slope[k] * w[channel][k].v;
+                }
+                p[channel] = value;
+                du[channel] = along;
+                dv[channel] = across;
+                continue;
+            }
             const Cell<Dual1> cell = compile_cell(w[channel], shapes_v_[cell_v], bubble);
             double value = cell.anchor.v, along = cell.anchor.d, across = 0.0;
             for (int j = 0; j < 5; ++j) {
@@ -340,6 +533,8 @@ private:
     std::vector<Cell<double>> rows_;
     std::vector<CellShape> shapes_u_, shapes_v_;
     std::vector<unsigned char> outer_low_, outer_high_;
+    std::vector<double> weights_;        // per v-cell and row: the five current weights and the bubble's, of that row
+    std::vector<unsigned char> linear_;  // per cell and coordinate: baked as a plain polynomial
 };
 
 // The same nodes joined bilinearly: the control mesh, for comparison.
