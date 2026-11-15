@@ -534,6 +534,8 @@ inline std::uint8_t to_byte(double linear) {
 
 class Renderer {
 public:
+    // Whether lattice pieces of a closed solid that show their inward side are left out of prediction (on by default).
+    void set_cull(bool on) { options_cull_ = on; }
     RenderStats stats;
     double routes_ms() const { return mirror_tree_.ms_routes; }
 
@@ -556,6 +558,27 @@ public:
         const bool reflect_floor = options.floor_reflection && options.ground && options.lighting && view.eye.y > scene.ground_y;
         const bool mirror_ready = reflect_floor && options.method == Method::transport;
         transport_lattices(scene, view, mirror_ready ? &mirror : nullptr, options);
+        if (options.method == Method::transport && !scene.cut) {
+            // Which side of each part is inside the material does not change when the body moves:
+            // it is found again only when the parts themselves are other ones.
+            std::uint64_t parts_key = 1469598103934665603ull;
+            for (const RenderPart& part : scene.parts) {
+                parts_key = (parts_key ^ std::uint64_t(reinterpret_cast<std::uintptr_t>(part.surface->underlying()))) * 1099511628211ull + (part.solid ? 1u : 0u);
+            }
+            if (prediction_inward_stamp_ != parts_key || prediction_inward_.size() != scene.parts.size()) {
+                find_inward(scene);
+                // For predictions a side counts as inside the material when the other side's rays got out
+                // at least twice as often: a few rays leave an open end of a tube from inside its wall.
+                // (The bake, which leaves that side unlit, asks for none at all.)
+                prediction_inward_.assign(scene.parts.size(), -1);
+                for (std::size_t k = 0; k < scene.parts.size(); ++k) {
+                    const int zero = open_counts_[k * 2], one = open_counts_[k * 2 + 1];
+                    if (one >= 20 && zero * 2 <= one) { prediction_inward_[k] = 0; }
+                    if (zero >= 20 && one * 2 <= zero) { prediction_inward_[k] = 1; }
+                }
+                prediction_inward_stamp_ = parts_key;
+            }
+        }
         build_shadow_map(scene, options);
         stats.ms_lattice = now_ms() - start;
         std::fill(frame.hits.begin(), frame.hits.end(), Hit{});
@@ -717,10 +740,14 @@ private:
     }
 
     static void predict_triangle(Candidate* all, std::uint8_t* counts, int width, int row_begin, int row_end, std::uint16_t part,
-                                 float step, const float* a, const float* b, const float* c, std::size_t& added) {
+                                 float step, const float* a, const float* b, const float* c, std::size_t& added, double facing = 0.0) {
         // Each corner: screen x, y, depth, u, v.
         const double area = double(b[0] - a[0]) * double(c[1] - a[1]) - double(b[1] - a[1]) * double(c[0] - a[0]);
         if (std::fabs(area) < 1e-9) { return; }
+        // `facing`: the sign of the area of a piece that shows its outward side, for a part
+        // of a closed solid (0: not known). A piece turned the other way by more than a
+        // sliver shows its inward side, which is inside the material: it predicts nothing.
+        if (facing != 0.0 && area * facing < -0.02) { return; }
         const double dilate = 0.6; // pixels: the prediction may sit just outside its cell
         const int x0 = std::max(0, int(std::floor(std::min({a[0], b[0], c[0]}) - dilate)));
         const int x1 = std::min(width - 1, int(std::ceil(std::max({a[0], b[0], c[0]}) + dilate)));
@@ -832,8 +859,13 @@ private:
             // A cell wholly in the half a cutaway removed predicts nothing:
             // it would only take a place in the pixel's short list.
             if (!visible || gone == 4) { continue; }
-            predict_triangle(all, counts, view.width, row_begin, row_end, std::uint16_t(part), step, corner[0], corner[1], corner[3], added);
-            predict_triangle(all, counts, view.width, row_begin, row_end, std::uint16_t(part), step, corner[0], corner[3], corner[2], added);
+            // On screen (y downward) a piece seen from the side its du x dv points to has negative area, and
+            // positive in the mirrored view. Which side of a part of a closed solid is outward is found
+            // once for the scene by trial (find_inward): the other side is inside the material.
+            const int inside = options_cull_ && !scene.cut && part < prediction_inward_.size() ? prediction_inward_[part] : -1;
+            const double facing = inside < 0 ? 0.0 : (mirrored ? 1.0 : -1.0) * (inside == 1 ? 1.0 : -1.0);
+            predict_triangle(all, counts, view.width, row_begin, row_end, std::uint16_t(part), step, corner[0], corner[1], corner[3], added, facing);
+            predict_triangle(all, counts, view.width, row_begin, row_end, std::uint16_t(part), step, corner[0], corner[3], corner[2], added, facing);
         }
     }
 
@@ -1393,8 +1425,10 @@ private:
     // direction from that side meets the body at once. That side is never
     // seen and nothing is baked for it.
     std::vector<int> inward_;
+    std::vector<int> open_counts_;   // per part and side: how many of the trial rays got out
     void find_inward(const Scene& scene) {
         inward_.assign(scene.parts.size(), -1);
+        open_counts_.assign(scene.parts.size() * 2, 0);
         bool any = false;
         for (const RenderPart& part : scene.parts) { any = any || part.solid; }
         if (!any) { return; }
@@ -1421,6 +1455,8 @@ private:
                     }
                 }
             }
+            open_counts_[k * 2] = open[0];
+            open_counts_[k * 2 + 1] = open[1];
             if (tried > 8 && open[0] == 0 && open[1] > 0) { inward_[k] = 0; }
             if (tried > 8 && open[1] == 0 && open[0] > 0) { inward_[k] = 1; }
         }
@@ -2819,6 +2855,9 @@ private:
     int lattice_k_ = 0;
     std::uint64_t shadow_version_ = 0; // mesh version the shadow map was drawn from; 0: from the lattices
     Visibility visibility_, cut_visibility_;
+    bool options_cull_ = true;
+    std::vector<int> prediction_inward_;   // per part: the side inside the material, for the predictions (-1: not known)
+    std::uint64_t prediction_inward_stamp_ = 0;
     std::vector<float> edge_side_;   // per pixel: its linear colour, the cosine at its hit, and u's and v's change per pixel
     Mesh cut_mesh_;
     std::vector<float> triangle_lod_;

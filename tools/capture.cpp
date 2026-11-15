@@ -208,6 +208,7 @@ int main(int argc, char** argv) {
     Frame frame;
     frame.resize(width, height);
     Renderer renderer;
+    renderer.set_cull(number("cull", 1) != 0);
     Mesh mesh;
     options.traced_baked_light = number("bakedlight", 1) != 0;
     if (options.method == Method::raster || options.method == Method::seeded || number("light", 0) != 0) {

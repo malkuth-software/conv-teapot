@@ -22,3 +22,21 @@ Surface evaluations a frame, default view: 179 398 with no edges, 366 323 with f
 Tried first and dropped: placing the edge with no rays, from the cosine at the hit and at the pixel
 one further in (c^2 = 2 k s) and from the hit's distance to the end of its sheet. It fails where the
 surface's curvature changes within a pixel (rims, lips): rms 11.6 where four samples give 9.5.
+
+Prediction, 2026-11-15: lattice pieces of a closed solid that show their inward side are left out
+
+Every lattice cell was drawn into the pixels' candidate lists as two triangles, the far side of the
+teapot and the inner wall behind the outer one included. A piece of a closed solid that is turned
+so as to show the side inside the material cannot be seen, and now predicts nothing. Which side
+that is, is found once per set of parts by trial rays (find_inward); for predictions the side whose
+rays got out less than half as often as the other's is taken as inside.
+
+Unified teapot, 960x600, one thread (a loaded machine):
+  view                     candidates          prediction        frame
+  default                  419 130 -> 216 382   47 -> 21 ms       148-164 -> 119-131 ms
+  close                  2 146 735 -> 1 078 742 85-110 -> 34-44   359-452 -> 291-349 ms
+  chrome, polished floor   742 742 -> 384 982   67 -> 34 ms       271-273 -> 233-240 ms
+Pictures: 17 to 155 pixels of 576 000 differ by more than 16 of 255, on edges; against nine samples
+a pixel those pixels are nearer the reference in two of three views (19 against 29, 15 against 29)
+and further in the close one (30 against 21). The 1976 and 66-lattice versions are not closed
+solids and are unchanged.
