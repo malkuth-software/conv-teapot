@@ -366,11 +366,47 @@ This is exactly the ordered composition of \cite{convpaper}, not an
 approximation of it; the ledger form could not be evaluated this way,
 since its sign ledger needs the whole line.
 
+Step~2 need not be admitted where it has nothing to do.
+
+\begin{proposition}[Inactive cells are polynomial]
+\label{prop:inactive}
+For one coordinate of cell $(i,j)$ let $a_r(s)$, $r=0,\ldots,4$, be the
+raw currents of step~2, $[\ell_r(s),h_r(s)]$ the interval admission clips
+$a_r$ to, $f(s)$ the bubble's fitted amplitude and $b(s)$ its bound. If
+$\ell_r(s)\le a_r(s)\le h_r(s)$ for every $r$ and $|f(s)|\le b(s)$, for
+all $s\in[0,1]$, then on the cell
+\[ S(s,t)=\sum_{l=j-3}^{j+4} L_l(t)\,R_l(s), \]
+where the $L_l$ are polynomials of degree at most seven fixed by the
+cell's stencils.
+\end{proposition}
+\begin{proof}
+Clipping leaves the raw currents as they are. They sum to the cell's
+increment, so the residual is zero and the common shift vanishes: the
+admitted currents are the raw ones. The fitted amplitude is then its
+six-sample term, and by hypothesis the limiter returns it. Raw currents
+and that term are linear in the window $R_{j-3},\ldots,R_{j+4}$, and the
+cell is linear in them with coefficients polynomial in $t$.
+\end{proof}
+
+The hypothesis is tested once per lattice. Each of $a_r$, the neighbour
+quantities from which $\ell_r$ and $h_r$ are formed, $f$ and the three
+derivative coefficients that give $b$ is a linear combination of the
+rows' cells, hence a polynomial in $s$ whose Bernstein controls are the
+same combination of theirs. Its range on a subinterval of $[0,1]$ is
+bounded by its controls there, and the inequalities are required between
+those bounds. The test is sufficient, not necessary. Where it passes, a
+point costs the 24 polynomial evaluations and eight weights $L_l(t)$
+shared by the three coordinates, and no admission; on the unified teapot
+of Section~\ref{sec:unified} it passes for 64 to 87\,\% of the cells'
+coordinates, part by part.
+
 \emph{Derivatives.} Admission is piecewise affine, so forward-mode
 differentiation through its minima and maxima is exact wherever a
-derivative exists. We evaluate both steps on dual numbers that carry
-$\partial/\partial s$ and $\partial/\partial t$ and obtain $S_u$ and $S_v$
-with the point. The normal is their cross product.
+derivative exists. Step~1 and the admission of step~2 are evaluated on
+dual numbers that carry $\partial/\partial s$; the rows do not depend on
+$t$, so $\partial/\partial t$ is the derivative of the cell's basis.
+This gives $S_u$ and $S_v$ with the point. The normal is their cross
+product.
 
 \emph{Regularity.} Within a part the surface is continuous
 (Theorem~\ref{thm:symmetric}). Where admission and the limiter are
@@ -1070,35 +1106,6 @@ reflecting the floor and its own handle and spout.}
 more. Right: a checker mapped in patch coordinates.}
 \label{fig:work}
 \end{figure}
-
-\subsection{An audit of the loops}
-
-The loops of the CPU renderer were read against a list of what makes a
-tight kernel fast: bookkeeping paid once per block, each datum found
-once, the shape fixed before the loop, and work handed out so that no
-core waits for another. Five changes came of it, each giving the same
-picture byte for byte on one thread. A surface point carried its value
-and both derivatives through the admission across the rows; the rows'
-values do not depend on the parameter across them, whose derivative
-comes from the basis alone, so the admission now carries two numbers
-and an evaluation takes 275\,ns where it took 374. The predictions were
-written by 24 bands of rows that each scanned every lattice cell, with
-six threads taking one chunk each, so that on a processor with two fast
-cores and four slow ones a slow core set the time; the cells are now
-filed once under bands of eight rows, which are handed out a few at a
-time. In the prediction's pixel loop, what is constant along a row or
-over a triangle is found before it. A trim's loop is tested against its
-box first. For the unified teapot at $960\times600$ a frame by transport
-went from 94 to 60\,ms on six threads and from 292 to 184\,ms on one,
-chrome from 161 to 114\,ms, and the per-ray method from 142 to 115\,ms,
-on a loaded machine, best of alternated runs
-(\texttt{results/cpu\_audit.txt}). The baked renderer's frame did not
-change. One defect was found: the band test allowed one row beyond a
-cell where a prediction can reach two, so a few predictions were lost at
-each band's edge and the picture depended on the number of threads.
-Skipping tree boxes behind the tangent plane a mirror ray leaves gained
-nothing, since the boxes such a ray meets are those round its own
-origin, and was withdrawn.
 
 \section{Baked Vertices}
 \label{sec:baked}
